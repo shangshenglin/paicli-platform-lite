@@ -1,0 +1,97 @@
+package com.paicli.platform.server.api;
+
+import com.paicli.platform.server.domain.RunEventRecord;
+import com.paicli.platform.server.domain.RunRecord;
+import com.paicli.platform.server.sse.SseEventService;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
+import com.paicli.platform.server.tool.ToolRouter;
+import com.paicli.platform.server.model.ModelClient;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/v1")
+public class RunController {
+    private final SqliteRuntimeStore store;
+    private final SseEventService sseEventService;
+    private final ToolRouter toolRouter;
+    private final ModelClient modelClient;
+
+    public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
+                         ToolRouter toolRouter, ModelClient modelClient) {
+        this.store = store;
+        this.sseEventService = sseEventService;
+        this.toolRouter = toolRouter;
+        this.modelClient = modelClient;
+    }
+
+    @PostMapping("/sessions/{sessionId}/runs")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public RunRecord createRun(@PathVariable String sessionId,
+                               @Valid @RequestBody ApiDtos.CreateRunRequest request) {
+        return store.createRun(sessionId, request.input(), request.thinkingMode(), request.reasoningEffort(),
+                request.attachmentIds());
+    }
+
+    @GetMapping("/runs/{runId}")
+    public RunRecord getRun(@PathVariable String runId) {
+        return requireRun(runId);
+    }
+
+    @PostMapping("/runs/{runId}/cancel")
+    public Map<String, Object> cancel(@PathVariable String runId) {
+        requireRun(runId);
+        List<String> canceledRuns = store.cancelRunTree(runId);
+        boolean modelRequestCanceled = false;
+        for (String canceledRun : canceledRuns) {
+            modelRequestCanceled |= modelClient.cancel(canceledRun);
+            toolRouter.release(canceledRun);
+        }
+        return Map.of("id", runId, "canceled", canceledRuns.contains(runId),
+                "canceledRunIds", canceledRuns, "modelRequestCanceled", modelRequestCanceled);
+    }
+
+    @GetMapping("/runs/{runId}/timeline")
+    public List<RunEventRecord> timeline(@PathVariable String runId,
+                                         @RequestParam(defaultValue = "0") long after) {
+        requireRun(runId);
+        return store.events(runId, after);
+    }
+
+    @GetMapping(value = "/runs/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter events(@PathVariable String runId,
+                             @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
+                             @RequestParam(required = false) Long after) {
+        long cursor = after == null ? parseEventId(lastEventId) : Math.max(0, after);
+        return sseEventService.open(runId, cursor);
+    }
+
+    private RunRecord requireRun(String runId) {
+        return store.findRun(runId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "run not found"));
+    }
+
+    private static long parseEventId(String value) {
+        if (value == null || value.isBlank()) return 0;
+        try {
+            return Math.max(0, Long.parseLong(value));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+}

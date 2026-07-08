@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PaiCLI</title>
+  <link rel="stylesheet" href="/app.css?v=20260705-capabilities">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="logo">π</div>
+      <div><strong>PaiCLI</strong><small>Managed Agent Runtime</small></div>
+    </div>
+    <button class="primary new" id="new">＋ 新建对话</button>
+    <div class="list-title">
+      <div class="label">历史对话</div>
+      <button class="text-button" id="newGroup">＋ 分组</button>
+    </div>
+    <div class="sessions" id="sessions"></div>
+    <div class="side-foot">
+      <button class="secondary" id="capabilities">能力管理</button>
+      <button class="secondary" id="settings">连接设置</button>
+      <a class="secondary" href="/docs">API 文档</a>
+    </div>
+  </aside>
+  <section class="workspace" id="workspace">
+    <main class="chat">
+      <header class="header">
+        <button class="secondary menu" id="menu">☰</button>
+        <div class="title">
+          <strong id="chatTitle">新对话</strong>
+          <span class="meta" id="runMeta">尚未开始任务</span>
+        </div>
+        <span class="status" id="status">空闲</span>
+        <button class="secondary" id="toggle">执行详情</button>
+      </header>
+      <div class="messages" id="messages"><div class="stack" id="stack"></div></div>
+      <div class="compose">
+        <div class="approvals" id="approvals"></div>
+        <div class="model-controls">
+          <span>深度思考</span>
+          <button class="mode-button" data-thinking="disabled">关闭</button>
+          <button class="mode-button" data-thinking="enabled">开启</button>
+          <span class="effort-label">推理等级</span>
+          <button class="mode-button" data-effort="high">高</button>
+          <button class="mode-button" data-effort="max">最高</button>
+        </div>
+        <div class="attachment-preview" id="attachmentPreview"></div>
+        <div class="composer-box" id="composer">
+          <button class="attach-button" id="attach" title="添加图片或文档" aria-label="添加图片或文档">＋</button>
+          <input id="attachmentInput" type="file" multiple hidden
+                 accept="image/png,image/jpeg,image/gif,.txt,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.htm,.json,.xml,.rtf,.epub,.odt,.ods,.odp">
+          <textarea id="input" rows="1" placeholder="给 PaiCLI 发送消息…"></textarea>
+          <button class="primary send" id="send">↑</button>
+          <button class="primary send stop" id="stop">■</button>
+        </div>
+        <div class="notice" id="notice">Enter 发送，Shift + Enter 换行</div>
+      </div>
+    </main>
+    <aside class="detail">
+      <div class="detail-head">
+        <strong>执行详情</strong><button class="secondary" id="clear">清空</button>
+      </div>
+      <div class="events" id="events"></div>
+    </aside>
+  </section>
+</div>
+<dialog id="dialog">
+  <strong>连接设置</strong>
+  <div class="hint">服务端 API Key（未启用认证时留空）</div>
+  <input id="key" type="password" autocomplete="off">
+  <div class="dialog-actions">
+    <button class="secondary" id="close">取消</button>
+    <button class="primary" id="save">保存并刷新</button>
+  </div>
+</dialog>
+<dialog id="capabilityDialog" class="wide-dialog">
+  <div class="dialog-title"><strong>能力管理</strong><button class="secondary" id="closeCapabilities">关闭</button></div>
+  <div class="hint" id="capabilityProject">当前项目：default</div>
+  <div class="capability-status" id="capabilityStatus"></div>
+  <section class="capability-section">
+    <h3>Skills</h3>
+    <p class="hint">目录会自动扫描；可粘贴仓库地址或 GitHub /tree/ Skill 目录链接。模型先看到稳定排序的索引，匹配后调用 load_skill；Skill 附带的 references、模板和脚本再通过 read_skill_resource 按需读取，不会一次性塞入上下文。</p>
+    <div class="inline-form">
+      <input id="skillGitUrl" placeholder="https://github.com/org/skill-repo.git">
+      <input id="skillName" placeholder="Skill 名称（多 Skill 仓库必填）">
+      <button class="primary" id="importSkill">从 Git 安装</button>
+      <label class="skill-scope"><input id="skillGlobal" type="checkbox"> 安装为全局 Skill（所有项目可见）</label>
+    </div>
+    <div class="managed-list" id="skillList"></div>
+  </section>
+  <section class="capability-section">
+    <h3>项目知识库</h3>
+    <p class="hint">文档按标题层级、段落、句子、代码块和表格结构分块，建立 BM25 与向量索引并用 RRF 融合去重。它与对话 Memory 分离；每轮会自动召回，也可由模型调用 search_knowledge 深入检索。</p>
+    <div class="upload-row">
+      <input id="knowledgeFiles" type="file" multiple accept=".txt,.md,.html,.htm,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.json,.xml,.rtf,.epub">
+      <button class="primary" id="uploadKnowledge">上传并索引</button>
+    </div>
+    <div class="managed-list" id="knowledgeList"></div>
+  </section>
+</dialog>
+<dialog id="groupDialog">
+  <strong>新建对话分组</strong>
+  <div class="hint">例如：工作、学习、个人</div>
+  <input id="groupName" maxlength="60" placeholder="分组名称" autocomplete="off">
+  <div class="dialog-actions">
+    <button class="secondary" id="cancelGroup">取消</button>
+    <button class="primary" id="saveGroup">创建</button>
+  </div>
+</dialog>
+<script src="/app.js?v=20260706-pdf-ocr-sse-finalize"></script>
+</body>
+</html>

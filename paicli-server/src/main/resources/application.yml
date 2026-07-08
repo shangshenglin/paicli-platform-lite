@@ -1,0 +1,88 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: paicli-platform-lite
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 30MB
+
+springdoc:
+  swagger-ui:
+    path: /docs
+  api-docs:
+    path: /v3/api-docs
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+paicli:
+  data-dir: data
+  workspace-root: data/workspaces
+  worker-count: 2
+  worker-poll-millis: 300
+  sandbox-mode: local
+  security:
+    api-key: ${PAICLI_API_KEY:}
+  model:
+    provider: ${PAICLI_MODEL_PROVIDER:demo}
+    base-url: ${PAICLI_MODEL_BASE_URL:https://api.openai.com/v1}
+    api-key: ${PAICLI_MODEL_API_KEY:}
+    model: ${PAICLI_MODEL_NAME:gpt-4o-mini}
+    max-context-tokens: ${PAICLI_MODEL_MAX_CONTEXT_TOKENS:128000}
+    max-output-tokens: ${PAICLI_MODEL_MAX_OUTPUT_TOKENS:4096}
+    summary-trigger-ratio: 0.80
+    retained-messages: 6
+    tool-result-inline-chars: 16000
+    request-timeout-seconds: 300
+    thinking-mode: ${PAICLI_MODEL_THINKING_MODE:auto}
+    reasoning-effort: ${PAICLI_MODEL_REASONING_EFFORT:}
+    max-attempts: ${PAICLI_MODEL_MAX_ATTEMPTS:3}
+    retry-base-millis: ${PAICLI_MODEL_RETRY_BASE_MILLIS:500}
+    requests-per-minute: ${PAICLI_MODEL_REQUESTS_PER_MINUTE:60}
+    fallback-model: ${PAICLI_MODEL_FALLBACK_NAME:}
+    max-run-steps: ${PAICLI_MODEL_MAX_RUN_STEPS:30}
+    max-run-tokens: ${PAICLI_MODEL_MAX_RUN_TOKENS:200000}
+  docker:
+    executable: docker
+    image: paicli-sandbox-agent:0.6.0
+    network: paicli-sandbox-internal
+    memory: 1g
+    cpus: 1.0
+    pids-limit: 128
+    startup-timeout-seconds: 30
+    command-timeout-seconds: 90
+  web:
+    enabled: ${PAICLI_WEB_ENABLED:false}
+    search-url: ${PAICLI_WEB_SEARCH_URL:}
+    api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
+    api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}
+    timeout-seconds: 20
+    max-response-chars: 100000
+  rag:
+    embedding-provider: ${PAICLI_RAG_EMBEDDING_PROVIDER:local}
+    embedding-base-url: ${PAICLI_RAG_EMBEDDING_BASE_URL:}
+    embedding-api-key: ${PAICLI_RAG_EMBEDDING_API_KEY:}
+    embedding-model: ${PAICLI_RAG_EMBEDDING_MODEL:}
+    max-file-bytes: 26214400
+    auto-retrieve: ${PAICLI_RAG_AUTO_RETRIEVE:true}
+    auto-top-k: ${PAICLI_RAG_AUTO_TOP_K:5}
+    pdf-ocr-enabled: ${PAICLI_RAG_PDF_OCR_ENABLED:true}
+    pdf-ocr-max-pages: ${PAICLI_RAG_PDF_OCR_MAX_PAGES:6}
+    pdf-ocr-dpi: ${PAICLI_RAG_PDF_OCR_DPI:150}
+  memory:
+    auto-extract: ${PAICLI_MEMORY_AUTO_EXTRACT:true}
+    retrieval-top-k: ${PAICLI_MEMORY_RETRIEVAL_TOP_K:8}
+    max-context-chars: ${PAICLI_MEMORY_MAX_CONTEXT_CHARS:12000}
+    min-confidence: ${PAICLI_MEMORY_MIN_CONFIDENCE:0.65}
+    extraction-window-messages: ${PAICLI_MEMORY_EXTRACTION_WINDOW_MESSAGES:12}
+    worker-delay-ms: ${PAICLI_MEMORY_WORKER_DELAY_MS:1000}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

@@ -1,0 +1,14 @@
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+sandbox:
+  workspace: ${SANDBOX_WORKSPACE:/workspace}
+  token: ${SANDBOX_AGENT_TOKEN:}
+  command-timeout-seconds: ${SANDBOX_COMMAND_TIMEOUT_SECONDS:60}
+
