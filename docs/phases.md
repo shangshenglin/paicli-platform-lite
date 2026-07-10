@@ -72,6 +72,7 @@
 - [x] Stable Server Tool Provider SPI behind the durable ToolCall boundary
 - [x] Project/global Skill discovery, bounded prompt index, on-demand `load_skill`, and validated HTTPS Git import
 - [x] Multi-format project document upload, Tika extraction, persisted hybrid vector index, and `search_knowledge`
+- [x] Agent-triggered `session_search` over historical project messages with BM25 and per-session summaries
 - [x] Opt-in web search/fetch with bounded responses and SSRF controls
 - [x] Remote Streamable HTTP MCP discovery/calls with namespaced tools and mandatory Approval
 - [x] Durable Multi-Agent child Runs with ToolCall idempotency, depth limit, and fair queue ordering

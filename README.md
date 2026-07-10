@@ -228,8 +228,9 @@ Content-Type: application/json
 
 ## Phase 7：Server Tool Provider 扩展
 
-新增能力没有引入第二套 Agent Loop。`load_skill`、`search_knowledge`、`web_search` / `web_fetch`、
-`mcp__{server}__{tool}`、`spawn_agent` / `get_agent_result` / `list_agents` / `cancel_agent` 都先作为普通 ToolCall
+新增能力没有引入第二套 Agent Loop。`load_skill`、`search_knowledge`、`session_search`、
+`web_search` / `web_fetch`、`mcp__{server}__{tool}`、
+`spawn_agent` / `get_agent_result` / `list_agents` / `cancel_agent` 都先作为普通 ToolCall
 原子落库，再经过原有审批、顺序执行、Event/SSE、Audit 和 Artifact 边界。
 
 - Skill：全局目录 `data/skills/{name}/SKILL.md`，项目覆盖目录
@@ -246,6 +247,8 @@ Content-Type: application/json
   Ollama/OpenAI-compatible 提供真实向量；未配置时明确降级为本地词法投影，不冒充语义 embedding。
   图片型/扫描 PDF 在没有文本层时由 PDFBox 按页渲染，再交给当前视觉模型做 OCR 并进入同一分块与索引链路；
   OCR 不可用时聊天附件仍可成功暂存，并仅在当前 Run 以页面图像发送，Console 会明确提示模型必须支持视觉。
+- 历史会话检索：`session_search` 是 Agent 主动调用的内置工具，对当前项目的历史会话消息做 BM25 全文检索，
+  按会话聚合命中消息并返回抽取式摘要。它不会对每条消息自动执行，也不会跨项目或检索内部子会话。
 - 联网：设置 `PAICLI_WEB_ENABLED=true` 和 `PAICLI_WEB_SEARCH_URL` 后启用。搜索端点采用
   SearXNG JSON 结构；结果规范化、去重并携带引用编号。网页抓取禁止访问本机、内网和链路本地地址，
   每次重定向重新校验并限制响应大小。

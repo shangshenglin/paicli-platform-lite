@@ -64,7 +64,8 @@ public class ToolRouter {
         }
         if (request.name() != null && (request.name().startsWith("mcp__")
                 || Set.of("load_skill", "read_skill_resource", "search_knowledge", "web_search", "web_fetch",
-                "spawn_agent", "get_agent_result", "list_agents", "cancel_agent").contains(request.name()))) {
+                "session_search", "spawn_agent", "get_agent_result", "list_agents", "cancel_agent")
+                .contains(request.name()))) {
             return ToolResult.failure(request.toolCallId(),
                     "Server tool provider is unavailable for " + request.name(), 0);
         }

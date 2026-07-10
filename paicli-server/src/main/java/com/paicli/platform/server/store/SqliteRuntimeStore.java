@@ -705,6 +705,39 @@ public class SqliteRuntimeStore {
         return messages(sessionId, false);
     }
 
+    public List<SessionSearchMessage> searchableSessionMessages(String projectKey, int limit) {
+        String project = requireText(projectKey, "projectKey", 120);
+        int cappedLimit = limit <= 0 ? 5_000 : Math.min(limit, 20_000);
+        List<SessionSearchMessage> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT m.*, s.title AS session_title, s.project_key AS project_key, " +
+                        "s.updated_at AS session_updated_at FROM messages m " +
+                        "JOIN sessions s ON s.id=m.session_id " +
+                        "WHERE s.project_key=? AND s.is_internal=0 AND TRIM(m.content) <> '' " +
+                        "ORDER BY m.created_at DESC LIMIT ?")) {
+            ps.setString(1, project);
+            ps.setInt(2, cappedLimit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    values.add(new SessionSearchMessage(
+                            rs.getString("id"),
+                            rs.getString("session_id"),
+                            rs.getString("session_title"),
+                            rs.getString("project_key"),
+                            rs.getString("run_id"),
+                            rs.getString("role"),
+                            rs.getString("content"),
+                            rs.getLong("sequence"),
+                            instant(rs.getString("created_at")),
+                            instant(rs.getString("session_updated_at"))));
+                }
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list searchable session messages", e);
+        }
+    }
+
     public List<MessageRecord> activeMessages(String sessionId) {
         return messages(sessionId, true);
     }
@@ -1828,6 +1861,10 @@ public class SqliteRuntimeStore {
                              String layer, String memoryType, double confidence, String origin,
                              String sourceSessionId, String sourceRunId, String embeddingJson,
                              Instant createdAt, Instant updatedAt, Instant lastAccessedAt, int accessCount) { }
+
+    public record SessionSearchMessage(String id, String sessionId, String sessionTitle, String projectKey,
+                                       String runId, String role, String content, long sequence,
+                                       Instant createdAt, Instant sessionUpdatedAt) { }
 
     private Optional<ApprovalRecord> findApproval(String column, String value) {
         if (!column.equals("id") && !column.equals("tool_call_id")) {
