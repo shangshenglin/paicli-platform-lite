@@ -10,6 +10,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+
 @RestController
 @RequestMapping("/internal/v1/tools")
 public class SandboxToolController {
@@ -24,7 +27,9 @@ public class SandboxToolController {
     @PostMapping("/execute")
     public ToolResult execute(@RequestHeader(value = "Authorization", required = false) String authorization,
                               @RequestBody ToolRequest request) {
-        if (!properties.token().isBlank() && !("Bearer " + properties.token()).equals(authorization)) {
+        String expected = "Bearer " + properties.token();
+        if (authorization == null || !MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8), authorization.getBytes(StandardCharsets.UTF_8))) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid sandbox token");
         }
         return service.execute(request);

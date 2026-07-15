@@ -30,7 +30,7 @@ const statusNames = {
 
 function headers(json = true) {
   const value = json ? {'Content-Type': 'application/json'} : {};
-  const key = localStorage.getItem('paicli_api_key');
+  const key = sessionStorage.getItem('paicli_api_key');
   if (key) value['X-API-Key'] = key;
   return value;
 }
@@ -826,7 +826,7 @@ $('toggle').onclick = () => {
 };
 $('menu').onclick = () => $('sidebar').classList.toggle('open');
 $('settings').onclick = () => {
-  $('key').value = localStorage.getItem('paicli_api_key') || '';
+  $('key').value = sessionStorage.getItem('paicli_api_key') || '';
   $('dialog').showModal();
 };
 $('capabilities').onclick = openCapabilities;
@@ -835,7 +835,7 @@ $('importSkill').onclick = importSkill;
 $('uploadKnowledge').onclick = uploadKnowledge;
 $('close').onclick = () => $('dialog').close();
 $('save').onclick = () => {
-  localStorage.setItem('paicli_api_key', $('key').value.trim());
+  sessionStorage.setItem('paicli_api_key', $('key').value.trim());
   $('dialog').close();
   refreshSessions();
 };

@@ -96,7 +96,21 @@
 - [x] MCP argument/schema budgets and failure circuit breaker
 - [x] Multi-Agent child/depth limits, approved child cancellation, and descendant cancellation propagation
 - [x] Capability status UI, Micrometer runtime metrics, storage health indicator, and migrations 8–9
-- [x] 46 automated tests across the full Maven reactor
+- [x] 48 automated tests across the full Maven reactor
+
+## Phase 9 — Operational hardening and delivery gates
+
+- [x] Bounded Sandbox/Docker CLI output collection and timeout process-tree termination
+- [x] Required-token Sandbox startup and constant-time control-channel authentication
+- [x] Production API-key fail-fast, management/OpenAPI protection, Console CSP and tab-scoped key storage
+- [x] Shared SQLite connection policy, isolated migration catalog and scheduled WAL maintenance
+- [x] Opt-in Event/Audit retention plus orphan Artifact and stale temporary-file cleanup
+- [x] Query-aware historical-message prefilter while preserving public search-count semantics
+- [x] Fsync plus atomic replacement for Artifacts, attachments, knowledge documents and indexes
+- [x] Checked backup/restore archives with server-state, SHA-256, traversal and SQLite-header validation
+- [x] Queue/Approval/Memory/SSE gauges plus model-retry and tool-failure counters
+- [x] Maven `-Xlint:all`, GitHub Actions verification, Dependabot and CycloneDX SBOM
+- [x] 57 automated tests across Common, Server and Sandbox Agent boundaries
 
 ## Explicit non-goals
 

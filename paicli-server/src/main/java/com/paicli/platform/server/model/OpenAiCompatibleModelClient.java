@@ -2,10 +2,13 @@ package com.paicli.platform.server.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.paicli.platform.server.config.ModelProperties;
+import com.paicli.platform.server.observability.RuntimeMetrics;
 import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -30,19 +33,27 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 @ConditionalOnProperty(prefix = "paicli.model", name = "provider", havingValue = "openai-compatible")
 public class OpenAiCompatibleModelClient implements ModelClient {
+    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() { };
     private final ModelProperties properties;
     private final ObjectMapper mapper;
     private final HttpClient httpClient;
+    private final RuntimeMetrics metrics;
     private final Map<String, ActiveRequest> activeRequests = new ConcurrentHashMap<>();
     private final AtomicLong nextRequestNanos = new AtomicLong();
     private URI endpoint;
 
-    public OpenAiCompatibleModelClient(ModelProperties properties, ObjectMapper mapper) {
+    @Autowired
+    public OpenAiCompatibleModelClient(ModelProperties properties, ObjectMapper mapper, RuntimeMetrics metrics) {
         this.properties = properties;
         this.mapper = mapper;
+        this.metrics = metrics;
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20));
         if (properties.deepSeek()) builder.version(HttpClient.Version.HTTP_1_1);
         this.httpClient = builder.build();
+    }
+
+    public OpenAiCompatibleModelClient(ModelProperties properties, ObjectMapper mapper) {
+        this(properties, mapper, null);
     }
 
     @PostConstruct
@@ -118,7 +129,10 @@ public class OpenAiCompatibleModelClient implements ModelClient {
                 } catch (Exception e) {
                     lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 }
-                if (attempt < properties.maxAttempts()) backoff(attempt, active);
+                if (attempt < properties.maxAttempts()) {
+                    if (metrics != null) metrics.modelRetry();
+                    backoff(attempt, active);
+                }
             }
         }
         throw new IllegalStateException(lastError);
@@ -289,7 +303,7 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             JsonNode argumentsNode = tool.arguments.isEmpty()
                     ? mapper.createObjectNode() : mapper.readTree(tool.arguments.toString());
             if (!argumentsNode.isObject()) throw new IllegalStateException("Tool arguments must be a JSON object");
-            Map<String, Object> arguments = mapper.convertValue(argumentsNode, Map.class);
+            Map<String, Object> arguments = mapper.convertValue(argumentsNode, MAP_TYPE);
             plans.add(new ModelResponse.ToolPlan(tool.id, tool.name.toString(), arguments));
         }
         return new ModelResponse(content.toString(), reasoningContent.toString(), plans,

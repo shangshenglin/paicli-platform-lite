@@ -2,6 +2,7 @@ package com.paicli.platform.server.sse;
 
 import com.paicli.platform.server.domain.RunEventRecord;
 import com.paicli.platform.server.domain.RunRecord;
+import com.paicli.platform.server.observability.RuntimeMetrics;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.task.TaskExecutor;
@@ -19,11 +20,14 @@ public class SseEventService {
     private static final long HEARTBEAT_MILLIS = 15_000;
     private final SqliteRuntimeStore store;
     private final TaskExecutor executor;
+    private final RuntimeMetrics metrics;
 
     public SseEventService(SqliteRuntimeStore store,
-                           @Qualifier("sseTaskExecutor") TaskExecutor executor) {
+                           @Qualifier("sseTaskExecutor") TaskExecutor executor,
+                           RuntimeMetrics metrics) {
         this.store = store;
         this.executor = executor;
+        this.metrics = metrics;
     }
 
     public SseEmitter open(String runId, long afterId) {
@@ -32,10 +36,19 @@ public class SseEventService {
         }
         SseEmitter emitter = new SseEmitter(0L);
         AtomicBoolean closed = new AtomicBoolean(false);
-        emitter.onCompletion(() -> closed.set(true));
-        emitter.onTimeout(() -> closed.set(true));
-        emitter.onError(error -> closed.set(true));
-        executor.execute(() -> stream(runId, afterId, emitter, closed));
+        metrics.sseOpened();
+        Runnable close = () -> {
+            if (closed.compareAndSet(false, true)) metrics.sseClosed();
+        };
+        emitter.onCompletion(close);
+        emitter.onTimeout(close);
+        emitter.onError(error -> close.run());
+        try {
+            executor.execute(() -> stream(runId, afterId, emitter, closed));
+        } catch (RuntimeException e) {
+            close.run();
+            throw e;
+        }
         return emitter;
     }
 

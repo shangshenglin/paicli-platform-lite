@@ -29,6 +29,8 @@ paicli:
   sandbox-mode: local
   security:
     api-key: ${PAICLI_API_KEY:}
+    require-api-key: ${PAICLI_SECURITY_REQUIRE_API_KEY:false}
+    protect-management: ${PAICLI_SECURITY_PROTECT_MANAGEMENT:true}
   model:
     provider: ${PAICLI_MODEL_PROVIDER:demo}
     base-url: ${PAICLI_MODEL_BASE_URL:https://api.openai.com/v1}
@@ -82,6 +84,12 @@ paicli:
     min-confidence: ${PAICLI_MEMORY_MIN_CONFIDENCE:0.65}
     extraction-window-messages: ${PAICLI_MEMORY_EXTRACTION_WINDOW_MESSAGES:12}
     worker-delay-ms: ${PAICLI_MEMORY_WORKER_DELAY_MS:1000}
+  maintenance:
+    interval-millis: ${PAICLI_MAINTENANCE_INTERVAL_MILLIS:3600000}
+    event-retention-days: ${PAICLI_EVENT_RETENTION_DAYS:0}
+    audit-retention-days: ${PAICLI_AUDIT_RETENTION_DAYS:0}
+    orphan-file-grace-hours: ${PAICLI_ORPHAN_FILE_GRACE_HOURS:24}
+    vacuum-enabled: ${PAICLI_SQLITE_VACUUM_ENABLED:false}
 
 logging:
   pattern:

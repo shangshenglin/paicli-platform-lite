@@ -85,6 +85,7 @@ public class DocumentTextExtractor {
     public record ExtractedDocument(String name, String contentType, String text) { }
 
     public static class NoExtractableTextException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
         public NoExtractableTextException(String message) { super(message); }
         public NoExtractableTextException(String message, Throwable cause) { super(message, cause); }
     }

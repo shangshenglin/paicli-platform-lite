@@ -23,6 +23,17 @@ class ApiKeyFilterTest {
         assertThat(bearer.getStatus()).isEqualTo(200);
     }
 
+    @Test
+    void failFastAndManagementProtectionAreConfigurable() throws Exception {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SecurityProperties("", true, true))
+                .isInstanceOf(IllegalArgumentException.class);
+        ApiKeyFilter filter = new ApiKeyFilter(new SecurityProperties("top-secret", false, true));
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/actuator/metrics");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, new MockFilterChain());
+        assertThat(response.getStatus()).isEqualTo(401);
+    }
+
     private static MockHttpServletResponse execute(ApiKeyFilter filter, String key, String authorization)
             throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/v1/system/info");

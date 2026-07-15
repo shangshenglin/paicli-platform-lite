@@ -3,6 +3,7 @@ package com.paicli.platform.server.knowledge;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.io.AtomicFileWriter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -60,7 +61,7 @@ public class KnowledgeService {
         Path file = documentPath(projectKey, name);
         try {
             Files.createDirectories(file.getParent());
-            Files.writeString(file, value, StandardCharsets.UTF_8);
+            AtomicFileWriter.write(file, value.getBytes(StandardCharsets.UTF_8));
             writeIndex(file, value);
             return describe(file);
         } catch (Exception e) {
@@ -254,9 +255,8 @@ public class KnowledgeService {
                     vectors.get(index)));
         }
         Path index = indexPath(document);
-        Files.createDirectories(index.getParent());
-        mapper.writeValue(index.toFile(), new IndexedDocument(INDEX_VERSION, embeddings.provider(),
-                Files.getLastModifiedTime(document).toMillis(), indexed));
+        AtomicFileWriter.write(index, mapper.writeValueAsBytes(new IndexedDocument(INDEX_VERSION, embeddings.provider(),
+                Files.getLastModifiedTime(document).toMillis(), indexed)));
     }
 
     private IndexedDocument readOrCreateIndex(Path document) throws Exception {

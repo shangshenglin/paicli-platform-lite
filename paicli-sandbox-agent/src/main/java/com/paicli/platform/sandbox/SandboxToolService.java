@@ -2,10 +2,11 @@ package com.paicli.platform.sandbox;
 
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
+import com.paicli.platform.common.BoundedOutputBuffer;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
-import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -79,27 +80,31 @@ public class SandboxToolService {
                 .directory(cwd.toFile())
                 .redirectErrorStream(true)
                 .start();
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutputBuffer output = new BoundedOutputBuffer(MAX_COMMAND_OUTPUT_BYTES);
         Thread drainer = new Thread(() -> drain(process, output), "sandbox-command-output");
         drainer.setDaemon(true);
         drainer.start();
         boolean finished = process.waitFor(properties.commandTimeoutSeconds(), TimeUnit.SECONDS);
         if (!finished) {
-            process.destroyForcibly();
+            terminateProcessTree(process);
             throw new IllegalStateException("Command timed out after " + properties.commandTimeoutSeconds() + "s");
         }
         drainer.join(1000);
-        String text = output.toString(StandardCharsets.UTF_8);
-        if (text.length() > MAX_COMMAND_OUTPUT_BYTES) {
-            text = text.substring(0, MAX_COMMAND_OUTPUT_BYTES) + "\n[output truncated]";
-        }
+        String text = output.text(StandardCharsets.UTF_8);
+        if (output.truncated()) text += "\n[output truncated]";
         return "exitCode=" + process.exitValue() + "\n" + text;
     }
 
-    private static void drain(Process process, ByteArrayOutputStream output) {
+    private static void drain(Process process, OutputStream output) {
         try (var input = process.getInputStream()) {
             input.transferTo(output);
         } catch (Exception ignored) { }
+    }
+
+    private static void terminateProcessTree(Process process) {
+        process.descendants().sorted(Comparator.comparingLong(ProcessHandle::pid).reversed())
+                .forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly();
     }
 
     private Path path(ToolRequest request, String key, String defaultValue) throws Exception {

@@ -1,0 +1,62 @@
+package com.paicli.platform.server.security;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.web.servlet.MockMvc;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@SpringBootTest(properties = {
+        "paicli.data-dir=target/test-data/web-security",
+        "paicli.workspace-root=target/test-data/web-security/workspaces",
+        "paicli.worker-count=1",
+        "paicli.worker-poll-millis=1000",
+        "paicli.model.provider=demo",
+        "paicli.web.enabled=false",
+        "paicli.security.api-key=test-secret",
+        "paicli.security.require-api-key=true",
+        "paicli.security.protect-management=true"
+})
+@AutoConfigureMockMvc
+@DirtiesContext
+class WebSecurityIntegrationTest {
+    @Autowired
+    MockMvc mvc;
+
+    @Test
+    void protectsApiManagementAndOpenApiWithTheSameKey() throws Exception {
+        mvc.perform(get("/v1/system/info")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/actuator/health")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/v3/api-docs")).andExpect(status().isUnauthorized());
+
+        mvc.perform(get("/v1/system/info").header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.name").value("paicli-platform-lite"))
+                .andExpect(jsonPath("$.phase").value(9));
+        mvc.perform(get("/actuator/health").header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk());
+        mvc.perform(get("/v3/api-docs").header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.info.title").value("PaiCLI Platform Lite API"));
+    }
+
+    @Test
+    void consoleUsesSecurityHeadersAndSessionScopedCredentialStorage() throws Exception {
+        mvc.perform(get("/"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Frame-Options", "DENY"))
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                .andExpect(header().exists("Content-Security-Policy"));
+        mvc.perform(get("/app.js"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "sessionStorage.getItem('paicli_api_key')")))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
+    }
+}

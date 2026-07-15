@@ -2,13 +2,13 @@ package com.paicli.platform.server.artifact;
 
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.ArtifactRecord;
+import com.paicli.platform.server.io.AtomicFileWriter;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.Optional;
@@ -33,14 +33,8 @@ public class LocalArtifactStore {
             Files.createDirectories(directory);
             String fileName = UUID.randomUUID().toString().replace("-", "") + "-" + safeName(name) + ".txt";
             Path target = directory.resolve(fileName);
-            Path temporary = directory.resolve(fileName + ".tmp");
             byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-            Files.write(temporary, bytes);
-            try {
-                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-            } catch (Exception ignored) {
-                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            AtomicFileWriter.write(target, bytes);
             String relative = root.relativize(target).toString().replace('\\', '/');
             return store.createArtifact(runId, type, name, relative, bytes.length, sha256(bytes));
         } catch (Exception e) {

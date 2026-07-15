@@ -28,11 +28,13 @@ After a server restart, containers carrying `paicli.platform.managed=true` are t
 - No container port is published to the host.
 - The control channel is `docker exec` plus authenticated HTTP on container `127.0.0.1:8081`.
 - Random per-container Bearer Token.
+- Sandbox Agent startup fails when the token is absent; token comparison is constant time.
 - Read-only root filesystem and writable `/tmp` tmpfs.
 - `no-new-privileges`, `cap-drop ALL`.
 - Configurable CPU, memory and PID limits.
 - Only the Run workspace is bind-mounted read/write.
 - Tool paths are resolved below `/workspace`, including symlink checks.
+- Command output is drained through a bounded collector and timeouts terminate the shell process tree.
 
 ## Configuration
 

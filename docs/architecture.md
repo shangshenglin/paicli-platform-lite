@@ -35,7 +35,7 @@ This is intentionally event-backed state, not full event sourcing: current state
 
 ## Product boundary
 
-All `/v1/**` endpoints are protected when `PAICLI_API_KEY` is configured. The browser page is a single-tenant chat Console with a separate execution-detail stream and sends the same API key header; it is not a multi-tenant enterprise Console. Conversation groups are persisted in `session_groups`; deleting a group moves its sessions to the ungrouped section. Deleting a Session is rejected while it has an active Run and otherwise removes its dependent runtime records. OpenAPI is available at `/docs`.
+All `/v1/**` endpoints are protected when `PAICLI_API_KEY` is configured; `/actuator/**` and `/v3/api-docs` use the same protection by default. Non-development deployments can set `PAICLI_SECURITY_REQUIRE_API_KEY=true` to fail startup when the key is absent. The browser page is a single-tenant chat Console with a separate execution-detail stream and keeps the API key only in tab-scoped `sessionStorage`. Console resources receive CSP, anti-framing, MIME-sniffing, referrer and browser-permission headers. Conversation groups are persisted in `session_groups`; deleting a group moves its sessions to the ungrouped section. Deleting a Session is rejected while it has an active Run and otherwise removes its dependent runtime records. OpenAPI is available at `/docs`.
 
 Memory extraction is asynchronous and durable. A completed Run first creates a `memory_extractions` row; the worker then extracts typed L1/L2/L3 units with confidence and source metadata. Same-key changes retain old values in `memory_revisions`. Retrieval is query-aware and combines lexical/semantic relevance, confidence, time decay and stable L3 preferences. Explicit CRUD remains the correction/deletion boundary. Large tool results are stored under `data/artifacts` and replaced in model history by a bounded preview plus artifact id.
 
@@ -53,6 +53,8 @@ SQLite is suitable because this edition is single tenant and single node. WAL mo
 
 `schema_migrations` records numbered, idempotent schema levels. Existing pre-version databases are upgraded in place and registered without deleting user data. Versions 5–7 add delegation, fair queues and multimodal attachments; version 8 adds layered Memory jobs/revisions; version 9 adds per-turn model usage. Session deletion removes these dependent rows in the same transaction.
 
+SQLite connection policy and migration bookkeeping are isolated from the domain Store. Scheduled maintenance performs a passive WAL checkpoint and removes old orphan/temp files. Event and Audit retention are explicit opt-in settings so replay history is never silently discarded after an upgrade. Knowledge, attachment and Artifact files use fsync followed by atomic replacement; an index interrupted between document and index replacement is rebuilt from source metadata.
+
 ## Phase 7 server tool providers
 
 RAG, historical session search, Skill, web access, MCP, and Multi-Agent delegation are Server-side tool providers. Their model-visible calls still enter the existing pipeline: the complete model turn is committed first, calls execute in provider order, results pass through the Artifact materializer, and Event/SSE/Audit remain authoritative. Providers do not call the model or Sandbox behind the runtime's back.
@@ -66,7 +68,7 @@ RAG, historical session search, Skill, web access, MCP, and Multi-Agent delegati
 
 ## Model gateway and observability
 
-The OpenAI-compatible client rate-limits requests and retries only before an SSE response is accepted, so streamed deltas are never duplicated. Retriable HTTP failures use exponential backoff and may fall back to a configured model on the same endpoint. Per-Run step/token budgets are checked before new model calls, while already persisted resumable ToolCalls still execute. Every turn writes `model_usage`; Actuator exposes bounded Micrometer counters/timers and a storage/disk health indicator. Run id remains the trace correlation key across Event, Audit, ToolCall and Artifact records.
+The OpenAI-compatible client rate-limits requests and retries only before an SSE response is accepted, so streamed deltas are never duplicated. Retriable HTTP failures use exponential backoff and may fall back to a configured model on the same endpoint. Per-Run step/token budgets are checked before new model calls, while already persisted resumable ToolCalls still execute. Every turn writes `model_usage`; Actuator exposes counters/timers plus gauges for queued Runs, pending Approvals, pending Memory extractions and active SSE streams. Model retry and tool failure counters make degraded operation visible. Run id remains the trace correlation key across Event, Audit, ToolCall and Artifact records.
 
 ## Multimodal and document input
 
@@ -79,6 +81,8 @@ SSE streaming uses a zero-capacity executor handoff so long-lived subscriptions 
 ## Sandbox boundary
 
 `LocalSandboxDriver` is explicitly a development executor, not a security sandbox. Docker mode starts one restricted container per active Run and keeps the workspace on the host. The container remains on a Docker `--internal` network with no published port; the Server uses `docker exec` to call the authenticated Sandbox Agent HTTP endpoint on the container loopback interface. Model credentials remain in the Server process and are never placed in the sandbox environment.
+
+The Sandbox Agent refuses to start without its per-container token. Command and Docker CLI output collectors retain only a bounded prefix while continuing to drain the pipe, preventing output truncation from becoming an out-of-memory boundary. Timeout handling forcibly terminates the process and its descendants.
 
 Dangerous tools create a durable Approval row before any container call. Approval moves the same persisted ToolCall back to the worker; the model is not asked to recreate the action. This preserves the exact arguments the user reviewed.
 

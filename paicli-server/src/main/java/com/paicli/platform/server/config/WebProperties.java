@@ -2,6 +2,8 @@ package com.paicli.platform.server.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.net.URI;
+
 @ConfigurationProperties(prefix = "paicli.web")
 public record WebProperties(
         boolean enabled,
@@ -17,5 +19,12 @@ public record WebProperties(
         apiKeyHeader = apiKeyHeader == null || apiKeyHeader.isBlank() ? "Authorization" : apiKeyHeader.trim();
         timeoutSeconds = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);
         maxResponseChars = maxResponseChars <= 0 ? 100_000 : Math.min(maxResponseChars, 500_000);
+        if (enabled) {
+            if (searchUrl.isBlank()) throw new IllegalArgumentException("web search URL is required when enabled");
+            URI endpoint = URI.create(searchUrl);
+            if (!"http".equalsIgnoreCase(endpoint.getScheme()) && !"https".equalsIgnoreCase(endpoint.getScheme())) {
+                throw new IllegalArgumentException("web search URL must use http or https");
+            }
+        }
     }
 }

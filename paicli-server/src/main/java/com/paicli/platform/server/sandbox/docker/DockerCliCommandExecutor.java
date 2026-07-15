@@ -1,10 +1,11 @@
 package com.paicli.platform.server.sandbox.docker;
 
+import com.paicli.platform.common.BoundedOutputBuffer;
 import com.paicli.platform.server.config.DockerSandboxProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -34,7 +35,7 @@ public class DockerCliCommandExecutor implements DockerCommandExecutor {
         Process process = null;
         try {
             process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            BoundedOutputBuffer output = new BoundedOutputBuffer(MAX_OUTPUT_BYTES);
             Process running = process;
             Thread drainer = new Thread(() -> drain(running, output), "docker-cli-output");
             drainer.setDaemon(true);
@@ -46,30 +47,34 @@ public class DockerCliCommandExecutor implements DockerCommandExecutor {
             }
             boolean completed = process.waitFor(Math.max(1, timeout.toMillis()), TimeUnit.MILLISECONDS);
             if (!completed) {
-                process.destroyForcibly();
+                terminateProcessTree(process);
                 throw new IllegalStateException("Docker command timed out: " + redacted(arguments));
             }
             drainer.join(1_000);
-            String text = output.toString(StandardCharsets.UTF_8);
-            if (text.length() > MAX_OUTPUT_BYTES) {
-                text = text.substring(0, MAX_OUTPUT_BYTES) + "\n[docker output truncated]";
-            }
+            String text = output.text(StandardCharsets.UTF_8);
+            if (output.truncated()) text += "\n[docker output truncated]";
             return new CommandResult(process.exitValue(), text.trim());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            if (process != null) process.destroyForcibly();
+            if (process != null) terminateProcessTree(process);
             throw new IllegalStateException("Docker command interrupted", e);
         } catch (Exception e) {
-            if (process != null) process.destroyForcibly();
+            if (process != null) terminateProcessTree(process);
             throw new IllegalStateException("Docker command failed: " + e.getMessage(), e);
         }
     }
 
-    private static void drain(Process process, ByteArrayOutputStream output) {
+    private static void drain(Process process, OutputStream output) {
         try (var input = process.getInputStream()) {
             input.transferTo(output);
         } catch (Exception ignored) {
         }
+    }
+
+    private static void terminateProcessTree(Process process) {
+        process.descendants().sorted(java.util.Comparator.comparingLong(ProcessHandle::pid).reversed())
+                .forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly();
     }
 
     private static String redacted(List<String> arguments) {

@@ -2,6 +2,7 @@ package com.paicli.platform.server.artifact;
 
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.InputAttachmentRecord;
+import com.paicli.platform.server.io.AtomicFileWriter;
 import com.paicli.platform.server.model.ModelImage;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.stereotype.Service;
@@ -62,7 +63,7 @@ public class ImageAttachmentService {
             if (!sessionRoot.startsWith(root)) throw new IllegalArgumentException("invalid session id");
             Files.createDirectories(sessionRoot);
             target = sessionRoot.resolve(UUID.randomUUID() + extension).normalize();
-            Files.write(target, output);
+            AtomicFileWriter.write(target, output);
             String relative = root.relativize(target).toString().replace('\\', '/');
             return store.createInputAttachment(sessionId, safeName(file.getOriginalFilename()), mime,
                     relative, output.length, sha256(output));

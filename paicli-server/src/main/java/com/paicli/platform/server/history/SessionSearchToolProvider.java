@@ -60,18 +60,20 @@ public class SessionSearchToolProvider implements ServerToolProvider {
             int maxMessages = clamp(integer(request.arguments().get("max_messages"), 5_000), 100, 20_000);
             var run = store.findRun(request.runId()).orElseThrow(() -> new IllegalArgumentException("run not found"));
             var session = store.findSession(run.sessionId()).orElseThrow();
-            List<SearchDocument> documents = store.searchableSessionMessages(session.projectKey(), maxMessages).stream()
+            List<String> queryTerms = terms(query);
+            List<SearchDocument> documents = store.searchableSessionMessages(
+                            session.projectKey(), queryTerms, maxMessages).stream()
                     .filter(message -> message.runId() == null || !message.runId().equals(request.runId()))
                     .map(SearchDocument::new)
                     .filter(document -> !document.termFrequency().isEmpty())
                     .toList();
-            List<String> queryTerms = terms(query);
             List<ScoredDocument> scored = bm25(documents, queryTerms);
             List<SessionResult> selected = selectSessions(scored, topSessions, messagesPerSession);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("query", query);
             response.put("scope", Map.of("projectKey", session.projectKey()));
-            response.put("searchedMessages", documents.size());
+            response.put("searchedMessages", store.searchableSessionMessageCount(session.projectKey()));
+            response.put("candidateMessages", documents.size());
             response.put("results", selected.stream().map(SessionResult::toJson).toList());
             return ToolResult.success(request.toolCallId(), mapper.writeValueAsString(response), elapsed(start));
         } catch (Exception e) {

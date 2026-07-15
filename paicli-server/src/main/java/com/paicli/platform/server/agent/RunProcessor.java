@@ -200,6 +200,7 @@ public class RunProcessor {
                     ? run.currentStep() : run.currentStep() + 1;
             store.requeueRun(run.id(), nextStep);
         } else {
+            if (metrics != null) metrics.toolFailure();
             store.failTool(call.id(), result.error());
             String observation = json(Map.of(
                     "ok", false,

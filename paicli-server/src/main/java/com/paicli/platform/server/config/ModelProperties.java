@@ -3,6 +3,8 @@ package com.paicli.platform.server.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
+import java.net.URI;
+
 @ConfigurationProperties(prefix = "paicli.model")
 public record ModelProperties(
         String provider,
@@ -36,6 +38,9 @@ public record ModelProperties(
     @ConstructorBinding
     public ModelProperties {
         provider = provider == null || provider.isBlank() ? "demo" : provider.trim();
+        if (!provider.equals("demo") && !provider.equals("openai-compatible")) {
+            throw new IllegalArgumentException("model provider must be demo or openai-compatible");
+        }
         baseUrl = baseUrl == null || baseUrl.isBlank() ? "https://api.openai.com/v1" : baseUrl.trim();
         apiKey = apiKey == null ? "" : apiKey.trim();
         model = model == null || model.isBlank() ? "gpt-4o-mini" : model.trim();
@@ -59,6 +64,13 @@ public record ModelProperties(
         fallbackModel = fallbackModel == null ? "" : fallbackModel.trim();
         maxRunSteps = maxRunSteps <= 0 ? 30 : Math.min(maxRunSteps, 200);
         maxRunTokens = maxRunTokens <= 0 ? 200_000 : maxRunTokens;
+        if (provider.equals("openai-compatible")) {
+            URI endpoint = URI.create(baseUrl);
+            if (!"http".equalsIgnoreCase(endpoint.getScheme()) && !"https".equalsIgnoreCase(endpoint.getScheme())) {
+                throw new IllegalArgumentException("model baseUrl must use http or https");
+            }
+            if (apiKey.isBlank()) throw new IllegalArgumentException("model apiKey is required for openai-compatible");
+        }
     }
 
     public boolean deepSeek() {

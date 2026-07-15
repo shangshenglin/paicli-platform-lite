@@ -3,6 +3,7 @@ package com.paicli.platform.server.artifact;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.config.RagProperties;
 import com.paicli.platform.server.domain.InputAttachmentRecord;
+import com.paicli.platform.server.io.AtomicFileWriter;
 import com.paicli.platform.server.knowledge.DocumentTextExtractor;
 import com.paicli.platform.server.knowledge.KnowledgeService;
 import com.paicli.platform.server.knowledge.PdfPageRenderer;
@@ -78,7 +79,7 @@ public class DocumentAttachmentService {
             if (!sessionRoot.startsWith(root)) throw new IllegalArgumentException("invalid session id");
             Files.createDirectories(sessionRoot);
             target = sessionRoot.resolve(UUID.randomUUID() + "." + extension).normalize();
-            Files.write(target, bytes);
+            AtomicFileWriter.write(target, bytes);
             String mime = visualPdf ? VISUAL_PDF_MIME
                     : extracted.contentType() == null || extracted.contentType().isBlank()
                     ? "application/octet-stream" : extracted.contentType();

@@ -23,7 +23,13 @@ public class ApiKeyFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !properties.enabled() || !request.getRequestURI().startsWith("/v1/");
+        if (!properties.enabled()) return true;
+        String path = request.getRequestURI();
+        boolean api = path.startsWith("/v1/");
+        boolean management = properties.protectManagement()
+                && (path.equals("/actuator") || path.startsWith("/actuator/")
+                || path.startsWith("/v3/api-docs"));
+        return !api && !management;
     }
 
     @Override

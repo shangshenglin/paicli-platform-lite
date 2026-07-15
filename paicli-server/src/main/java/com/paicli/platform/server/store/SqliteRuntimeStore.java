@@ -21,7 +21,6 @@ import org.springframework.stereotype.Repository;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -40,14 +39,14 @@ public class SqliteRuntimeStore {
     private final Path workspaceRoot;
     private final Path artifactRoot;
     private final Path attachmentRoot;
-    private final String jdbcUrl;
+    private final SqliteConnectionFactory connections;
 
     public SqliteRuntimeStore(PlatformProperties properties) {
         this.databasePath = properties.dataDir().resolve("paicli.db").toAbsolutePath().normalize();
         this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
         this.artifactRoot = properties.dataDir().resolve("artifacts").toAbsolutePath().normalize();
         this.attachmentRoot = properties.dataDir().resolve("input-attachments").toAbsolutePath().normalize();
-        this.jdbcUrl = "jdbc:sqlite:" + databasePath;
+        this.connections = new SqliteConnectionFactory(databasePath);
     }
 
     @PostConstruct
@@ -63,9 +62,9 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, title TEXT NOT NULL, project_key TEXT NOT NULL DEFAULT 'default', " +
                     "group_id TEXT, status TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
-            ensureColumn(connection, "sessions", "project_key", "TEXT NOT NULL DEFAULT 'default'");
-            ensureColumn(connection, "sessions", "group_id", "TEXT");
-            ensureColumn(connection, "sessions", "is_internal", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "sessions", "project_key", "TEXT NOT NULL DEFAULT 'default'");
+            SqliteSchemaMigrator.ensureColumn(connection, "sessions", "group_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "sessions", "is_internal", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_sessions_group_updated " +
                     "ON sessions(group_id, updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS runs (" +
@@ -75,9 +74,9 @@ public class SqliteRuntimeStore {
                     "created_at TEXT NOT NULL, queued_at TEXT, " +
                     "started_at TEXT, finished_at TEXT, version INTEGER NOT NULL DEFAULT 0, " +
                     "FOREIGN KEY(session_id) REFERENCES sessions(id))");
-            ensureColumn(connection, "runs", "thinking_mode", "TEXT NOT NULL DEFAULT 'auto'");
-            ensureColumn(connection, "runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
-            ensureColumn(connection, "runs", "queued_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "thinking_mode", "TEXT NOT NULL DEFAULT 'auto'");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "queued_at", "TEXT");
             statement.execute("UPDATE runs SET queued_at=created_at WHERE queued_at IS NULL");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_status_created ON runs(status, created_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at)");
@@ -87,10 +86,10 @@ public class SqliteRuntimeStore {
                     "archived INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(session_id) REFERENCES sessions(id), FOREIGN KEY(run_id) REFERENCES runs(id), " +
                     "UNIQUE(session_id, sequence))");
-            ensureColumn(connection, "messages", "tool_call_id", "TEXT");
-            ensureColumn(connection, "messages", "tool_calls_json", "TEXT");
-            ensureColumn(connection, "messages", "reasoning_content", "TEXT");
-            ensureColumn(connection, "messages", "archived", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "messages", "tool_call_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "messages", "tool_calls_json", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "messages", "reasoning_content", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "messages", "archived", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence)");
             statement.execute("CREATE TABLE IF NOT EXISTS run_events (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, event_type TEXT NOT NULL, " +
@@ -124,15 +123,15 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, memory_key TEXT NOT NULL, " +
                     "content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, " +
                     "updated_at TEXT NOT NULL, UNIQUE(project_key, memory_key))");
-            ensureColumn(connection, "memories", "layer", "TEXT NOT NULL DEFAULT 'L3'");
-            ensureColumn(connection, "memories", "memory_type", "TEXT NOT NULL DEFAULT 'FACT'");
-            ensureColumn(connection, "memories", "confidence", "REAL NOT NULL DEFAULT 1.0");
-            ensureColumn(connection, "memories", "origin", "TEXT NOT NULL DEFAULT 'manual'");
-            ensureColumn(connection, "memories", "source_session_id", "TEXT");
-            ensureColumn(connection, "memories", "source_run_id", "TEXT");
-            ensureColumn(connection, "memories", "embedding_json", "TEXT");
-            ensureColumn(connection, "memories", "last_accessed_at", "TEXT");
-            ensureColumn(connection, "memories", "access_count", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "layer", "TEXT NOT NULL DEFAULT 'L3'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "memory_type", "TEXT NOT NULL DEFAULT 'FACT'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "confidence", "REAL NOT NULL DEFAULT 1.0");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "origin", "TEXT NOT NULL DEFAULT 'manual'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "source_session_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "source_run_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "embedding_json", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "last_accessed_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "access_count", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_key, updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_revisions (" +
                     "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, " +
@@ -163,15 +162,7 @@ public class SqliteRuntimeStore {
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_parent ON run_delegations(parent_run_id, created_at)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING'");
-            recordMigration(connection, 1, "baseline runtime schema");
-            recordMigration(connection, 2, "durable reasoning and message archive columns");
-            recordMigration(connection, 3, "per-run thinking controls");
-            recordMigration(connection, 4, "session groups and session deletion");
-            recordMigration(connection, 5, "durable multi-agent run delegations");
-            recordMigration(connection, 6, "fair run queue ordering for delegated runs");
-            recordMigration(connection, 7, "durable multimodal input attachments");
-            recordMigration(connection, 8, "automatic layered memory extraction and revision history");
-            recordMigration(connection, 9, "durable per-turn model usage governance");
+            SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE memory_extractions SET status='PENDING', updated_at='" +
                     Instant.now() + "' WHERE status='RUNNING'");
         }
@@ -705,18 +696,25 @@ public class SqliteRuntimeStore {
         return messages(sessionId, false);
     }
 
-    public List<SessionSearchMessage> searchableSessionMessages(String projectKey, int limit) {
+    public List<SessionSearchMessage> searchableSessionMessages(String projectKey, List<String> queryTerms, int limit) {
         String project = requireText(projectKey, "projectKey", 120);
         int cappedLimit = limit <= 0 ? 5_000 : Math.min(limit, 20_000);
+        List<String> terms = queryTerms == null ? List.of() : queryTerms.stream()
+                .filter(value -> value != null && value.length() >= 2)
+                .map(String::toLowerCase).distinct().limit(12).toList();
+        String predicates = terms.isEmpty() ? "" : " AND (" + String.join(" OR ",
+                java.util.Collections.nCopies(terms.size(), "LOWER(m.content) LIKE ?")) + ")";
         List<SessionSearchMessage> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "SELECT m.*, s.title AS session_title, s.project_key AS project_key, " +
                         "s.updated_at AS session_updated_at FROM messages m " +
                         "JOIN sessions s ON s.id=m.session_id " +
                         "WHERE s.project_key=? AND s.is_internal=0 AND TRIM(m.content) <> '' " +
-                        "ORDER BY m.created_at DESC LIMIT ?")) {
+                        predicates + " ORDER BY m.created_at DESC LIMIT ?")) {
             ps.setString(1, project);
-            ps.setInt(2, cappedLimit);
+            int parameter = 2;
+            for (String term : terms) ps.setString(parameter++, "%" + term + "%");
+            ps.setInt(parameter, cappedLimit);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     values.add(new SessionSearchMessage(
@@ -735,6 +733,19 @@ public class SqliteRuntimeStore {
             return values;
         } catch (SQLException e) {
             throw failure("list searchable session messages", e);
+        }
+    }
+
+    public long searchableSessionMessageCount(String projectKey) {
+        try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT COUNT(*) FROM messages m JOIN sessions s ON s.id=m.session_id "
+                        + "WHERE s.project_key=? AND s.is_internal=0 AND TRIM(m.content) <> ''")) {
+            statement.setString(1, normalizeProjectKey(projectKey));
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw failure("count searchable session messages", e);
         }
     }
 
@@ -1438,6 +1449,37 @@ public class SqliteRuntimeStore {
         return databasePath;
     }
 
+    public long countRuns(RunStatus status) {
+        try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT COUNT(*) FROM runs WHERE status=?")) {
+            statement.setString(1, status.name());
+            try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getLong(1) : 0; }
+        } catch (SQLException e) {
+            throw failure("count runs", e);
+        }
+    }
+
+    public long countPendingApprovals() {
+        return countByStatus("approvals", ApprovalStatus.PENDING.name());
+    }
+
+    public long countPendingMemoryExtractions() {
+        return countByStatus("memory_extractions", "PENDING");
+    }
+
+    private long countByStatus(String table, String status) {
+        if (!Set.of("approvals", "memory_extractions").contains(table)) {
+            throw new IllegalArgumentException("unsupported status counter");
+        }
+        try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT COUNT(*) FROM " + table + " WHERE status=?")) {
+            statement.setString(1, status);
+            try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getLong(1) : 0; }
+        } catch (SQLException e) {
+            throw failure("count " + table, e);
+        }
+    }
+
     private boolean hasActiveRun(String sessionId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "SELECT 1 FROM runs WHERE session_id=? AND status NOT IN (?,?,?) LIMIT 1")) {
@@ -1763,43 +1805,7 @@ public class SqliteRuntimeStore {
     }
 
     private Connection open() throws SQLException {
-        Connection connection = DriverManager.getConnection(jdbcUrl);
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA journal_mode=WAL");
-            statement.execute("PRAGMA busy_timeout=5000");
-            statement.execute("PRAGMA foreign_keys=ON");
-        }
-        return connection;
-    }
-
-    private static void ensureColumn(Connection connection, String table, String column, String definition)
-            throws SQLException {
-        boolean exists = false;
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
-            while (rs.next()) {
-                if (column.equalsIgnoreCase(rs.getString("name"))) {
-                    exists = true;
-                    break;
-                }
-            }
-        }
-        if (!exists) {
-            try (Statement statement = connection.createStatement()) {
-                statement.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
-            }
-        }
-    }
-
-    private static void recordMigration(Connection connection, int version, String description)
-            throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT OR IGNORE INTO schema_migrations(version,description,applied_at) VALUES(?,?,?)")) {
-            ps.setInt(1, version);
-            ps.setString(2, description);
-            ps.setString(3, Instant.now().toString());
-            ps.executeUpdate();
-        }
+        return connections.open();
     }
 
     private static SessionRecord mapSession(ResultSet rs) throws SQLException {
