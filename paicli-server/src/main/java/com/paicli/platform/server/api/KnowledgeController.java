@@ -17,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.http.MediaType;
 import com.paicli.platform.server.knowledge.DocumentTextExtractor;
 import org.springframework.web.server.ResponseStatusException;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
 
 import java.util.List;
 
@@ -25,29 +26,57 @@ import java.util.List;
 public class KnowledgeController {
     private final KnowledgeService knowledge;
     private final DocumentTextExtractor extractor;
+    private final SqliteRuntimeStore store;
 
-    public KnowledgeController(KnowledgeService knowledge, DocumentTextExtractor extractor) {
+    public KnowledgeController(KnowledgeService knowledge, DocumentTextExtractor extractor,
+                               SqliteRuntimeStore store) {
         this.knowledge = knowledge;
         this.extractor = extractor;
+        this.store = store;
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public KnowledgeService.KnowledgeDocument upsert(
             @Valid @RequestBody ApiDtos.UpsertKnowledgeDocumentRequest request) {
-        return knowledge.upsert(request.projectKey(), request.name(), request.content());
+        return knowledge.upsert(request.projectKey(), request.name(), request.content(),
+                request.collection(), request.tags());
     }
 
     @PostMapping(value = "/uploads", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
     public KnowledgeService.KnowledgeDocument upload(@RequestParam String projectKey,
+                                                      @RequestParam(defaultValue = "默认") String collection,
+                                                      @RequestParam(required = false) List<String> tags,
                                                       @RequestPart("file") MultipartFile file) {
-        return knowledge.upload(projectKey, file, extractor);
+        return knowledge.upload(projectKey, file, extractor, collection, tags);
     }
 
     @GetMapping
     public List<KnowledgeService.KnowledgeDocument> list(@RequestParam String projectKey) {
         return knowledge.list(projectKey);
+    }
+
+    @GetMapping("/search")
+    public List<KnowledgeService.SearchHit> search(@RequestParam String projectKey,
+                                                   @RequestParam String query,
+                                                   @RequestParam(defaultValue = "10") int limit) {
+        return knowledge.search(projectKey, query, limit);
+    }
+
+    @PostMapping("/{projectKey}/{name}/reindex")
+    public KnowledgeService.KnowledgeDocument reindex(@PathVariable String projectKey,
+                                                       @PathVariable String name) {
+        return knowledge.reindex(projectKey, name);
+    }
+
+    @PostMapping("/{projectKey}/{name}/feedback")
+    @ResponseStatus(HttpStatus.CREATED)
+    public SqliteRuntimeStore.KnowledgeFeedback feedback(@PathVariable String projectKey,
+                                                         @PathVariable String name,
+                                                         @RequestParam int chunk,
+                                                         @Valid @RequestBody ApiDtos.KnowledgeFeedbackRequest request) {
+        return store.createKnowledgeFeedback(projectKey, name, chunk, request.helpful(), request.note());
     }
 
     @DeleteMapping("/{projectKey}/{name}")

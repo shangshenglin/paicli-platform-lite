@@ -41,6 +41,9 @@ class KnowledgeServiceTest {
         var document = service.upload("alpha", file, extractor);
 
         assertThat(document.name()).isEqualTo("设计说明.md.extracted.txt");
+        assertThat(document.version()).isEqualTo(1);
+        assertThat(document.indexStatus()).isEqualTo("READY");
+        assertThat(document.indexedChunks()).isPositive();
         assertThat(service.search("alpha", "恢复契约", 3)).isNotEmpty()
                 .allSatisfy(hit -> assertThat(hit.vectorSimilarity()).isBetween(-1.0, 1.0));
     }

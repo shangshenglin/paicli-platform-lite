@@ -73,7 +73,7 @@ class ApprovalFlowTest {
         assertThat(executions).hasValue(0);
         var approval = approvals.pending().get(0);
 
-        approvals.resolve(approval.id(), ApprovalStatus.APPROVED);
+        approvals.resolve(approval.id(), ApprovalStatus.APPROVED, "PROJECT");
         processor.process(store.claimNextRun().orElseThrow());
         assertThat(executions).hasValue(1);
         processor.process(store.claimNextRun().orElseThrow());
@@ -82,6 +82,17 @@ class ApprovalFlowTest {
         assertThat(executions).hasValue(1);
         assertThat(store.events(run.id(), 0)).extracting("type")
                 .contains("approval.requested", "approval.resolved", "tool.completed", "run.completed");
+
+        var secondSession = store.createSession("policy reuse");
+        var secondRun = store.createRun(secondSession.id(), "run the same command");
+        processor.process(store.claimNextRun().orElseThrow());
+        assertThat(store.findRun(secondRun.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(approvals.pending()).isEmpty();
+        assertThat(store.events(secondRun.id(), 0)).extracting("type").contains("approval.policy_matched");
+        processor.process(store.claimNextRun().orElseThrow());
+        processor.process(store.claimNextRun().orElseThrow());
+        assertThat(store.findRun(secondRun.id()).orElseThrow().status()).isEqualTo(RunStatus.COMPLETED);
+        assertThat(executions).hasValue(2);
         assertThat(Files.list(audit.auditDirectory()).findAny()).isPresent();
     }
 

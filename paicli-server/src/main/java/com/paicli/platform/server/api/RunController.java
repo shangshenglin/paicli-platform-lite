@@ -53,6 +53,22 @@ public class RunController {
         return requireRun(runId);
     }
 
+    @PostMapping("/runs/{runId}/retry")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Map<String, Object> retry(@PathVariable String runId,
+                                     @RequestBody(required = false) ApiDtos.RetryRunRequest request) {
+        RunRecord source = requireRun(runId);
+        if (!source.status().terminal()) throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "only terminal runs can be retried");
+        boolean branch = request != null && Boolean.TRUE.equals(request.branch());
+        String sessionId = source.sessionId();
+        if (branch) sessionId = store.createBranchSession(source.id()).id();
+        String input = request == null || request.input() == null || request.input().isBlank()
+                ? source.input() : request.input();
+        RunRecord retried = store.createRun(sessionId, input, source.thinkingMode(), source.reasoningEffort());
+        return Map.of("run", retried, "sessionId", sessionId, "branchCreated", branch);
+    }
+
     @PostMapping("/runs/{runId}/cancel")
     public Map<String, Object> cancel(@PathVariable String runId) {
         requireRun(runId);

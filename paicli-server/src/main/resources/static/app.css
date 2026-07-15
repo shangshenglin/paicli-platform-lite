@@ -232,6 +232,14 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .managed-item small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .managed-item button { padding: 4px 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.workbench-dialog { width: min(920px, calc(100% - 28px)); }
+.workbench-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.workbench-search input { margin: 0; }
+.section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.section-title h3 { margin: 0; }
+.managed-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.managed-item .snippet { white-space: normal; line-height: 1.45; }
+.run-action[hidden] { display: none; }
 .menu { display: none; }
 @media (max-width: 1000px) {
   .workspace { grid-template-columns: 1fr; }

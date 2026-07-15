@@ -17,10 +17,12 @@ import java.util.UUID;
 @Service
 public class LocalArtifactStore {
     private final Path root;
+    private final Path attachmentRoot;
     private final SqliteRuntimeStore store;
 
     public LocalArtifactStore(PlatformProperties properties, SqliteRuntimeStore store) throws Exception {
         this.root = properties.dataDir().resolve("artifacts").toAbsolutePath().normalize();
+        this.attachmentRoot = properties.dataDir().resolve("input-attachments").toAbsolutePath().normalize();
         this.store = store;
         Files.createDirectories(root);
     }
@@ -46,6 +48,10 @@ public class LocalArtifactStore {
         return store.findArtifact(artifactId);
     }
 
+    public java.util.List<ArtifactRecord> list(String projectKey, int limit) {
+        return store.artifacts(projectKey, limit);
+    }
+
     public String readText(String artifactId, int offset, int limit) {
         ArtifactRecord artifact = find(artifactId)
                 .orElseThrow(() -> new IllegalArgumentException("Artifact not found: " + artifactId));
@@ -67,6 +73,50 @@ public class LocalArtifactStore {
 
     public Path root() {
         return root;
+    }
+
+    public byte[] readBytes(String artifactId) {
+        ArtifactRecord artifact = find(artifactId)
+                .orElseThrow(() -> new IllegalArgumentException("Artifact not found: " + artifactId));
+        try {
+            Path file = root.resolve(artifact.relativePath()).normalize();
+            if (!file.startsWith(root) || !Files.isRegularFile(file)) throw new IllegalStateException("Artifact file is missing");
+            byte[] bytes = Files.readAllBytes(file);
+            if (!sha256(bytes).equals(artifact.sha256())) throw new IllegalStateException("Artifact checksum mismatch");
+            return bytes;
+        } catch (Exception e) { throw new IllegalStateException("Failed to read artifact", e); }
+    }
+
+    public com.paicli.platform.server.domain.InputAttachmentRecord reuse(String artifactId, String sessionId) {
+        ArtifactRecord artifact = find(artifactId)
+                .orElseThrow(() -> new IllegalArgumentException("Artifact not found: " + artifactId));
+        byte[] bytes = readBytes(artifactId);
+        Path target = null;
+        try {
+            Path directory = attachmentRoot.resolve(sessionId).normalize();
+            if (!directory.startsWith(attachmentRoot)) throw new IllegalArgumentException("Invalid session id");
+            Files.createDirectories(directory);
+            String fileName = UUID.randomUUID() + "-" + safeName(artifact.name()) + ".txt";
+            target = directory.resolve(fileName).normalize();
+            AtomicFileWriter.write(target, bytes);
+            return store.createInputAttachment(sessionId, artifact.name() + ".txt", "text/plain",
+                    attachmentRoot.relativize(target).toString().replace('\\', '/'), bytes.length, sha256(bytes));
+        } catch (Exception e) {
+            if (target != null) try { Files.deleteIfExists(target); } catch (Exception ignored) { }
+            throw new IllegalStateException("Failed to reuse artifact", e);
+        }
+    }
+
+    public boolean delete(String artifactId) {
+        ArtifactRecord artifact = find(artifactId).orElse(null);
+        if (artifact == null) return false;
+        try {
+            Path file = root.resolve(artifact.relativePath()).normalize();
+            if (!file.startsWith(root)) throw new IllegalStateException("Artifact path escapes store");
+            if (!store.deleteArtifact(artifactId)) return false;
+            Files.deleteIfExists(file);
+            return true;
+        } catch (Exception e) { throw new IllegalStateException("Failed to delete artifact", e); }
     }
 
     private static String safeName(String value) {

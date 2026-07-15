@@ -18,7 +18,8 @@ final class SqliteSchemaMigrator {
             new Migration(6, "fair run queue ordering for delegated runs"),
             new Migration(7, "durable multimodal input attachments"),
             new Migration(8, "automatic layered memory extraction and revision history"),
-            new Migration(9, "durable per-turn model usage governance")
+            new Migration(9, "durable per-turn model usage governance"),
+            new Migration(10, "business productivity workbench and approval policies")
     );
 
     private SqliteSchemaMigrator() { }

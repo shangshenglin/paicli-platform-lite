@@ -84,7 +84,7 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
         }
     }
 
@@ -225,6 +225,57 @@ class SqliteRuntimeStoreTest {
         assertThat(events).hasSize(61);
         assertThat(events).extracting("sequence").containsExactlyElementsOf(
                 java.util.stream.LongStream.rangeClosed(1, 61).boxed().toList());
+    }
+
+    @Test
+    void persistsApprovalPoliciesAndManagedMemoryStateWithRevisionRestore() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("managed", "project-a");
+        var run = store.createRun(session.id(), "remember");
+        var policy = store.createApprovalPolicy("SESSION", session.id(), session.projectKey(),
+                "execute_command", "a".repeat(64));
+
+        assertThat(store.matchingApprovalPolicy(session.id(), session.projectKey(),
+                "execute_command", "a".repeat(64))).contains(policy);
+        assertThat(store.approvalPolicies("project-a")).containsExactly(policy);
+
+        store.upsertAutomaticMemory("project-a", "language", "Java", "preference",
+                "L3", "PREFERENCE", 0.8, session.id(), run.id(), null);
+        store.upsertAutomaticMemory("project-a", "language", "Kotlin", "preference",
+                "L3", "PREFERENCE", 0.9, session.id(), run.id(), null);
+        var memory = store.memoryUnits("project-a", 10).get(0);
+        var managed = store.setMemoryState(memory.id(), true, true, true);
+        assertThat(managed.pinned()).isTrue();
+        assertThat(managed.confirmedAt()).isNotNull();
+        var revision = store.memoryRevisions(memory.id()).get(0);
+        assertThat(store.restoreMemoryRevision(memory.id(), revision.id()).content()).isEqualTo("Java");
+        var source = store.createMemory("project-a", "framework", "Spring Boot", "java,framework");
+        assertThat(store.mergeMemories(memory.id(), List.of(source.id())).content())
+                .contains("Java", "Spring Boot");
+        assertThat(store.findMemory(source.id())).isEmpty();
+        assertThat(store.deleteApprovalPolicy(policy.id())).isTrue();
+        assertThat(store.deleteMemory(memory.id())).isTrue();
+    }
+
+    @Test
+    void createsConversationBranchBeforeSourceRunAndListsProjectArtifacts() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("branch", "project-a");
+        var first = store.createRun(session.id(), "first");
+        store.appendMessage(session.id(), first.id(), "assistant", "first answer");
+        store.completeRun(first.id());
+        var source = store.createRun(session.id(), "second");
+        store.completeRun(source.id());
+        var artifact = store.createArtifact(source.id(), "tool-result", "report", "report.txt", 10, "abc");
+
+        var branch = store.createBranchSession(source.id());
+        assertThat(branch.title()).contains("分支");
+        assertThat(store.messages(branch.id())).extracting("content")
+                .containsExactly("first", "first answer");
+        assertThat(store.artifacts("project-a", 10)).containsExactly(artifact);
+        var feedback = store.createKnowledgeFeedback("project-a", "guide.md", 2, true, "useful");
+        assertThat(store.knowledgeFeedback("project-a")).containsExactly(feedback);
+        assertThat(store.deleteArtifact(artifact.id())).isTrue();
     }
 
     private SqliteRuntimeStore store() throws Exception {

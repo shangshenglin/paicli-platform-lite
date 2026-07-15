@@ -1,123 +1,87 @@
-# Delivery phases
+# 交付阶段
 
-## Phase 1 — Durable Agent Runtime
+## 阶段 1：持久化 Agent Runtime
 
-- [x] Multi-module Maven project
-- [x] Session / Run / Message / Event / ToolCall schema
-- [x] SQLite WAL store
-- [x] Persistent worker state transitions
-- [x] Tool-call idempotency boundary
-- [x] REST API
-- [x] Replayable SSE
-- [x] Local executor
-- [x] Sandbox Agent executable skeleton
-- [x] Offline demo model
+- [x] 多模块 Maven 工程与 SQLite WAL 存储
+- [x] Session、Run、Message、Event、ToolCall 数据模型
+- [x] 可恢复 Worker、工具幂等边界、REST API 与可重放 SSE
+- [x] 本地执行器、Sandbox Agent 骨架和离线演示模型
 
-## Phase 2 — Docker hand execution
+## 阶段 2：Docker 执行边界
 
-- [x] Docker lifecycle manager
-- [x] Random per-container token and no host port exposure
-- [x] Per-run workspace mount
-- [x] CPU / memory / PID / timeout limits
-- [x] Internal network without external routing
-- [x] Write and command approval state
-- [x] Approval recovery without a second model decision
-- [x] JSONL audit records
-- [x] Orphan container cleanup after restart
-- [x] Fake Docker lifecycle contract test
-- [x] Real Docker Desktop end-to-end verification
+- [x] 每 Run 一个容器、随机控制令牌、无宿主端口暴露
+- [x] 工作区挂载、CPU/内存/PID/超时限制和内部网络
+- [x] 写文件与命令审批、审批恢复、JSONL 审计
+- [x] 启动清理孤儿容器、Fake Docker 与真实 Docker 验收
 
-## Phase 3 — Real model and context engineering
+## 阶段 3：真实模型与上下文工程
 
-- [x] OpenAI-compatible streaming provider
-- [x] GLM / DeepSeek configuration
-- [x] Static system and session context layers
-- [x] Tool result truncation and LocalArtifactStore
-- [x] Conversation summary with safe tool boundaries
-- [x] Token usage and limits
+- [x] OpenAI-compatible 流式模型适配
+- [x] GLM、DeepSeek 配置与分层 Prompt
+- [x] 大工具结果截断及本地 Artifact Store
+- [x] 安全的对话摘要、Token 用量和预算
 
-## Phase 4 — Manual memory and product API
+## 阶段 4：人工 Memory 与产品 API
 
-- [x] Explicit memory CRUD only
-- [x] Project memory retrieval
-- [x] API key authentication
-- [x] OpenAPI documentation
-- [x] Initial run timeline page (replaced by the Phase 6 chat Console)
-- [x] Backup and restore command
+- [x] Memory 显式 CRUD 和项目级召回
+- [x] API Key、OpenAPI、备份恢复命令
+- [x] 初版运行时间线（后由阶段 6 聊天 Console 替代）
 
-## Phase 5 — DeepSeek V4 and real Docker acceptance
+## 阶段 5：DeepSeek V4 与真实 Docker 验收
 
-- [x] DeepSeek V4 Flash / Pro configuration
-- [x] Thinking toggle and reasoning effort
-- [x] Streaming `reasoning_content`
-- [x] Durable reasoning round-trip across tool calls
-- [x] DeepSeek prompt cache usage parsing
-- [x] Legacy SQLite schema migration
-- [x] Real Docker Desktop end-to-end verification
+- [x] DeepSeek V4 Flash/Pro、思考开关和推理等级
+- [x] `reasoning_content` 流式解析与跨工具调用持久化恢复
+- [x] Prompt Cache 用量解析、旧 SQLite 结构迁移和真实容器验收
 
-## Phase 6 — Runtime correctness and chat console
+## 阶段 6：Runtime 正确性与聊天 Console
 
-- [x] Preserve every streamed tool call in provider order
-- [x] Durable sequential execution and per-tool approval
-- [x] Active model HTTP/SSE cancellation
-- [x] Bounded project `AGENTS.md` / `PAI.md` injection
-- [x] Numbered SQLite schema migration records
-- [x] Chat-oriented responsive Web Console with collapsible execution details
-- [x] Buffered model delta persistence and bounded Console activity rendering
-- [x] Per-Run thinking toggle and reasoning-effort controls in the Console
-- [x] Persistent conversation groups, session moves, and safe session deletion
+- [x] 同轮全部工具调用原子持久化并按 Provider 顺序执行
+- [x] 每工具审批、模型 HTTP/SSE 主动取消和受控项目规则注入
+- [x] 编号迁移、响应式聊天 Console、批量 delta 持久化
+- [x] 每 Run 思考控制、持久化会话分组和安全删除
 
-## Phase 7 — Managed capability providers
+## 阶段 7：受管能力 Provider
 
-- [x] Stable Server Tool Provider SPI behind the durable ToolCall boundary
-- [x] Project/global Skill discovery, bounded prompt index, on-demand `load_skill`, and validated HTTPS Git import
-- [x] Multi-format project document upload, Tika extraction, persisted hybrid vector index, and `search_knowledge`
-- [x] Agent-triggered `session_search` over historical project messages with BM25 and per-session summaries
-- [x] Opt-in web search/fetch with bounded responses and SSRF controls
-- [x] Remote Streamable HTTP MCP discovery/calls with namespaced tools and mandatory Approval
-- [x] Durable Multi-Agent child Runs with ToolCall idempotency, depth limit, and fair queue ordering
-- [x] Schema migrations 5–7 and Store/provider tests
-- [x] Multimodal image upload, durable Run binding, bounded image processing, and OpenAI-compatible content parts
-- [x] Console capability manager for Skills, knowledge documents, and image attachments
-- [x] Unified chat attachment picker for images and multi-format documents with Run-bound priority RAG
-- [x] Recoverable tool-failure observations: failed tool results return to the model without failing the Run
-- [x] Scanned-PDF page rendering, multimodal OCR, and current-Run visual fallback
-- [x] SSE starvation fix plus terminal-event close/reconciliation in Console
+- [x] 统一 Server Tool Provider SPI，继续复用持久化 ToolCall 边界
+- [x] 项目/全局 Skill、按需加载资源和受校验的 HTTPS Git 导入
+- [x] 多格式知识文档、Tika 提取、混合向量索引和 `search_knowledge`
+- [x] 历史会话 BM25 检索、可选联网、远程 HTTP MCP
+- [x] 持久化 Multi-Agent 子 Run、深度限制和公平队列
+- [x] 多模态图片/文档附件、扫描 PDF OCR 与视觉降级
+- [x] 工具业务失败 observation、SSE 饥饿与终态收敛修复
 
-## Phase 8 — Enterprise-detail refinement on the single-node runtime
+## 阶段 8：单机企业细节完善
 
-- [x] Structure-aware document chunks for headings, sentences, lists, tables, and fenced code
-- [x] BM25 + real remote embedding retrieval, RRF fusion, overlap dedupe, and automatic context recall
-- [x] Batched OpenAI-compatible embeddings with explicit offline lexical degradation
-- [x] Main-model structured conversation summary with deterministic failure fallback
-- [x] Durable L0-to-L1/L2/L3 automatic memory extraction, confidence filtering, revisions, and hybrid recall
-- [x] Skill bundled-resource discovery and bounded `read_skill_resource`
-- [x] Model retry/backoff, same-endpoint fallback model, request rate limit, per-Run step/token budgets, and usage table
-- [x] MCP argument/schema budgets and failure circuit breaker
-- [x] Multi-Agent child/depth limits, approved child cancellation, and descendant cancellation propagation
-- [x] Capability status UI, Micrometer runtime metrics, storage health indicator, and migrations 8–9
-- [x] 48 automated tests across the full Maven reactor
+- [x] 结构化分块、BM25/Embedding 双路召回、RRF 融合与去重
+- [x] 主模型结构化摘要和确定性失败降级
+- [x] L0 到 L1/L2/L3 自动 Memory、置信度、修订与混合召回
+- [x] 模型重试/限流/预算、MCP 熔断和 Multi-Agent 配额
+- [x] 能力状态、Micrometer 指标、存储健康检查和迁移 8–9
 
-## Phase 9 — Operational hardening and delivery gates
+## 阶段 9：运维加固与交付门禁
 
-- [x] Bounded Sandbox/Docker CLI output collection and timeout process-tree termination
-- [x] Required-token Sandbox startup and constant-time control-channel authentication
-- [x] Production API-key fail-fast, management/OpenAPI protection, Console CSP and tab-scoped key storage
-- [x] Shared SQLite connection policy, isolated migration catalog and scheduled WAL maintenance
-- [x] Opt-in Event/Audit retention plus orphan Artifact and stale temporary-file cleanup
-- [x] Query-aware historical-message prefilter while preserving public search-count semantics
-- [x] Fsync plus atomic replacement for Artifacts, attachments, knowledge documents and indexes
-- [x] Checked backup/restore archives with server-state, SHA-256, traversal and SQLite-header validation
-- [x] Queue/Approval/Memory/SSE gauges plus model-retry and tool-failure counters
-- [x] Maven `-Xlint:all`, GitHub Actions verification, Dependabot and CycloneDX SBOM
-- [x] 57 automated tests across Common, Server and Sandbox Agent boundaries
+- [x] Sandbox/Docker 输出限额和超时进程树终止
+- [x] Sandbox 强制令牌、常量时间认证和生产 API Key 启动门禁
+- [x] Console 安全响应头、SQLite 连接策略、WAL 维护和保留策略
+- [x] 原子文件替换、受校验备份恢复和孤儿文件清理
+- [x] Runtime 指标、Maven `-Xlint:all`、CI、Dependabot 与 SBOM
 
-## Explicit non-goals
+## 阶段 10：P0 业务效率工作台
 
-- Kubernetes, MicroVM, multi-region, multi-tenant
-- Kafka, Redis, PostgreSQL, MinIO
-- Cross-project memory dreaming/association graphs
-- Autonomous planner/reviewer Agent Team and complex team Console
-- Local stdio MCP process management and browser automation
-- External vector database in the default Lite profile
-- Audio/video understanding and historical replay of raw image attachments
+- [x] 终态 Run 原地重试和带历史上下文的分支会话
+- [x] “仅本次/本对话/本项目”审批；持久化策略只复用相同工具和完全相同参数
+- [x] 对话、消息、Memory、知识和 Artifact 的项目级统一检索
+- [x] Memory 来源/置信度展示、置顶、启停、人工确认、修订查看与恢复
+- [x] 知识文档集合、标签、版本、索引状态、重建索引、引用定位和有用性反馈
+- [x] Artifact 列表、预览、认证下载、删除和复用为聊天附件
+- [x] Schema 迁移 10、Console 业务工作台、Store 回归测试和中文文档
+- [x] 59 项自动化测试覆盖 Common、Server 与 Sandbox Agent
+
+## 明确不做
+
+- Kubernetes、MicroVM、多地域和多租户
+- Kafka、Redis、PostgreSQL、MinIO
+- 跨项目 Memory 联想图谱
+- 自治 Planner/Reviewer Agent Team 和复杂团队 Console
+- 默认 Lite 配置中的外部向量数据库
+- 音视频理解和历史原始图片重复注入

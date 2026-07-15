@@ -1,89 +1,87 @@
-# Architecture
+# 架构说明
 
-## Deployment boundary
+## 部署边界
 
-The platform uses one Spring Boot server process and one SQLite database. `paicli-sandbox-agent` is a separate executable boundary used by Docker mode.
+平台由一个 Spring Boot Server、一个 SQLite 数据库和可选的 Docker Sandbox 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界。
 
 ```text
-Client
-  -> REST/SSE
+客户端
+  -> REST / SSE
 PaiCLI Server
-  -> SQLite: Session / Run / Message / Event / ToolCall
-             Approval / Artifact / Layered Memory / Model Usage
-  -> ModelClient
-       -> DemoModelClient
-       -> OpenAiCompatibleModelClient (SSE)
-  -> ContextManager -> Prompt layers / Memory / Compaction / Token budget
-  -> ToolRouter -> SandboxDriver
-                         -> LocalSandboxDriver (Phase 1)
-                         -> DockerSandboxDriver
-                -> ServerToolProvider
-                         -> Skill / Knowledge / Web / MCP / Delegation
+  -> SQLite：Session / Run / Message / Event / ToolCall
+             Approval / ApprovalPolicy / Artifact / Memory / ModelUsage
+  -> ModelClient：Demo 或 OpenAI-compatible 流式模型
+  -> ContextManager：Prompt / Memory / 摘要 / Token 预算
+  -> ToolRouter
+       -> SandboxDriver：Local（仅开发）或 Docker
+       -> ServerToolProvider：Skill / Knowledge / Web / MCP / Delegation
 ```
 
-## Recovery contract
+## Runtime 恢复契约
 
-1. A run is committed as `QUEUED` before a worker can see it.
-2. A worker atomically changes it to `RUNNING`.
-3. The assistant message and every tool call from the model turn are committed together before execution.
-4. Tool results are committed before the run is queued for its next model step.
-5. Expected tool-level failures are committed as failed ToolCalls plus tool-role observations, then the Run is re-queued so the model can correct arguments or choose an alternative. Approval denial, cancellation, and unexpected Runtime exceptions remain terminal.
-6. On startup interrupted `RUNNING`, `WAITING_MODEL`, and `WAITING_TOOL` runs return to `QUEUED`.
-7. A completed tool call is reused by idempotency key rather than executed again.
+1. Run 先以 `QUEUED` 提交，Worker 才能看到。
+2. Worker 原子地将其改为 `RUNNING`。
+3. 模型同一轮的 assistant 消息和全部工具调用在执行前同一事务落库。
+4. 工具按 Provider 顺序执行；结果先持久化，再进入下一模型步。
+5. 可预期的工具失败写成 ToolCall 失败和 `tool` observation，然后重新排队让模型纠正；审批拒绝、取消和 Runtime 异常仍是终态。
+6. 启动时将中断的 `RUNNING`、`WAITING_MODEL`、`WAITING_TOOL` Run 恢复为 `QUEUED`，并把 `RUNNING` ToolCall 恢复为 `REQUESTED`。
+7. 已完成工具调用按幂等键复用，不重复产生副作用。
 
-This is intentionally event-backed state, not full event sourcing: current state stays in relational tables while `run_events` provides replay and diagnosis.
+系统采用“事件支撑的状态”而非完全事件溯源：关系表保存当前状态，`run_events` 用于重放、SSE 和诊断。
 
-## Product boundary
+## 产品与安全边界
 
-All `/v1/**` endpoints are protected when `PAICLI_API_KEY` is configured; `/actuator/**` and `/v3/api-docs` use the same protection by default. Non-development deployments can set `PAICLI_SECURITY_REQUIRE_API_KEY=true` to fail startup when the key is absent. The browser page is a single-tenant chat Console with a separate execution-detail stream and keeps the API key only in tab-scoped `sessionStorage`. Console resources receive CSP, anti-framing, MIME-sniffing, referrer and browser-permission headers. Conversation groups are persisted in `session_groups`; deleting a group moves its sessions to the ungrouped section. Deleting a Session is rejected while it has an active Run and otherwise removes its dependent runtime records. OpenAPI is available at `/docs`.
+- 配置 `PAICLI_API_KEY` 后保护 `/v1/**`；Actuator 和 OpenAPI 默认使用同一密钥。生产可设置 `PAICLI_SECURITY_REQUIRE_API_KEY=true`，缺少密钥时拒绝启动。
+- Console 仅把 API Key 保存在当前标签页 `sessionStorage`，并启用 CSP、防嵌套、MIME 嗅探防护、Referrer 与浏览器权限策略。
+- 删除 Session 前拒绝活跃 Run；随后同一事务删除 Approval、ToolCall、Event、Artifact、ModelUsage、MemoryExtraction、Message 和 Run。删除分组只把会话移到未分组。
+- 模型密钥只留在 Server，不进入 Sandbox、模型上下文或附件目录。
 
-Memory extraction is asynchronous and durable. A completed Run first creates a `memory_extractions` row; the worker then extracts typed L1/L2/L3 units with confidence and source metadata. Same-key changes retain old values in `memory_revisions`. Retrieval is query-aware and combines lexical/semantic relevance, confidence, time decay and stable L3 preferences. Explicit CRUD remains the correction/deletion boundary. Large tool results are stored under `data/artifacts` and replaced in model history by a bounded preview plus artifact id.
+## P0 业务工作台
 
-DeepSeek V4 thinking output follows the same durable boundary as tool calls: `reasoning_content`, assistant `tool_calls`, and the matching tool result are persisted before the next model request. The context builder restores all three fields together. DeepSeek traffic is forced to HTTP/1.1 for stable long-lived SSE behavior, while other OpenAI-compatible providers keep the generic transport behavior.
+- 终态 Run 可以在原 Session 重试；分支操作创建新 Session，并复制源 Run 之前的未归档对话，再用源输入和推理设置创建新 Run。
+- 危险工具仍先创建持久化 Approval。用户可选择仅本次、本对话或本项目允许；持久化策略同时匹配工具名和已落库参数的 SHA-256，因此不会扩大到模型后来生成的不同参数。
+- `/v1/search` 聚合项目内 Session 标题、Message、Memory、Knowledge SearchHit 和 Artifact 元数据，返回可跳转的 Session/Run 标识。
+- Memory 管理保留层级、类型、来源、置信度、访问统计和修订历史，并支持置顶、启停、人工确认、同项目合并及历史恢复。Runtime 召回只使用启用项并优先置顶项。
+- Knowledge 文档维护集合、标签、版本、索引状态、分块数和 Embedding Provider；重建索引继续使用原子替换。检索结果包含文档、分块、标题和字符区间，形成引用定位链；Console 的有用/无用反馈持久化到 SQLite，供后续排序治理使用。
+- Artifact 文件先校验路径和 SHA-256，再提供预览、认证下载或复制为指定 Session 的待提交文本附件。
 
-Thinking is selectable per Run from the Console or create-Run API. `disabled` is the fast path; `enabled` accepts `high` or `max` reasoning effort. Stream deltas are buffered into bounded event batches before SQLite persistence, while the browser merges display updates on animation frames. This keeps durable replay without turning token-sized chunks into synchronous database writes or thousands of DOM nodes.
+## Memory 与上下文
 
-All tool calls from one model turn are preserved. They execute sequentially in provider order so a later call cannot bypass an earlier approval. Canceling a Run closes the active model future and response stream; Docker cancellation also removes the Run container.
+Run 完成后先创建持久化 `memory_extractions` 任务，再由 Worker 提取带类型、层级、置信度和来源的 L1/L2/L3 Memory。同 key 变化和人工编辑都先写入 `memory_revisions`。召回综合词法/语义相关性、置信度、时间衰减、置顶和稳定 L3 偏好；显式 REST CRUD 是人工纠错边界。
 
-Project rules are bounded context rather than autonomous memory. The assembler reads global, project-key, and Run-workspace `AGENTS.md` / `PAI.md` layers under controlled data roots, with more specific layers taking precedence.
+DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工具结果按同一持久化边界恢复。模型 delta 批量写入 Event，浏览器按动画帧合并显示，避免每 Token 同步写 SQLite 或创建大量 DOM。
 
-## SQLite constraints
+项目规则属于受控上下文，不是自治 Memory。系统只从全局、项目和 Run 工作区的数据根目录读取 `AGENTS.md` / `PAI.md`，更具体层覆盖通用层，并受总字符预算约束。
 
-SQLite is suitable because this edition is single tenant and single node. WAL mode permits concurrent readers while writes remain short. The design keeps repository interfaces local so a future PostgreSQL adapter does not change the Agent Runtime.
+## SQLite 与文件一致性
 
-`schema_migrations` records numbered, idempotent schema levels. Existing pre-version databases are upgraded in place and registered without deleting user data. Versions 5–7 add delegation, fair queues and multimodal attachments; version 8 adds layered Memory jobs/revisions; version 9 adds per-turn model usage. Session deletion removes these dependent rows in the same transaction.
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。`schema_migrations` 记录幂等版本：5–7 为委派、公平队列和多模态附件，8 为分层 Memory，9 为模型用量治理，10 为审批策略与 P0 管理状态。
 
-SQLite connection policy and migration bookkeeping are isolated from the domain Store. Scheduled maintenance performs a passive WAL checkpoint and removes old orphan/temp files. Event and Audit retention are explicit opt-in settings so replay history is never silently discarded after an upgrade. Knowledge, attachment and Artifact files use fsync followed by atomic replacement; an index interrupted between document and index replacement is rebuilt from source metadata.
+连接策略和迁移目录与领域 Store 分离。定时维护执行被动 WAL checkpoint，并按显式配置清理过期 Event/Audit、孤儿 Artifact 和临时文件。Knowledge、Attachment 和 Artifact 采用临时文件、fsync、原子替换；索引中断后可按正文元数据重建。
 
-## Phase 7 server tool providers
+## Server Tool Provider
 
-RAG, historical session search, Skill, web access, MCP, and Multi-Agent delegation are Server-side tool providers. Their model-visible calls still enter the existing pipeline: the complete model turn is committed first, calls execute in provider order, results pass through the Artifact materializer, and Event/SSE/Audit remain authoritative. Providers do not call the model or Sandbox behind the runtime's back.
+RAG、历史会话检索、Skill、联网、MCP 和 Multi-Agent 委派都通过普通 ToolCall 进入统一管线，不可绕过持久化、审批、顺序执行、Event/SSE、Audit 和 Artifact 边界。
 
-- Skills are read only from controlled global/project roots, sorted by stable name, and loaded on demand through `load_skill`. Bundled references/templates are listed but only read through bounded, traversal-safe `read_skill_resource`. Git import stages, validates symlinks/file budgets, and never executes repository code.
-- RAG stores explicit project documents under `data/projects/{projectKey}/knowledge`. Tika extracts text; image-only PDFs are rendered by PDFBox and transcribed by the configured multimodal model before entering the same chunk/index path. Chunks preserve heading paths, sentences, lists, tables and fenced code. BM25 and real Ollama/OpenAI-compatible embeddings are ranked independently and fused with RRF, boosts, overlap dedupe and per-document quotas. Context assembly automatically retrieves top evidence each turn. With no embedding service, the system explicitly uses lexical-only degradation.
-- `session_search` is an Agent-triggered history tool. It searches current-project user-visible conversation messages with BM25 only when the model calls it, excludes the active Run, and returns matched messages grouped into per-session extractive summaries.
-- Web access is opt-in. Search calls a configured SearXNG-compatible JSON endpoint; fetch revalidates every redirect and rejects loopback, link-local, and private targets.
-- Remote HTTP MCP servers are configured in ignored local data. Server-held headers can reference environment variables; schema, arguments and responses are bounded, consecutive failures open a short circuit, and every MCP tool requires durable Approval.
-- `spawn_agent` requires Approval and atomically creates a delegation plus internal child Session/Run. It is idempotent by parent ToolCall, limited by depth/child count, and descendant cancellation propagates. Child Runs use the normal worker and recovery paths; no second in-memory agent runtime exists.
+- Skill 只从受控全局/项目目录发现，稳定排序并按需加载；Git 导入先暂存，再校验符号链接、文件数和字符预算，不执行仓库代码。
+- RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构，BM25 与真实 Embedding 独立排序后以 RRF 融合、去重和限额。
+- `session_search` 只在 Agent 调用时检索当前项目的用户可见历史消息，排除当前 Run，并按会话生成抽取式摘要。
+- 联网默认关闭；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
+- MCP Header 可引用环境变量，Schema、参数和响应都有预算，连续失败触发短时熔断；全部 MCP 工具强制审批。
+- `spawn_agent` 经审批后原子创建委派和内部子 Session/Run，以父 ToolCall 幂等，并限制深度、子数量和级联取消。
 
-## Model gateway and observability
+## 模型网关与可观测性
 
-The OpenAI-compatible client rate-limits requests and retries only before an SSE response is accepted, so streamed deltas are never duplicated. Retriable HTTP failures use exponential backoff and may fall back to a configured model on the same endpoint. Per-Run step/token budgets are checked before new model calls, while already persisted resumable ToolCalls still execute. Every turn writes `model_usage`; Actuator exposes counters/timers plus gauges for queued Runs, pending Approvals, pending Memory extractions and active SSE streams. Model retry and tool failure counters make degraded operation visible. Run id remains the trace correlation key across Event, Audit, ToolCall and Artifact records.
+OpenAI-compatible Client 限流，并且只在 SSE 响应被接受前重试，避免重复流式 delta。可重试 HTTP 失败采用指数退避，也可在同端点切换后备模型。每 Run 在新模型调用前检查步骤和 Token 预算，但已持久化的可恢复 ToolCall 仍会执行。`model_usage` 记录每轮用量；Actuator 暴露排队 Run、待审批、待提取 Memory、活动 SSE、模型重试和工具失败指标。Run id 是 Event、Audit、ToolCall 和 Artifact 的统一关联键。
 
-## Multimodal and document input
+## 多模态与文档输入
 
-The Console uploads up to four PNG/JPEG/GIF images as staged Session attachments. The Server validates actual image bytes, bounds source size, flattens alpha, and resizes/re-encodes oversized inputs before writing them under `data/input-attachments`. Creating a Run atomically binds the staged attachment ids to its user Message; an attachment cannot be reused by another Run. Only the current Run's user images are loaded into `ModelMessage` and serialized as OpenAI-compatible `image_url` content parts. Historical image bytes are not repeatedly injected, model credentials and images never enter Sandbox, and Session deletion removes attachment rows and files with the other runtime state.
+Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真实图片字节、尺寸与大小，必要时压缩；创建 Run 时把附件 id 原子绑定到 user Message，不能被另一 Run 重复绑定。只有当前 Run 的图片作为 OpenAI-compatible `image_url` 注入，历史图片不重复发送。
 
-The same picker accepts text, Markdown, PDF, Office, CSV, HTML, JSON, XML, RTF, EPUB and OpenDocument files. A document upload is extracted by Tika, structure-chunked and indexed under the Session project before its generic attachment row is staged. Binding that id to a Run makes the document an explicit priority RAG source. Query-specific evidence is preferred; if the request is generic (for example “summarize the attachment”), representative chunks are sampled across the attached document. Normal documents are never sent wholesale to the model. If a PDF has no text layer, the Server renders bounded pages and uses the configured multimodal model for OCR. When OCR is unavailable, a chat upload is retained as a visual-PDF attachment and its bounded page images are injected only into the current Run; it is not falsely reported as indexed.
+文本、Markdown、PDF、Office、CSV、HTML、JSON、XML、RTF、EPUB 和 OpenDocument 由 Tika 提取并写入当前项目知识库，绑定当前 Run 后作为优先 RAG 来源。普通文档不整体塞入模型；扫描 PDF 在 OCR 不可用时保留为视觉 PDF，只把受限页图像注入当前 Run，也不会误报为已索引。
 
-SSE streaming uses a zero-capacity executor handoff so long-lived subscriptions expand to the configured maximum instead of sitting behind two core threads. The Console treats persisted terminal events as an explicit close signal, cancels the reader immediately, reconciles status through `GET /v1/runs/{id}`, and reconnects only while the Run remains non-terminal. This keeps terminal UI state independent of TCP close timing.
+## Sandbox 边界
 
-## Sandbox boundary
+`LocalSandboxDriver` 仅用于开发，不是安全沙箱。Docker 模式按活跃 Run 创建受限容器，工作区留在宿主机，容器使用无外部路由的内部网络且不发布端口；Server 通过 `docker exec` 调用容器 loopback 的带令牌 HTTP Agent。
 
-`LocalSandboxDriver` is explicitly a development executor, not a security sandbox. Docker mode starts one restricted container per active Run and keeps the workspace on the host. The container remains on a Docker `--internal` network with no published port; the Server uses `docker exec` to call the authenticated Sandbox Agent HTTP endpoint on the container loopback interface. Model credentials remain in the Server process and are never placed in the sandbox environment.
-
-The Sandbox Agent refuses to start without its per-container token. Command and Docker CLI output collectors retain only a bounded prefix while continuing to drain the pipe, preventing output truncation from becoming an out-of-memory boundary. Timeout handling forcibly terminates the process and its descendants.
-
-Dangerous tools create a durable Approval row before any container call. Approval moves the same persisted ToolCall back to the worker; the model is not asked to recreate the action. This preserves the exact arguments the user reviewed.
-
-On restart, `RUNNING` tool calls become `REQUESTED`, interrupted Runs become `QUEUED`, and managed orphan containers are removed. The worker resumes the persisted tool call directly.
+Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令和 Docker 输出只保留有限前缀，但持续排空管道；超时会终止进程及后代。危险工具在任何容器调用前创建持久化 Approval，批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作。

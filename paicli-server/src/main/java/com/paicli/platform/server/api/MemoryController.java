@@ -40,6 +40,37 @@ public class MemoryController {
         return store.memories(projectKey, query, limit);
     }
 
+    @GetMapping("/managed")
+    public List<SqliteRuntimeStore.MemoryUnit> managed(
+            @RequestParam(defaultValue = "default") String projectKey,
+            @RequestParam(defaultValue = "200") int limit) {
+        return store.managedMemoryUnits(projectKey, limit);
+    }
+
+    @PostMapping("/{memoryId}/state")
+    public SqliteRuntimeStore.MemoryUnit state(@PathVariable String memoryId,
+                                               @RequestBody ApiDtos.MemoryStateRequest request) {
+        return store.setMemoryState(memoryId, request.pinned(), request.enabled(),
+                Boolean.TRUE.equals(request.confirmed()));
+    }
+
+    @GetMapping("/{memoryId}/revisions")
+    public List<SqliteRuntimeStore.MemoryRevision> revisions(@PathVariable String memoryId) {
+        return store.memoryRevisions(memoryId);
+    }
+
+    @PostMapping("/{memoryId}/revisions/{revisionId}/restore")
+    public SqliteRuntimeStore.MemoryUnit restore(@PathVariable String memoryId,
+                                                 @PathVariable String revisionId) {
+        return store.restoreMemoryRevision(memoryId, revisionId);
+    }
+
+    @PostMapping("/{memoryId}/merge")
+    public SqliteRuntimeStore.MemoryUnit merge(@PathVariable String memoryId,
+                                               @Valid @RequestBody ApiDtos.MemoryMergeRequest request) {
+        return store.mergeMemories(memoryId, request.sourceIds());
+    }
+
     @GetMapping("/{memoryId}")
     public MemoryRecord get(@PathVariable String memoryId) {
         return store.findMemory(memoryId)

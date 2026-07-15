@@ -20,6 +20,7 @@
     </div>
     <div class="sessions" id="sessions"></div>
     <div class="side-foot">
+      <button class="secondary" id="workbench">业务工作台</button>
       <button class="secondary" id="capabilities">能力管理</button>
       <button class="secondary" id="settings">连接设置</button>
       <a class="secondary" href="/docs">API 文档</a>
@@ -34,6 +35,8 @@
           <span class="meta" id="runMeta">尚未开始任务</span>
         </div>
         <span class="status" id="status">空闲</span>
+        <button class="secondary run-action" id="retryRun" hidden>重试</button>
+        <button class="secondary run-action" id="branchRun" hidden>分支</button>
         <button class="secondary" id="toggle">执行详情</button>
       </header>
       <div class="messages" id="messages"><div class="stack" id="stack"></div></div>
@@ -101,6 +104,28 @@
     <div class="managed-list" id="knowledgeList"></div>
   </section>
 </dialog>
+<dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
+  <div class="dialog-title"><strong>业务工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
+  <div class="hint" id="workbenchProject">当前项目：default</div>
+  <section class="capability-section">
+    <h3>全局检索</h3>
+    <div class="workbench-search"><input id="globalSearch" placeholder="搜索对话、消息、Memory、知识和 Artifact"><button class="primary" id="searchAll">搜索</button></div>
+    <div class="managed-list" id="searchResults"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>Memory 管理</h3><button class="secondary" id="refreshMemories">刷新</button></div>
+    <div class="managed-list" id="memoryList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>Artifact 工作台</h3><button class="secondary" id="refreshArtifacts">刷新</button></div>
+    <div class="managed-list" id="artifactList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>持久化审批策略</h3><button class="secondary" id="refreshPolicies">刷新</button></div>
+    <p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p>
+    <div class="managed-list" id="policyList"></div>
+  </section>
+</dialog>
 <dialog id="groupDialog">
   <strong>新建对话分组</strong>
   <div class="hint">例如：工作、学习、个人</div>
@@ -110,6 +135,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260706-pdf-ocr-sse-finalize"></script>
+<script src="/app.js?v=20260715-p0-workbench"></script>
 </body>
 </html>

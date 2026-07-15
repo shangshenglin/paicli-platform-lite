@@ -1,6 +1,6 @@
 # PaiCLI Platform Lite
 
-面向单人开发、私有单机部署的 Managed Agent Runtime。项目保留 CatPaw 类架构最关键的思想：
+面向单人开发、私有单机部署的受管 Agent Runtime。项目保留 CatPaw 类架构最关键的思想：
 
 - Agent Runtime（脑）与 Sandbox（手）通过接口分离。
 - Session、Run、Message、Event、Tool Call 持久化。
@@ -10,7 +10,7 @@
 
 ## 当前阶段
 
-Phase 1 至 Phase 9 已完成：
+阶段 1 至阶段 10 已完成：
 
 - 三模块 Maven 工程。
 - Spring Boot REST/SSE Server。
@@ -37,7 +37,8 @@ Phase 1 至 Phase 9 已完成：
 - 可选 API Key 认证、生产强制密钥模式、管理端点保护、安全响应头和聊天式 Web Console。
 - SQLite WAL checkpoint、可选 Event/Audit 保留策略、孤儿文件清理和扩展 Micrometer 指标。
 - 带 SHA-256 校验、路径校验和 SQLite 文件头校验的停机备份/恢复脚本。
-- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 57 个自动化测试。
+- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 59 个自动化测试。
+- P0 业务工作台：Run 重试/分支、持久化审批策略、统一检索、Memory 管理、知识版本/索引状态和 Artifact 复用。
 
 Docker Desktop / WSL2 真实容器验收已完成：审批恢复、容器内命令执行、工作区挂载、SSE 重放、资源/安全限制和结束回收均已通过。
 
@@ -62,6 +63,37 @@ java -jar paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar
 `start-local.ps1` 和 `start-docker.ps1` 会自动读取被 Git 忽略的项目 `.env`；已经存在的进程环境变量优先。
 Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。启用 API Key 后，
 `/actuator/**` 与 `/v3/api-docs` 默认使用同一密钥保护。
+
+## P0 业务工作台
+
+Console 左侧“业务工作台”统一提供项目级搜索、Memory 管理、Artifact 管理和审批策略撤销。终态 Run 顶部提供“重试”和“分支”：重试沿用原 Session，分支会复制源 Run 之前的对话到新 Session，再沿用原输入与推理设置执行。
+
+危险工具审批支持三种范围：
+
+- 仅本次允许：不创建策略。
+- 本对话允许：仅当前 Session 可复用。
+- 本项目允许：当前项目的任意 Session 可复用。
+
+持久化策略只匹配相同工具名和完全相同的已落库参数 SHA-256；参数发生任何变化都会重新审批。可通过工作台或 `DELETE /v1/approvals/policies/{policyId}` 撤销。
+
+主要 API：
+
+```text
+POST   /v1/runs/{runId}/retry                 # body: {"branch":false}
+GET    /v1/search?projectKey=default&query=关键词
+GET    /v1/memories/managed?projectKey=default
+POST   /v1/memories/{id}/state
+GET    /v1/memories/{id}/revisions
+POST   /v1/memories/{id}/revisions/{revisionId}/restore
+POST   /v1/memories/{id}/merge
+GET    /v1/knowledge/documents/search
+POST   /v1/knowledge/documents/{projectKey}/{name}/reindex
+POST   /v1/knowledge/documents/{projectKey}/{name}/feedback
+GET    /v1/artifacts?projectKey=default
+GET    /v1/artifacts/{id}/download
+POST   /v1/artifacts/{id}/reuse
+DELETE /v1/artifacts/{id}
+```
 
 ## 最小验收
 
@@ -158,7 +190,7 @@ GET /v1/approvals
 POST /v1/approvals/{approvalId}
 Content-Type: application/json
 
-{"decision":"APPROVED"}
+{"decision":"APPROVED","rememberScope":"SESSION"}
 ```
 
 ```json
@@ -243,7 +275,7 @@ Content-Type: application/json
 
 架构和阶段说明见 [docs/architecture.md](docs/architecture.md) 与 [docs/phases.md](docs/phases.md)。
 
-## Phase 7：Server Tool Provider 扩展
+## 阶段 7：Server Tool Provider 扩展
 
 新增能力没有引入第二套 Agent Loop。`load_skill`、`search_knowledge`、`session_search`、
 `web_search` / `web_fetch`、`mcp__{server}__{tool}`、

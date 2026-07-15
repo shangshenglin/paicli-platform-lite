@@ -55,6 +55,11 @@ public class KnowledgeService {
     }
 
     public KnowledgeDocument upsert(String projectKey, String name, String content) {
+        return upsert(projectKey, name, content, "默认", List.of());
+    }
+
+    public KnowledgeDocument upsert(String projectKey, String name, String content,
+                                    String collection, List<String> tags) {
         String value = content == null ? "" : content.trim();
         if (value.isBlank()) throw new IllegalArgumentException("content must not be blank");
         if (value.length() > MAX_DOCUMENT_CHARS) throw new IllegalArgumentException("document is too large");
@@ -63,6 +68,12 @@ public class KnowledgeService {
             Files.createDirectories(file.getParent());
             AtomicFileWriter.write(file, value.getBytes(StandardCharsets.UTF_8));
             writeIndex(file, value);
+            DocumentMetadata previous = readMetadata(file);
+            writeMetadata(file, new DocumentMetadata(previous == null ? 1 : previous.version() + 1,
+                    boundedCollection(collection),
+                    tags == null ? List.of() : tags.stream().filter(tag -> tag != null && !tag.isBlank())
+                            .map(String::trim).map(tag -> tag.length() > 50 ? tag.substring(0, 50) : tag)
+                            .distinct().limit(20).toList()));
             return describe(file);
         } catch (Exception e) {
             throw new IllegalStateException("failed to store knowledge document", e);
@@ -70,8 +81,16 @@ public class KnowledgeService {
     }
 
     public KnowledgeDocument upload(String projectKey, MultipartFile file, DocumentTextExtractor extractor) {
+        return upload(projectKey, file, extractor, "默认", List.of());
+    }
+
+    public KnowledgeDocument upload(String projectKey, MultipartFile file, DocumentTextExtractor extractor,
+                                    String collection, List<String> tags) {
         DocumentTextExtractor.ExtractedDocument extracted = extractor.extract(file);
-        return upsertExtracted(projectKey, extracted);
+        String storedName = storedName(extracted.name());
+        return upsert(projectKey, storedName, "Source: " + extracted.name() + "\nContent-Type: "
+                + (extracted.contentType() == null ? "application/octet-stream" : extracted.contentType())
+                + "\n\n" + extracted.text(), collection, tags);
     }
 
     public KnowledgeDocument upsertExtracted(String projectKey, DocumentTextExtractor.ExtractedDocument extracted) {
@@ -100,10 +119,21 @@ public class KnowledgeService {
         try {
             Path document = documentPath(projectKey, name);
             Files.deleteIfExists(indexPath(document));
+            Files.deleteIfExists(metadataPath(document));
             return Files.deleteIfExists(document);
         } catch (Exception e) {
             throw new IllegalStateException("failed to delete knowledge document", e);
         }
+    }
+
+    public KnowledgeDocument reindex(String projectKey, String name) {
+        Path document = documentPath(projectKey, name);
+        if (!Files.isRegularFile(document)) throw new IllegalArgumentException("knowledge document not found");
+        try {
+            String content = Files.readString(document, StandardCharsets.UTF_8);
+            writeIndex(document, content);
+            return describe(document);
+        } catch (Exception e) { throw new IllegalStateException("failed to reindex knowledge document", e); }
     }
 
     public List<SearchHit> search(String projectKey, String query, int requestedLimit) {
@@ -278,6 +308,23 @@ public class KnowledgeService {
         return document.getParent().resolve(".index").resolve(encoded + ".json").normalize();
     }
 
+    private Path metadataPath(Path document) {
+        String encoded = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(document.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+        return document.getParent().resolve(".metadata").resolve(encoded + ".json").normalize();
+    }
+
+    private DocumentMetadata readMetadata(Path document) {
+        try {
+            Path path = metadataPath(document);
+            return Files.isRegularFile(path) ? mapper.readValue(path.toFile(), DocumentMetadata.class) : null;
+        } catch (Exception ignored) { return null; }
+    }
+
+    private void writeMetadata(Path document, DocumentMetadata metadata) throws Exception {
+        AtomicFileWriter.write(metadataPath(document), mapper.writeValueAsBytes(metadata));
+    }
+
     private static double cosine(float[] a, float[] b) {
         if (a == null || b == null || a.length == 0 || a.length != b.length) return 0;
         double dot = 0;
@@ -316,6 +363,11 @@ public class KnowledgeService {
         return result;
     }
 
+    private static String boundedCollection(String value) {
+        String collection = value == null || value.isBlank() ? "默认" : value.trim();
+        return collection.length() > 80 ? collection.substring(0, 80) : collection;
+    }
+
     private static boolean containsHan(String value) {
         return value.codePoints().anyMatch(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN);
     }
@@ -341,14 +393,28 @@ public class KnowledgeService {
 
     private KnowledgeDocument describe(Path file) {
         try {
+            IndexedDocument index = null;
+            String indexStatus = "PENDING";
+            if (Files.isRegularFile(indexPath(file))) {
+                try {
+                    index = mapper.readValue(indexPath(file).toFile(), IndexedDocument.class);
+                    indexStatus = index.sourceModified() == Files.getLastModifiedTime(file).toMillis()
+                            ? "READY" : "STALE";
+                } catch (Exception ignored) { indexStatus = "ERROR"; }
+            }
+            DocumentMetadata metadata = readMetadata(file);
             return new KnowledgeDocument(file.getFileName().toString(), Files.size(file),
-                    Files.getLastModifiedTime(file).toInstant(), file);
+                    Files.getLastModifiedTime(file).toInstant(), file,
+                    metadata == null ? 1 : metadata.version(), metadata == null ? "默认" : metadata.collection(),
+                    metadata == null ? List.of() : metadata.tags(), indexStatus,
+                    index == null ? 0 : index.chunks().size(), index == null ? "" : index.provider());
         } catch (Exception e) {
             throw new IllegalStateException("failed to inspect knowledge document", e);
         }
     }
 
     private record IndexedDocument(int version, String provider, long sourceModified, List<IndexedChunk> chunks) { }
+    private record DocumentMetadata(int version, String collection, List<String> tags) { }
     private record IndexedChunk(int start, int end, String heading, String kind,
                                 String text, float[] embedding) { }
     private record Candidate(int id, String document, int chunk, int start, int end,
@@ -359,7 +425,9 @@ public class KnowledgeService {
                     kind == null ? "paragraph" : kind, text, frequencies, length, similarity, value);
         }
     }
-    public record KnowledgeDocument(String name, long size, Instant updatedAt, @JsonIgnore Path path) { }
+    public record KnowledgeDocument(String name, long size, Instant updatedAt, @JsonIgnore Path path,
+                                    int version, String collection, List<String> tags, String indexStatus,
+                                    int indexedChunks, String embeddingProvider) { }
     public record SearchHit(String document, int chunk, int startChar, int endChar,
                             double score, double vectorSimilarity, String heading, String kind, String content) { }
 }

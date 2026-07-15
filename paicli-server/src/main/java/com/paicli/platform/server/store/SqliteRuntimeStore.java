@@ -132,6 +132,9 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "embedding_json", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "last_accessed_at", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "access_count", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "pinned", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "enabled", "INTEGER NOT NULL DEFAULT 1");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "confirmed_at", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_key, updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_revisions (" +
                     "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, " +
@@ -151,6 +154,24 @@ public class SqliteRuntimeStore {
                     "output_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_model_usage_run ON model_usage(run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS approval_policies (" +
+                    "id TEXT PRIMARY KEY, scope TEXT NOT NULL, session_id TEXT, project_key TEXT NOT NULL, " +
+                    "tool_name TEXT NOT NULL, arguments_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "UNIQUE(scope,session_id,project_key,tool_name,arguments_sha256))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_approval_policies_match " +
+                    "ON approval_policies(tool_name,arguments_sha256,project_key,session_id)");
+            statement.execute("DELETE FROM approval_policies WHERE rowid NOT IN (SELECT MIN(rowid) " +
+                    "FROM approval_policies GROUP BY scope,COALESCE(session_id,''),project_key,tool_name,arguments_sha256)");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_policy_project " +
+                    "ON approval_policies(project_key,tool_name,arguments_sha256) WHERE scope='PROJECT'");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_policy_session " +
+                    "ON approval_policies(session_id,project_key,tool_name,arguments_sha256) WHERE scope='SESSION'");
+            statement.execute("CREATE TABLE IF NOT EXISTS knowledge_feedback (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, document_name TEXT NOT NULL, " +
+                    "chunk_index INTEGER NOT NULL, helpful INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '', " +
+                    "created_at TEXT NOT NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_feedback_project " +
+                    "ON knowledge_feedback(project_key,created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS run_delegations (" +
                     "id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, parent_tool_call_id TEXT NOT NULL UNIQUE, " +
                     "child_session_id TEXT NOT NULL, child_run_id TEXT NOT NULL UNIQUE, agent_name TEXT NOT NULL, " +
@@ -309,6 +330,11 @@ public class SqliteRuntimeStore {
                     deleteBySessionRuns(connection, "run_delegations", currentSession, "child_run_id");
                 }
                 for (String currentSession : sessionIds) {
+                    try (PreparedStatement policies = connection.prepareStatement(
+                            "DELETE FROM approval_policies WHERE scope='SESSION' AND session_id=?")) {
+                        policies.setString(1, currentSession);
+                        policies.executeUpdate();
+                    }
                     deleteBySessionRuns(connection, "model_usage", currentSession);
                     deleteBySessionRuns(connection, "memory_extractions", currentSession);
                     deleteBySessionRuns(connection, "approvals", currentSession);
@@ -694,6 +720,43 @@ public class SqliteRuntimeStore {
 
     public List<MessageRecord> messages(String sessionId) {
         return messages(sessionId, false);
+    }
+
+    public SessionRecord createBranchSession(String sourceRunId) {
+        RunRecord sourceRun = findRun(sourceRunId)
+                .orElseThrow(() -> new IllegalArgumentException("run not found: " + sourceRunId));
+        SessionRecord sourceSession = findSession(sourceRun.sessionId()).orElseThrow();
+        SessionRecord branch = createSession(sourceSession.title() + " - 分支",
+                sourceSession.projectKey(), sourceSession.groupId());
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                long boundary;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT COALESCE(MIN(sequence),9223372036854775807) FROM messages WHERE run_id=?")) {
+                    ps.setString(1, sourceRunId);
+                    try (ResultSet rs = ps.executeQuery()) { boundary = rs.next() ? rs.getLong(1) : Long.MAX_VALUE; }
+                }
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT * FROM messages WHERE session_id=? AND archived=0 AND sequence<? ORDER BY sequence")) {
+                    ps.setString(1, sourceSession.id());
+                    ps.setLong(2, boundary);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            insertMessage(connection, branch.id(), null, rs.getString("role"),
+                                    rs.getString("content"), rs.getString("reasoning_content"),
+                                    null, null, false);
+                        }
+                    }
+                }
+                connection.commit();
+                return branch;
+            } catch (Exception e) { rollback(connection); throw e; }
+        } catch (Exception e) {
+            try { deleteSession(branch.id()); } catch (Exception ignored) { }
+            throw e instanceof SQLException sql ? failure("create branch session", sql)
+                    : new IllegalStateException("failed to create branch session", e);
+        }
     }
 
     public List<SessionSearchMessage> searchableSessionMessages(String projectKey, List<String> queryTerms, int limit) {
@@ -1175,7 +1238,8 @@ public class SqliteRuntimeStore {
     public List<MemoryUnit> memoryUnits(String projectKey, int limit) {
         List<MemoryUnit> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "SELECT * FROM memories WHERE project_key=? ORDER BY updated_at DESC LIMIT ?")) {
+                "SELECT * FROM memories WHERE project_key=? AND enabled=1 " +
+                        "ORDER BY pinned DESC, updated_at DESC LIMIT ?")) {
             ps.setString(1, normalizeProjectKey(projectKey));
             ps.setInt(2, Math.max(1, Math.min(limit, 500)));
             try (ResultSet rs = ps.executeQuery()) {
@@ -1318,28 +1382,52 @@ public class SqliteRuntimeStore {
 
     public MemoryRecord updateMemory(String id, String memoryKey, String content, String tags) {
         Instant now = Instant.now();
-        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "UPDATE memories SET memory_key=?,content=?,tags=?,updated_at=? WHERE id=?")) {
-            ps.setString(1, requireText(memoryKey, "memoryKey", 120));
-            ps.setString(2, requireText(content, "content", 32_000));
-            ps.setString(3, tags == null ? "" : tags.trim());
-            ps.setString(4, now.toString());
-            ps.setString(5, id);
-            if (ps.executeUpdate() == 0) throw new IllegalArgumentException("memory not found: " + id);
-            return findMemory(id).orElseThrow();
-        } catch (SQLException e) {
-            throw failure("update memory", e);
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                MemoryUnit current;
+                try (PreparedStatement find = connection.prepareStatement("SELECT * FROM memories WHERE id=?")) {
+                    find.setString(1, id);
+                    try (ResultSet rs = find.executeQuery()) {
+                        if (!rs.next()) throw new IllegalArgumentException("memory not found: " + id);
+                        current = mapMemoryUnit(rs);
+                    }
+                }
+                insertMemoryRevision(connection, current, current.sourceRunId());
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE memories SET memory_key=?,content=?,tags=?,updated_at=? WHERE id=?")) {
+                    ps.setString(1, requireText(memoryKey, "memoryKey", 120));
+                    ps.setString(2, requireText(content, "content", 32_000));
+                    ps.setString(3, tags == null ? "" : tags.trim());
+                    ps.setString(4, now.toString()); ps.setString(5, id); ps.executeUpdate();
+                }
+                connection.commit();
+                return findMemory(id).orElseThrow();
+            } catch (Exception e) { rollback(connection); throw e; }
+        } catch (Exception e) {
+            throw e instanceof SQLException sql ? failure("update memory", sql)
+                    : e instanceof IllegalArgumentException argument ? argument
+                    : new IllegalStateException("failed to update memory", e);
         }
     }
 
     public boolean deleteMemory(String id) {
-        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "DELETE FROM memories WHERE id=?")) {
-            ps.setString(1, id);
-            return ps.executeUpdate() > 0;
-        } catch (SQLException e) {
-            throw failure("delete memory", e);
-        }
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement revisions = connection.prepareStatement(
+                        "DELETE FROM memory_revisions WHERE memory_id=?")) {
+                    revisions.setString(1, id); revisions.executeUpdate();
+                }
+                int deleted;
+                try (PreparedStatement memory = connection.prepareStatement("DELETE FROM memories WHERE id=?")) {
+                    memory.setString(1, id); deleted = memory.executeUpdate();
+                }
+                connection.commit();
+                return deleted > 0;
+            } catch (Exception e) { rollback(connection); throw e; }
+        } catch (SQLException e) { throw failure("delete memory", e); }
+        catch (Exception e) { throw new IllegalStateException("failed to delete memory", e); }
     }
 
     public void markToolRunning(String id) {
@@ -1447,6 +1535,297 @@ public class SqliteRuntimeStore {
 
     public Path databasePath() {
         return databasePath;
+    }
+
+    public List<MemoryUnit> managedMemoryUnits(String projectKey, int limit) {
+        List<MemoryUnit> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM memories WHERE project_key=? ORDER BY enabled DESC,pinned DESC,updated_at DESC LIMIT ?")) {
+            ps.setString(1, normalizeProjectKey(projectKey));
+            ps.setInt(2, Math.max(1, Math.min(limit, 500)));
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) values.add(mapMemoryUnit(rs)); }
+            return values;
+        } catch (SQLException e) { throw failure("list managed memory units", e); }
+    }
+
+    public Optional<ToolCallRecord> findToolCall(String id) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM tool_calls WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapToolCall(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) { throw failure("find tool call", e); }
+    }
+
+    public ApprovalPolicy createApprovalPolicy(String scope, String sessionId, String projectKey,
+                                               String toolName, String argumentsSha256) {
+        String normalizedScope = scope == null ? "" : scope.trim().toUpperCase();
+        if (!Set.of("SESSION", "PROJECT").contains(normalizedScope)) {
+            throw new IllegalArgumentException("approval policy scope must be SESSION or PROJECT");
+        }
+        String id = id("approval_policy");
+        Instant now = Instant.now();
+        String resolvedSession = normalizedScope.equals("SESSION") ? requireText(sessionId, "sessionId", 160) : null;
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR IGNORE INTO approval_policies(id,scope,session_id,project_key,tool_name," +
+                        "arguments_sha256,created_at) VALUES(?,?,?,?,?,?,?)")) {
+            ps.setString(1, id); ps.setString(2, normalizedScope); ps.setString(3, resolvedSession);
+            ps.setString(4, normalizeProjectKey(projectKey)); ps.setString(5, requireText(toolName, "toolName", 120));
+            ps.setString(6, requireText(argumentsSha256, "argumentsSha256", 64)); ps.setString(7, now.toString());
+            ps.executeUpdate();
+            try (PreparedStatement find = connection.prepareStatement(
+                    "SELECT * FROM approval_policies WHERE scope=? AND COALESCE(session_id,'')=COALESCE(?,'') " +
+                            "AND project_key=? AND tool_name=? AND arguments_sha256=?")) {
+                find.setString(1, normalizedScope); find.setString(2, resolvedSession);
+                find.setString(3, normalizeProjectKey(projectKey)); find.setString(4, toolName);
+                find.setString(5, argumentsSha256);
+                try (ResultSet rs = find.executeQuery()) { if (rs.next()) return mapApprovalPolicy(rs); }
+            }
+            throw new IllegalStateException("approval policy was not persisted");
+        } catch (SQLException e) { throw failure("create approval policy", e); }
+    }
+
+    public Optional<ApprovalPolicy> matchingApprovalPolicy(String sessionId, String projectKey,
+                                                           String toolName, String argumentsSha256) {
+        String sql = "SELECT * FROM approval_policies WHERE tool_name=? AND arguments_sha256=? " +
+                "AND project_key=? AND (scope='PROJECT' OR (scope='SESSION' AND session_id=?)) " +
+                "ORDER BY CASE scope WHEN 'SESSION' THEN 0 ELSE 1 END LIMIT 1";
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, toolName); ps.setString(2, argumentsSha256);
+            ps.setString(3, normalizeProjectKey(projectKey)); ps.setString(4, sessionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapApprovalPolicy(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) { throw failure("match approval policy", e); }
+    }
+
+    public List<ApprovalPolicy> approvalPolicies(String projectKey) {
+        List<ApprovalPolicy> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM approval_policies WHERE project_key=? ORDER BY created_at DESC")) {
+            ps.setString(1, normalizeProjectKey(projectKey));
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) values.add(mapApprovalPolicy(rs)); }
+            return values;
+        } catch (SQLException e) { throw failure("list approval policies", e); }
+    }
+
+    public boolean deleteApprovalPolicy(String id) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM approval_policies WHERE id=?")) {
+            ps.setString(1, id); return ps.executeUpdate() > 0;
+        } catch (SQLException e) { throw failure("delete approval policy", e); }
+    }
+
+    public KnowledgeFeedback createKnowledgeFeedback(String projectKey, String documentName, int chunk,
+                                                      boolean helpful, String note) {
+        String id = id("knowledge_feedback");
+        Instant now = Instant.now();
+        String normalizedNote = note == null ? "" : note.trim();
+        if (normalizedNote.length() > 2_000) normalizedNote = normalizedNote.substring(0, 2_000);
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO knowledge_feedback(id,project_key,document_name,chunk_index,helpful,note,created_at) " +
+                        "VALUES(?,?,?,?,?,?,?)")) {
+            ps.setString(1, id); ps.setString(2, normalizeProjectKey(projectKey));
+            ps.setString(3, requireText(documentName, "documentName", 200)); ps.setInt(4, Math.max(0, chunk));
+            ps.setInt(5, helpful ? 1 : 0); ps.setString(6, normalizedNote);
+            ps.setString(7, now.toString()); ps.executeUpdate();
+            return new KnowledgeFeedback(id, normalizeProjectKey(projectKey), documentName, Math.max(0, chunk),
+                    helpful, normalizedNote, now);
+        } catch (SQLException e) { throw failure("create knowledge feedback", e); }
+    }
+
+    public List<KnowledgeFeedback> knowledgeFeedback(String projectKey) {
+        List<KnowledgeFeedback> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM knowledge_feedback WHERE project_key=? ORDER BY created_at DESC")) {
+            ps.setString(1, normalizeProjectKey(projectKey));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(new KnowledgeFeedback(rs.getString("id"), rs.getString("project_key"),
+                        rs.getString("document_name"), rs.getInt("chunk_index"), rs.getInt("helpful") != 0,
+                        rs.getString("note"), instant(rs.getString("created_at"))));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list knowledge feedback", e); }
+    }
+
+    public Optional<MemoryUnit> findMemoryUnit(String id) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM memories WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapMemoryUnit(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) { throw failure("find memory unit", e); }
+    }
+
+    public MemoryUnit setMemoryState(String id, Boolean pinned, Boolean enabled, boolean confirm) {
+        StringBuilder sql = new StringBuilder("UPDATE memories SET updated_at=?");
+        if (pinned != null) sql.append(",pinned=?");
+        if (enabled != null) sql.append(",enabled=?");
+        if (confirm) sql.append(",confirmed_at=?");
+        sql.append(" WHERE id=?");
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(sql.toString())) {
+            int index = 1;
+            String now = Instant.now().toString();
+            ps.setString(index++, now);
+            if (pinned != null) ps.setInt(index++, pinned ? 1 : 0);
+            if (enabled != null) ps.setInt(index++, enabled ? 1 : 0);
+            if (confirm) ps.setString(index++, now);
+            ps.setString(index, id);
+            if (ps.executeUpdate() == 0) throw new IllegalArgumentException("memory not found: " + id);
+            return findMemoryUnit(id).orElseThrow();
+        } catch (SQLException e) { throw failure("update memory state", e); }
+    }
+
+    public List<MemoryRevision> memoryRevisions(String memoryId) {
+        List<MemoryRevision> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM memory_revisions WHERE memory_id=? ORDER BY replaced_at DESC")) {
+            ps.setString(1, memoryId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapMemoryRevision(rs));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list memory revisions", e); }
+    }
+
+    public MemoryUnit restoreMemoryRevision(String memoryId, String revisionId) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                MemoryRevision revision = null;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT * FROM memory_revisions WHERE id=? AND memory_id=?")) {
+                    ps.setString(1, revisionId); ps.setString(2, memoryId);
+                    try (ResultSet rs = ps.executeQuery()) { if (rs.next()) revision = mapMemoryRevision(rs); }
+                }
+                if (revision == null) throw new IllegalArgumentException("memory revision not found: " + revisionId);
+                MemoryUnit current;
+                try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM memories WHERE id=?")) {
+                    ps.setString(1, memoryId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) throw new IllegalArgumentException("memory not found: " + memoryId);
+                        current = mapMemoryUnit(rs);
+                    }
+                }
+                insertMemoryRevision(connection, current, current.sourceRunId());
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE memories SET content=?,tags=?,layer=?,memory_type=?,confidence=?,updated_at=? WHERE id=?")) {
+                    ps.setString(1, revision.content()); ps.setString(2, revision.tags());
+                    ps.setString(3, revision.layer()); ps.setString(4, revision.memoryType());
+                    ps.setDouble(5, revision.confidence()); ps.setString(6, Instant.now().toString());
+                    ps.setString(7, memoryId); ps.executeUpdate();
+                }
+                connection.commit();
+                return findMemoryUnit(memoryId).orElseThrow();
+            } catch (Exception e) { rollback(connection); throw e; }
+        } catch (Exception e) {
+            throw e instanceof SQLException sql ? failure("restore memory revision", sql)
+                    : e instanceof IllegalArgumentException argument ? argument
+                    : new IllegalStateException("failed to restore memory revision", e);
+        }
+    }
+
+    public MemoryUnit mergeMemories(String targetId, List<String> sourceIds) {
+        List<String> sources = sourceIds == null ? List.of() : sourceIds.stream()
+                .filter(value -> value != null && !value.isBlank() && !value.equals(targetId))
+                .distinct().limit(20).toList();
+        if (sources.isEmpty()) throw new IllegalArgumentException("sourceIds must contain another memory");
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                MemoryUnit target = findMemoryUnitById(connection, targetId)
+                        .orElseThrow(() -> new IllegalArgumentException("memory not found: " + targetId));
+                java.util.LinkedHashSet<String> contents = new java.util.LinkedHashSet<>();
+                contents.add(target.content());
+                java.util.LinkedHashSet<String> tags = new java.util.LinkedHashSet<>();
+                addTags(tags, target.tags());
+                for (String sourceId : sources) {
+                    MemoryUnit source = findMemoryUnitById(connection, sourceId)
+                            .orElseThrow(() -> new IllegalArgumentException("memory not found: " + sourceId));
+                    if (!target.projectKey().equals(source.projectKey())) {
+                        throw new IllegalArgumentException("memories from different projects cannot be merged");
+                    }
+                    contents.add(source.content());
+                    addTags(tags, source.tags());
+                }
+                String content = String.join("\n\n", contents);
+                if (content.length() > 32_000) throw new IllegalArgumentException("merged memory exceeds 32000 characters");
+                insertMemoryRevision(connection, target, target.sourceRunId());
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE memories SET content=?,tags=?,origin='manual',updated_at=? WHERE id=?")) {
+                    update.setString(1, content); update.setString(2, String.join(",", tags));
+                    update.setString(3, Instant.now().toString()); update.setString(4, targetId);
+                    update.executeUpdate();
+                }
+                for (String sourceId : sources) {
+                    try (PreparedStatement revisions = connection.prepareStatement(
+                            "DELETE FROM memory_revisions WHERE memory_id=?")) {
+                        revisions.setString(1, sourceId); revisions.executeUpdate();
+                    }
+                    try (PreparedStatement memory = connection.prepareStatement("DELETE FROM memories WHERE id=?")) {
+                        memory.setString(1, sourceId); memory.executeUpdate();
+                    }
+                }
+                connection.commit();
+                return findMemoryUnit(targetId).orElseThrow();
+            } catch (Exception e) { rollback(connection); throw e; }
+        } catch (Exception e) {
+            throw e instanceof SQLException sql ? failure("merge memories", sql)
+                    : e instanceof IllegalArgumentException argument ? argument
+                    : new IllegalStateException("failed to merge memories", e);
+        }
+    }
+
+    private Optional<MemoryUnit> findMemoryUnitById(Connection connection, String id) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM memories WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapMemoryUnit(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private static void addTags(java.util.Set<String> values, String tags) {
+        if (tags == null || tags.isBlank()) return;
+        for (String value : tags.split(",")) if (!value.isBlank()) values.add(value.trim());
+    }
+
+    private void insertMemoryRevision(Connection connection, MemoryUnit value, String sourceRunId)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO memory_revisions(id,memory_id,content,tags,layer,memory_type,confidence," +
+                        "replaced_at,source_run_id) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            ps.setString(1, id("memory_revision")); ps.setString(2, value.id());
+            ps.setString(3, value.content()); ps.setString(4, value.tags());
+            ps.setString(5, value.layer()); ps.setString(6, value.memoryType());
+            ps.setDouble(7, value.confidence()); ps.setString(8, Instant.now().toString());
+            ps.setString(9, sourceRunId); ps.executeUpdate();
+        }
+    }
+
+    public List<ArtifactRecord> artifacts(String projectKey, int limit) {
+        List<ArtifactRecord> values = new ArrayList<>();
+        String sql = "SELECT a.* FROM artifacts a JOIN runs r ON r.id=a.run_id " +
+                "JOIN sessions s ON s.id=r.session_id WHERE s.project_key=? " +
+                "ORDER BY a.created_at DESC LIMIT ?";
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, normalizeProjectKey(projectKey));
+            ps.setInt(2, Math.max(1, Math.min(limit, 500)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapArtifact(rs));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list project artifacts", e); }
+    }
+
+    public boolean deleteArtifact(String artifactId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM artifacts WHERE id=?")) {
+            ps.setString(1, artifactId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) { throw failure("delete artifact", e); }
     }
 
     public long countRuns(RunStatus status) {
@@ -1866,7 +2245,18 @@ public class SqliteRuntimeStore {
     public record MemoryUnit(String id, String projectKey, String memoryKey, String content, String tags,
                              String layer, String memoryType, double confidence, String origin,
                              String sourceSessionId, String sourceRunId, String embeddingJson,
-                             Instant createdAt, Instant updatedAt, Instant lastAccessedAt, int accessCount) { }
+                             Instant createdAt, Instant updatedAt, Instant lastAccessedAt, int accessCount,
+                             boolean pinned, boolean enabled, Instant confirmedAt) { }
+
+    public record MemoryRevision(String id, String memoryId, String content, String tags, String layer,
+                                 String memoryType, double confidence, Instant replacedAt,
+                                 String sourceRunId) { }
+
+    public record ApprovalPolicy(String id, String scope, String sessionId, String projectKey,
+                                 String toolName, String argumentsSha256, Instant createdAt) { }
+
+    public record KnowledgeFeedback(String id, String projectKey, String documentName, int chunk,
+                                    boolean helpful, String note, Instant createdAt) { }
 
     public record SessionSearchMessage(String id, String sessionId, String sessionTitle, String projectKey,
                                        String runId, String role, String content, long sequence,
@@ -1907,6 +2297,7 @@ public class SqliteRuntimeStore {
 
     private static MemoryUnit mapMemoryUnit(ResultSet rs) throws SQLException {
         String lastAccessed = rs.getString("last_accessed_at");
+        String confirmedAt = rs.getString("confirmed_at");
         return new MemoryUnit(rs.getString("id"), rs.getString("project_key"), rs.getString("memory_key"),
                 rs.getString("content"), rs.getString("tags"), rs.getString("layer"),
                 rs.getString("memory_type"), rs.getDouble("confidence"), rs.getString("origin"),
@@ -1914,7 +2305,21 @@ public class SqliteRuntimeStore {
                 rs.getString("embedding_json"), Instant.parse(rs.getString("created_at")),
                 Instant.parse(rs.getString("updated_at")),
                 lastAccessed == null || lastAccessed.isBlank() ? null : Instant.parse(lastAccessed),
-                rs.getInt("access_count"));
+                rs.getInt("access_count"), rs.getInt("pinned") != 0, rs.getInt("enabled") != 0,
+                confirmedAt == null || confirmedAt.isBlank() ? null : Instant.parse(confirmedAt));
+    }
+
+    private static ApprovalPolicy mapApprovalPolicy(ResultSet rs) throws SQLException {
+        return new ApprovalPolicy(rs.getString("id"), rs.getString("scope"), rs.getString("session_id"),
+                rs.getString("project_key"), rs.getString("tool_name"),
+                rs.getString("arguments_sha256"), instant(rs.getString("created_at")));
+    }
+
+    private static MemoryRevision mapMemoryRevision(ResultSet rs) throws SQLException {
+        return new MemoryRevision(rs.getString("id"), rs.getString("memory_id"), rs.getString("content"),
+                rs.getString("tags"), rs.getString("layer"), rs.getString("memory_type"),
+                rs.getDouble("confidence"), instant(rs.getString("replaced_at")),
+                rs.getString("source_run_id"));
     }
 
     private static String normalizeProjectKey(String value) {

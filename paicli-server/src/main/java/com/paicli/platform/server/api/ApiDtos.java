@@ -17,7 +17,15 @@ final class ApiDtos {
     record CreateRunRequest(@NotBlank String input, String thinkingMode, String reasoningEffort,
                             List<String> attachmentIds) { }
 
-    record ResolveApprovalRequest(@NotNull ApprovalStatus decision) { }
+    record ResolveApprovalRequest(@NotNull ApprovalStatus decision, String rememberScope) { }
+
+    record RetryRunRequest(String input, Boolean branch) { }
+
+    record MemoryStateRequest(Boolean pinned, Boolean enabled, Boolean confirmed) { }
+
+    record MemoryMergeRequest(@NotNull List<String> sourceIds) { }
+
+    record ReuseArtifactRequest(@NotBlank String sessionId) { }
 
     record CreateMemoryRequest(@NotBlank String projectKey, @NotBlank String memoryKey,
                                @NotBlank String content, String tags) { }
@@ -25,7 +33,9 @@ final class ApiDtos {
     record UpdateMemoryRequest(@NotBlank String memoryKey, @NotBlank String content, String tags) { }
 
     record UpsertKnowledgeDocumentRequest(@NotBlank String projectKey, @NotBlank String name,
-                                          @NotBlank String content) { }
+                                          @NotBlank String content, String collection, List<String> tags) { }
+
+    record KnowledgeFeedbackRequest(@NotNull Boolean helpful, String note) { }
 
     record ImportSkillRequest(@NotBlank String projectKey, @NotBlank String gitUrl,
                               String name, String ref, Boolean global) { }

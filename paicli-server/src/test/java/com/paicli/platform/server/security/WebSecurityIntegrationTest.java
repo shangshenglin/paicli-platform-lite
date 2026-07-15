@@ -38,7 +38,7 @@ class WebSecurityIntegrationTest {
 
         mvc.perform(get("/v1/system/info").header("X-API-Key", "test-secret"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.name").value("paicli-platform-lite"))
-                .andExpect(jsonPath("$.phase").value(9));
+                .andExpect(jsonPath("$.phase").value(10));
         mvc.perform(get("/actuator/health").header("X-API-Key", "test-secret"))
                 .andExpect(status().isOk());
         mvc.perform(get("/v3/api-docs").header("X-API-Key", "test-secret"))

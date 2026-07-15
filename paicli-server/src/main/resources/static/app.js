@@ -64,6 +64,9 @@ function setStatus(value = '') {
     + `${value === 'FAILED' ? ' error' : ''}`;
   $('composer').classList.toggle('running', Boolean(value && !terminal.has(value)));
   $('input').disabled = value === 'WAITING_APPROVAL';
+  const retryable = Boolean(state.runId && terminal.has(value));
+  $('retryRun').hidden = !retryable;
+  $('branchRun').hidden = !retryable;
 }
 
 function scrollBottom() {
@@ -432,10 +435,13 @@ async function refreshCapabilities() {
       () => deleteSkill(skill.name, skill.source === 'global')
     )));
     if (!skills.length) $('skillList').append(element('div', 'hint', '尚未安装 Skill'));
-    $('knowledgeList').replaceChildren(...documents.map(document => managedItem(
-      document.name, `${Math.ceil(document.size / 1024)} KB · 已完成分块向量索引`,
-      () => deleteKnowledge(document.name)
-    )));
+    $('knowledgeList').replaceChildren(...documents.map(document => {
+      const item = workbenchItem(document.name,
+        `${document.collection} · v${document.version} · ${document.indexStatus} · ${document.indexedChunks} 块 · ${document.embeddingProvider || '待索引'}`);
+      actionButton(item, '重建索引', () => reindexKnowledge(document.name));
+      actionButton(item, '删除', () => deleteKnowledge(document.name));
+      return item;
+    }));
     if (!documents.length) $('knowledgeList').append(element('div', 'hint', '尚未上传知识文档'));
   } catch (error) {
     showNotice(`能力列表加载失败：${error.message}`, true);
@@ -466,6 +472,29 @@ function managedItem(title, subtitle, removeAction) {
   remove.onclick = removeAction;
   item.append(main, remove);
   return item;
+}
+
+function workbenchItem(title, subtitle) {
+  const item = element('div', 'managed-item');
+  const main = element('div', 'managed-main');
+  main.append(element('strong', '', title), element('small', 'snippet', subtitle || ''));
+  item.append(main, element('div', 'managed-actions'));
+  return item;
+}
+
+function actionButton(item, label, action, primary = false) {
+  const button = element('button', primary ? 'primary' : 'secondary', label);
+  button.onclick = action;
+  item.querySelector('.managed-actions').append(button);
+  return button;
+}
+
+async function reindexKnowledge(name) {
+  try {
+    await api(`/v1/knowledge/documents/${encodeURIComponent(currentProjectKey())}/${encodeURIComponent(name)}/reindex`, {method: 'POST'});
+    showNotice(`已重建知识索引：${name}`);
+    await refreshCapabilities();
+  } catch (error) { showNotice(`索引重建失败：${error.message}`, true); }
 }
 
 async function importSkill() {
@@ -738,6 +767,186 @@ async function watch(runId) {
   }
 }
 
+async function retryRun(branch) {
+  if (!state.runId || !terminal.has(state.runStatus)) return;
+  try {
+    const result = await api(`/v1/runs/${state.runId}/retry`, {
+      method: 'POST', body: JSON.stringify({branch})
+    });
+    if (branch) {
+      await refreshSessions();
+      await selectSession(result.sessionId);
+    } else {
+      state.runId = result.run.id;
+      $('runMeta').textContent = result.run.id;
+      setStatus(result.run.status);
+      await loadMessages();
+      watch(result.run.id);
+    }
+    showNotice(branch ? '已创建分支并重新执行' : '已重新执行');
+  } catch (error) { showNotice(`操作失败：${error.message}`, true); }
+}
+
+async function openWorkbench() {
+  $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
+  $('workbenchDialog').showModal();
+  await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies()]);
+}
+
+async function searchAll() {
+  const query = $('globalSearch').value.trim();
+  if (query.length < 2) return showNotice('搜索词至少 2 个字符', true);
+  try {
+    const values = await api(`/v1/search?projectKey=${encodeURIComponent(currentProjectKey())}&query=${encodeURIComponent(query)}&limit=50`);
+    $('searchResults').replaceChildren(...values.map(result => {
+      const item = workbenchItem(`${result.type} · ${result.title}`,
+        `${result.citation ? `[${result.citation}] ` : ''}${result.snippet}`);
+      if (result.sessionId) actionButton(item, '打开对话', async () => {
+        $('workbenchDialog').close();
+        await selectSession(result.sessionId);
+      }, true);
+      if (result.type === 'ARTIFACT') actionButton(item, '预览', () => previewArtifact(result.id));
+      if (result.type === 'KNOWLEDGE') {
+        actionButton(item, '有帮助', () => sendKnowledgeFeedback(result, true));
+        actionButton(item, '无帮助', () => sendKnowledgeFeedback(result, false));
+      }
+      return item;
+    }));
+    if (!values.length) $('searchResults').append(element('div', 'hint', '没有匹配结果'));
+  } catch (error) { showNotice(`搜索失败：${error.message}`, true); }
+}
+
+async function sendKnowledgeFeedback(result, helpful) {
+  try {
+    await api(`/v1/knowledge/documents/${encodeURIComponent(currentProjectKey())}/${encodeURIComponent(result.id)}/feedback?chunk=${result.chunk || 0}`, {
+      method: 'POST', body: JSON.stringify({helpful, note: 'Console 全局检索反馈'})
+    });
+    showNotice(helpful ? '已记录为有帮助' : '已记录为无帮助');
+  } catch (error) { showNotice(`反馈记录失败：${error.message}`, true); }
+}
+
+async function loadManagedMemories() {
+  try {
+    const values = await api(`/v1/memories/managed?projectKey=${encodeURIComponent(currentProjectKey())}&limit=200`);
+    $('memoryList').replaceChildren(...values.map(memory => {
+      const source = memory.origin === 'automatic' ? `自动 · 置信度 ${Math.round(memory.confidence * 100)}%` : '人工';
+      const item = workbenchItem(`${memory.pinned ? '📌 ' : ''}${memory.memoryKey}`,
+        `${source} · ${memory.layer}/${memory.memoryType} · ${memory.content}`);
+      actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
+      actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
+      actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
+      actionButton(item, '合并到…', () => mergeMemory(memory, values));
+      actionButton(item, '修订', () => showMemoryRevisions(memory));
+      return item;
+    }));
+    if (!values.length) $('memoryList').append(element('div', 'hint', '暂无启用的 Memory'));
+  } catch (error) { showNotice(`Memory 加载失败：${error.message}`, true); }
+}
+
+async function setMemoryState(id, value) {
+  try {
+    await api(`/v1/memories/${id}/state`, {method: 'POST', body: JSON.stringify(value)});
+    await loadManagedMemories();
+  } catch (error) { showNotice(`Memory 更新失败：${error.message}`, true); }
+}
+
+async function mergeMemory(source, values) {
+  const key = prompt('输入要合并到的目标 Memory Key：');
+  if (!key) return;
+  const target = values.find(value => value.memoryKey === key.trim());
+  if (!target || target.id === source.id) return showNotice('未找到其他同名目标 Memory', true);
+  try {
+    await api(`/v1/memories/${target.id}/merge`, {
+      method: 'POST', body: JSON.stringify({sourceIds: [source.id]})
+    });
+    showNotice(`已将 ${source.memoryKey} 合并到 ${target.memoryKey}`);
+    await loadManagedMemories();
+  } catch (error) { showNotice(`Memory 合并失败：${error.message}`, true); }
+}
+
+async function showMemoryRevisions(memory) {
+  try {
+    const revisions = await api(`/v1/memories/${memory.id}/revisions`);
+    if (!revisions.length) return showNotice('该 Memory 暂无历史修订');
+    const revision = revisions[0];
+    if (confirm(`恢复最近一次修订（${new Date(revision.replacedAt).toLocaleString()}）？\n\n${revision.content}`)) {
+      await api(`/v1/memories/${memory.id}/revisions/${revision.id}/restore`, {method: 'POST'});
+      await loadManagedMemories();
+    }
+  } catch (error) { showNotice(`修订加载失败：${error.message}`, true); }
+}
+
+async function loadArtifacts() {
+  try {
+    const values = await api(`/v1/artifacts?projectKey=${encodeURIComponent(currentProjectKey())}&limit=100`);
+    $('artifactList').replaceChildren(...values.map(artifact => {
+      const item = workbenchItem(artifact.name, `${artifact.type} · ${Math.ceil(artifact.size / 1024)} KB · ${artifact.runId}`);
+      actionButton(item, '预览', () => previewArtifact(artifact.id));
+      actionButton(item, '下载', () => downloadArtifact(artifact.id));
+      actionButton(item, '复用', () => reuseArtifact(artifact.id), true);
+      actionButton(item, '删除', () => deleteArtifact(artifact.id));
+      return item;
+    }));
+    if (!values.length) $('artifactList').append(element('div', 'hint', '暂无 Artifact'));
+  } catch (error) { showNotice(`Artifact 加载失败：${error.message}`, true); }
+}
+
+async function previewArtifact(id) {
+  try {
+    const value = await api(`/v1/artifacts/${id}/content?limit=8000`);
+    alert(value.content);
+  } catch (error) { showNotice(`预览失败：${error.message}`, true); }
+}
+
+async function downloadArtifact(id) {
+  try {
+    const response = await fetch(`/v1/artifacts/${id}/download`, {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    anchor.download = encoded ? decodeURIComponent(encoded) : `artifact-${id}.txt`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { showNotice(`下载失败：${error.message}`, true); }
+}
+
+async function reuseArtifact(id) {
+  if (!state.sessionId) return showNotice('请先选择或创建一个对话', true);
+  try {
+    const attachment = await api(`/v1/artifacts/${id}/reuse`, {
+      method: 'POST', body: JSON.stringify({sessionId: state.sessionId})
+    });
+    state.pendingAttachments.push({...attachment, kind: 'document', preview: null});
+    renderPendingAttachments();
+    $('workbenchDialog').close();
+    showNotice(`Artifact 已作为附件复用：${attachment.name}`);
+  } catch (error) { showNotice(`复用失败：${error.message}`, true); }
+}
+
+async function deleteArtifact(id) {
+  if (!confirm('删除这个 Artifact？')) return;
+  try { await api(`/v1/artifacts/${id}`, {method: 'DELETE'}); await loadArtifacts(); }
+  catch (error) { showNotice(`删除失败：${error.message}`, true); }
+}
+
+async function loadApprovalPolicies() {
+  try {
+    const values = await api(`/v1/approvals/policies?projectKey=${encodeURIComponent(currentProjectKey())}`);
+    $('policyList').replaceChildren(...values.map(policy => {
+      const item = workbenchItem(`${policy.scope} · ${policy.toolName}`, `参数指纹 ${policy.argumentsSha256.slice(0, 16)}…`);
+      actionButton(item, '撤销', async () => {
+        await api(`/v1/approvals/policies/${policy.id}`, {method: 'DELETE'});
+        await loadApprovalPolicies();
+      });
+      return item;
+    }));
+    if (!values.length) $('policyList').append(element('div', 'hint', '暂无持久化审批策略'));
+  } catch (error) { showNotice(`审批策略加载失败：${error.message}`, true); }
+}
+
 async function loadApprovals() {
   $('approvals').replaceChildren();
   if (!state.runId) return;
@@ -746,20 +955,24 @@ async function loadApprovals() {
     const card = element('div', 'approval');
     card.append(element('strong', '', '需要你的确认'), element('div', '', approval.reason));
     const actions = element('div', 'actions');
-    const approve = element('button', 'primary', '允许');
+    const approve = element('button', 'primary', '仅本次允许');
+    const approveSession = element('button', 'secondary', '本对话允许');
+    const approveProject = element('button', 'secondary', '本项目允许');
     const deny = element('button', 'primary deny', '拒绝');
     approve.onclick = () => resolveApproval(approval.id, 'APPROVED');
+    approveSession.onclick = () => resolveApproval(approval.id, 'APPROVED', 'SESSION');
+    approveProject.onclick = () => resolveApproval(approval.id, 'APPROVED', 'PROJECT');
     deny.onclick = () => resolveApproval(approval.id, 'DENIED');
-    actions.append(approve, deny);
+    actions.append(approve, approveSession, approveProject, deny);
     card.append(actions);
     $('approvals').append(card);
   }
 }
 
-async function resolveApproval(id, decision) {
+async function resolveApproval(id, decision, rememberScope = null) {
   try {
     await api(`/v1/approvals/${id}`, {
-      method: 'POST', body: JSON.stringify({decision})
+      method: 'POST', body: JSON.stringify({decision, rememberScope})
     });
     $('approvals').replaceChildren();
     showNotice(decision === 'APPROVED' ? '已允许，继续执行' : '已拒绝');
@@ -824,12 +1037,21 @@ $('toggle').onclick = () => {
   state.detailOpen = !state.detailOpen;
   $('workspace').classList.toggle('hide-detail', !state.detailOpen);
 };
+$('retryRun').onclick = () => retryRun(false);
+$('branchRun').onclick = () => retryRun(true);
 $('menu').onclick = () => $('sidebar').classList.toggle('open');
 $('settings').onclick = () => {
   $('key').value = sessionStorage.getItem('paicli_api_key') || '';
   $('dialog').showModal();
 };
 $('capabilities').onclick = openCapabilities;
+$('workbench').onclick = openWorkbench;
+$('closeWorkbench').onclick = () => $('workbenchDialog').close();
+$('searchAll').onclick = searchAll;
+$('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
+$('refreshMemories').onclick = loadManagedMemories;
+$('refreshArtifacts').onclick = loadArtifacts;
+$('refreshPolicies').onclick = loadApprovalPolicies;
 $('closeCapabilities').onclick = () => $('capabilityDialog').close();
 $('importSkill').onclick = importSkill;
 $('uploadKnowledge').onclick = uploadKnowledge;
