@@ -209,10 +209,10 @@ textarea { min-height: 28px; max-height: 170px; padding: 4px 0; border: 0; outli
 .summary { margin-top: 3px; color: var(--muted); }
 .raw { color: #aab4c0; }
 .nothing { padding: 38px 12px; color: var(--muted); text-align: center; }
-dialog { width: min(430px, calc(100% - 28px)); padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); }
+dialog { width: min(430px, calc(100% - 28px)); max-width: calc(100vw - 28px); padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); overflow-x: hidden; }
 dialog::backdrop { background: #0009; }
 dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #101319; }
-.wide-dialog { width: min(760px, calc(100% - 28px)); max-height: min(760px, calc(100vh - 40px)); overflow-y: auto; }
+.wide-dialog { width: min(760px, calc(100vw - 28px)); max-width: calc(100vw - 28px); max-height: min(760px, calc(100vh - 40px)); overflow-y: auto; overflow-x: hidden; }
 .dialog-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .capability-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .capability-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
@@ -226,18 +226,19 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .inline-form .skill-scope { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .inline-form .skill-scope input { width: auto; }
 .upload-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
-.managed-list { display: grid; gap: 6px; margin-top: 10px; }
-.managed-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #171b21; }
+.managed-list { display: grid; gap: 6px; margin-top: 10px; min-width: 0; }
+.managed-item { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #171b21; overflow: hidden; }
 .managed-item .managed-main { min-width: 0; flex: 1; }
-.managed-item small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.managed-item strong { overflow-wrap: anywhere; word-break: break-word; }
+.managed-item small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; overflow-wrap: anywhere; word-break: break-word; }
 .managed-item button { padding: 4px 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; }
-.workbench-dialog { width: min(920px, calc(100% - 28px)); }
+.workbench-dialog { width: min(920px, calc(100vw - 28px)); max-width: calc(100vw - 28px); }
 .workbench-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .workbench-search input { margin: 0; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .section-title h3 { margin: 0; }
-.managed-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.managed-actions { flex: 0 0 auto; max-width: 45%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .managed-item .snippet { white-space: normal; line-height: 1.45; }
 .run-action[hidden] { display: none; }
 .menu { display: none; }
@@ -253,6 +254,9 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .menu { display: block; }
   .header { padding: 0 11px; }
   .messages { padding: 20px 13px; }
+  .workbench-search { grid-template-columns: 1fr; }
+  .managed-item { flex-direction: column; }
+  .managed-actions { max-width: 100%; justify-content: flex-start; }
   .compose { padding: 6px 11px 12px; }
   .status { display: none; }
   .model-controls { overflow-x: auto; white-space: nowrap; }

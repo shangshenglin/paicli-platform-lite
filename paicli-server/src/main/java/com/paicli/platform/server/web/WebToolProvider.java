@@ -38,6 +38,7 @@ public class WebToolProvider implements ServerToolProvider {
     }
 
     @Override
+
     public boolean supports(String toolName) {
         return web.enabled() && ("web_search".equals(toolName) || "web_fetch".equals(toolName));
     }

@@ -789,12 +789,22 @@ async function retryRun(branch) {
 
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
+  $('globalSearch').value = '';
+  clearSearchResults();
   $('workbenchDialog').showModal();
   await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies()]);
 }
 
+function clearSearchResults() {
+  $('searchResults').replaceChildren();
+}
+
 async function searchAll() {
   const query = $('globalSearch').value.trim();
+  if (!query) {
+    clearSearchResults();
+    return;
+  }
   if (query.length < 2) return showNotice('搜索词至少 2 个字符', true);
   try {
     const values = await api(`/v1/search?projectKey=${encodeURIComponent(currentProjectKey())}&query=${encodeURIComponent(query)}&limit=50`);
@@ -1049,6 +1059,7 @@ $('workbench').onclick = openWorkbench;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
+$('globalSearch').oninput = () => { if (!$('globalSearch').value.trim()) clearSearchResults(); };
 $('refreshMemories').onclick = loadManagedMemories;
 $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
