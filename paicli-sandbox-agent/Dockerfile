@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:25-jre
 
 RUN useradd --create-home --uid 10001 sandbox \
     && mkdir -p /workspace \
