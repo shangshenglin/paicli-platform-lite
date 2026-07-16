@@ -77,6 +77,7 @@ java -jar paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar
 默认监听 `http://127.0.0.1:8080`，数据写入当前目录下的 `data/`。
 浏览器访问 `http://127.0.0.1:8080/` 使用聊天式 Console；对话区和右侧执行详情均在视口内独立滚动，流式事件会批量持久化并合并渲染，访问 `/docs` 查看 OpenAPI。历史对话可创建持久化分组、在分组间移动并删除；删除分组不删对话，删除对话会清理其消息和执行记录。Console 可在每次提交前选择“深度思考：关闭/开启”和“推理等级：高/最高”；关闭是默认快速模式。
 `start-local.ps1` 和 `start-docker.ps1` 会自动读取被 Git 忽略的项目 `.env`；已经存在的进程环境变量优先。
+本地服务已经监听 `8080` 时，再次运行 `start-local.ps1` 会直接提示服务已启动，不会重复打包并触发 Windows JAR 文件锁。修改代码后需要重新构建并重启时使用 `.\scripts\start-local.ps1 -Restart`。
 Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。启用 API Key 后，
 `/actuator/**` 与 `/v3/api-docs` 默认使用同一密钥保护。
 
