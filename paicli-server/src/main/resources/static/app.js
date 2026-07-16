@@ -45,8 +45,21 @@ async function api(path, options = {}) {
     ...options,
     headers: {...headers(options.body !== undefined && !form), ...(options.headers || {})}
   });
-  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  if (!response.ok) {
+    const body = await response.text();
+    if (response.status === 401) openConnectionSettings('认证失败，请填写与服务端 PAICLI_API_KEY 一致的密钥。');
+    const error = new Error(response.status === 401 ? 'API Key 无效或未填写' : `${response.status} ${body}`);
+    error.status = response.status;
+    throw error;
+  }
   return response.status === 204 ? null : response.json();
+}
+
+function openConnectionSettings(message = '服务端 API Key（未启用认证时留空）') {
+  $('key').value = sessionStorage.getItem('paicli_api_key') || '';
+  $('connectionHint').textContent = message;
+  if (!$('dialog').open) $('dialog').showModal();
+  requestAnimationFrame(() => { $('key').focus(); $('key').select(); });
 }
 
 function element(tag, className, text) {
@@ -1311,10 +1324,7 @@ $('toggle').onclick = () => {
 $('retryRun').onclick = () => retryRun(false);
 $('branchRun').onclick = () => retryRun(true);
 $('menu').onclick = () => $('sidebar').classList.toggle('open');
-$('settings').onclick = () => {
-  $('key').value = sessionStorage.getItem('paicli_api_key') || '';
-  $('dialog').showModal();
-};
+$('settings').onclick = () => openConnectionSettings();
 $('capabilities').onclick = openCapabilities;
 $('workbench').onclick = openWorkbench;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
@@ -1342,10 +1352,22 @@ $('importSkill').onclick = importSkill;
 $('addMcp').onclick = () => addMcp().catch(error => showNotice(`MCP 配置失败：${error.message}`, true));
 $('uploadKnowledge').onclick = uploadKnowledge;
 $('close').onclick = () => $('dialog').close();
-$('save').onclick = () => {
-  sessionStorage.setItem('paicli_api_key', $('key').value.trim());
-  $('dialog').close();
-  refreshSessions();
+$('save').onclick = async () => {
+  const key = $('key').value.trim();
+  if (key) sessionStorage.setItem('paicli_api_key', key);
+  else sessionStorage.removeItem('paicli_api_key');
+  $('save').disabled = true;
+  $('connectionHint').textContent = '正在验证连接…';
+  try {
+    await api('/v1/system/info');
+    $('dialog').close();
+    showNotice('连接成功');
+    await refreshSessions();
+  } catch (error) {
+    if (error.status !== 401) $('connectionHint').textContent = `连接验证失败：${error.message}`;
+  } finally {
+    $('save').disabled = false;
+  }
 };
 document.addEventListener('click', () => {
   document.querySelectorAll('.session-menu.open').forEach(menu => menu.classList.remove('open'));

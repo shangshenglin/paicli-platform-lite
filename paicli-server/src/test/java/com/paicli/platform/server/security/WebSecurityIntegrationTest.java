@@ -57,6 +57,10 @@ class WebSecurityIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "sessionStorage.getItem('paicli_api_key')")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "response.status === 401")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "openConnectionSettings")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
     }

@@ -75,11 +75,11 @@
 </div>
 <dialog id="dialog">
   <strong>连接设置</strong>
-  <div class="hint">服务端 API Key（未启用认证时留空）</div>
+  <div class="hint" id="connectionHint">服务端 API Key（未启用认证时留空）</div>
   <input id="key" type="password" autocomplete="off">
   <div class="dialog-actions">
     <button class="secondary" id="close">取消</button>
-    <button class="primary" id="save">保存并刷新</button>
+    <button class="primary" id="save">验证并连接</button>
   </div>
 </dialog>
 <dialog id="capabilityDialog" class="wide-dialog">
@@ -177,6 +177,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260716-p1-productivity"></script>
+<script src="/app.js?v=20260716-auth-guide"></script>
 </body>
 </html>
