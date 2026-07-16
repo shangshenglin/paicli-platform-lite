@@ -8,6 +8,21 @@
 - 工具调用在执行前持久化，使用幂等键避免恢复时重复副作用。
 - 企业级 PostgreSQL、S3、消息队列和 MicroVM 分别由 SQLite、本地目录、进程内 Worker 和 Docker 替代。
 
+## 产品站点
+
+- 在线站点：[PaiCLI Platform Lite 产品站](https://paicli-platform-lite.fuermalin2002.chatgpt.site)
+- 站点源码：`paicli-site/`
+
+本地开发产品站点：
+
+```powershell
+cd paicli-site
+npm install
+npm run dev
+```
+
+站点使用 Node.js `>= 22.13.0`，详细验证和目录说明见 `paicli-site/README.md`。
+
 ## 当前阶段
 
 阶段 1 至阶段 10 已完成：
