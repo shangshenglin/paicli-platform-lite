@@ -52,7 +52,7 @@ npm run dev
 - 可选 API Key 认证、生产强制密钥模式、管理端点保护、安全响应头和聊天式 Web Console。
 - SQLite WAL checkpoint、可选 Event/Audit 保留策略、孤儿文件清理和扩展 Micrometer 指标。
 - 带 SHA-256 校验、路径校验和 SQLite 文件头校验的停机备份/恢复脚本。
-- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 60 个自动化测试。
+- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 61 个自动化测试。
 - P0 业务工作台：Run 重试/分支、持久化审批策略、统一检索、Memory 管理、知识版本/索引状态和 Artifact 复用。
 - P1 长期使用效率：任务模板、项目模型方案、用量预算、Run 队列、定时任务、完成通知、Session 迁移、Skill 生命周期与 MCP 配置界面。
 

@@ -8,6 +8,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -58,5 +59,25 @@ class WebSecurityIntegrationTest {
                         "sessionStorage.getItem('paicli_api_key')")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
+    }
+
+    @Test
+    void resolvesTaskTemplateByTheIdReturnedToConsole() throws Exception {
+        String templates = mvc.perform(get("/v1/productivity/templates")
+                        .param("projectKey", "template-regression")
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").isNotEmpty())
+                .andReturn().getResponse().getContentAsString();
+        String id = new com.fasterxml.jackson.databind.ObjectMapper().readTree(templates).get(0).path("id").asText();
+
+        mvc.perform(post("/v1/productivity/templates/{id}/resolve", id)
+                        .param("projectKey", "template-regression")
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"variables\":{}}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.template.id").value(id))
+                .andExpect(jsonPath("$.prompt").isNotEmpty());
     }
 }

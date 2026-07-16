@@ -37,10 +37,11 @@ public class ProductivityStore {
     }
 
     public Optional<TaskTemplate> findTemplate(String projectKey, String idOrShortcut) {
-        String shortcut = idOrShortcut == null ? "" : idOrShortcut.trim();
+        String reference = idOrShortcut == null ? "" : idOrShortcut.trim();
+        String shortcut = reference.startsWith("/") ? reference.toLowerCase() : "/" + reference.toLowerCase();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
                 "SELECT * FROM task_templates WHERE project_key=? AND (id=? OR shortcut=?)")) {
-            ps.setString(1, project(projectKey)); ps.setString(2, shortcut); ps.setString(3, shortcut);
+            ps.setString(1, project(projectKey)); ps.setString(2, reference); ps.setString(3, shortcut);
             try (ResultSet rs = ps.executeQuery()) { return rs.next() ? Optional.of(template(rs)) : Optional.empty(); }
         } catch (SQLException e) { throw failure("find task template", e); }
     }

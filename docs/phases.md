@@ -88,7 +88,7 @@
 - [x] Session Markdown/JSON/完整审计包导出、隐私脱敏和跨实例导入
 - [x] Skill 来源/Ref/Commit/作用域、预检、启停、固定、升级、回滚与 MCP Console 配置
 - [x] Schema 迁移 11、P1 Console、Store 回归测试和中文文档
-- [x] 60 项自动化测试覆盖 Common、Server 与 Sandbox Agent
+- [x] 61 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
 ## 明确不做
 

@@ -60,7 +60,7 @@ public class ProductivityController {
                                                @RequestParam(defaultValue = "default") String projectKey,
                                                @RequestBody(required = false) ApiDtos.TemplateResolveRequest request) {
         ensureBuiltIns(projectKey);
-        var template = productivity.markTemplateUsed(projectKey, normalizeShortcut(idOrShortcut));
+        var template = productivity.markTemplateUsed(projectKey, idOrShortcut);
         Map<String,String> variables = readMap(template.variablesJson());
         if (request != null && request.variables() != null) variables.putAll(request.variables());
         String prompt = render(template.prompt(), variables);
@@ -185,7 +185,6 @@ public class ProductivityController {
     }catch(Exception ignored){}}
     private Map<String,String> readMap(String json){try{return new LinkedHashMap<>(mapper.readValue(json,STRING_MAP));}catch(Exception e){return new LinkedHashMap<>();}}
     private static String render(String prompt,Map<String,String> vars){Matcher m=VARIABLE.matcher(prompt);StringBuffer out=new StringBuffer();List<String> missing=new ArrayList<>();while(m.find()){String value=vars.get(m.group(1));if(value==null||value.isBlank()){missing.add(m.group(1));value=m.group();}m.appendReplacement(out,Matcher.quoteReplacement(value));}m.appendTail(out);if(!missing.isEmpty())throw new IllegalArgumentException("missing template variables: "+String.join(", ",missing));return out.toString();}
-    private static String normalizeShortcut(String value){return value.startsWith("/")?value:"/"+value;}
     private static long value(Long v){return v==null?0:v;}private static double value(Double v){return v==null?0:v;}
     private static ResponseStatusException notFound(String name){return new ResponseStatusException(HttpStatus.NOT_FOUND,name+" not found");}
 }

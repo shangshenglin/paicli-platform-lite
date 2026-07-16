@@ -248,6 +248,8 @@ class SqliteRuntimeStoreTest {
                 "", "", "COMPLETED,FAILED", true);
 
         assertThat(productivity.templates("project-p1")).containsExactly(template);
+        assertThat(productivity.markTemplateUsed("project-p1", template.id()).id()).isEqualTo(template.id());
+        assertThat(productivity.markTemplateUsed("project-p1", "review").id()).isEqualTo(template.id());
         assertThat(productivity.resolveModelProfile("project-p1", null)).contains(profile);
         assertThat(budget.maxConcurrentRuns()).isEqualTo(2);
         assertThat(productivity.queue("project-p1")).singleElement()

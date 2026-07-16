@@ -1005,7 +1005,7 @@ Start-Process http://127.0.0.1:8080/
 Start-Process http://127.0.0.1:8080/docs
 ```
 
-当前项目回归测试覆盖 RunProcessor、工具失败恢复、Approval Flow、ContextManager、SQLite Store、模型重试/Fallback、DeepSeek/多模态请求与 SSE 解析、Docker Driver、Local Driver、API Key、管理端点/OpenAPI 安全、Console 安全头、Artifact 原子写入、SQLite 维护、图片/文档附件、长 Markdown/Tika 提取、结构化分块、混合 RAG、MCP、Skill、Memory、P1 Store，以及 Common/Sandbox 边界，现有 60 项测试通过。
+当前项目回归测试覆盖 RunProcessor、工具失败恢复、Approval Flow、ContextManager、SQLite Store、模型重试/Fallback、DeepSeek/多模态请求与 SSE 解析、Docker Driver、Local Driver、API Key、管理端点/OpenAPI 安全、Console 安全头、Artifact 原子写入、SQLite 维护、图片/文档附件、长 Markdown/Tika 提取、结构化分块、混合 RAG、MCP、Skill、Memory、P1 Store、模板解析回归，以及 Common/Sandbox 边界，现有 61 项测试通过。
 
 Phase 9 进一步补齐了单机私有部署的运维基线：Sandbox 与 Docker CLI 输出在读取阶段限额并在超时后清理进程树；生产模式可强制 API Key，管理端点复用认证，Console 密钥只保留在标签页会话中；SQLite 定时执行 WAL checkpoint，并支持显式 Event/Audit 保留与孤儿文件清理；文件存储采用 fsync 后原子替换；停机备份带 SHA-256、ZIP 路径和 SQLite 文件头校验。交付侧增加 GitHub Actions、Dependabot、CycloneDX SBOM 与 Maven 全量警告检查。
 
