@@ -7,7 +7,8 @@ public record ModelRequest(
         List<ModelToolDefinition> tools,
         int maxOutputTokens,
         String thinkingMode,
-        String reasoningEffort
+        String reasoningEffort,
+        ModelRoute route
 ) {
     public ModelRequest {
         messages = messages == null ? List.of() : List.copyOf(messages);
@@ -18,6 +19,17 @@ public record ModelRequest(
 
     public ModelRequest(List<ModelMessage> messages, List<ModelToolDefinition> tools,
                         int maxOutputTokens) {
-        this(messages, tools, maxOutputTokens, "auto", "");
+        this(messages, tools, maxOutputTokens, "auto", "", null);
+    }
+
+    public ModelRequest(List<ModelMessage> messages, List<ModelToolDefinition> tools,
+                        int maxOutputTokens, String thinkingMode, String reasoningEffort) {
+        this(messages, tools, maxOutputTokens, thinkingMode, reasoningEffort, null);
+    }
+
+    public ModelRequest withRoute(ModelRoute selectedRoute) {
+        int output = selectedRoute == null || selectedRoute.maxOutputTokens() <= 0
+                ? maxOutputTokens : Math.min(maxOutputTokens, selectedRoute.maxOutputTokens());
+        return new ModelRequest(messages, tools, output, thinkingMode, reasoningEffort, selectedRoute);
     }
 }

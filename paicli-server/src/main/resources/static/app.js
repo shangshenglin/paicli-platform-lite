@@ -14,6 +14,10 @@ const state = {
   thinkingMode: localStorage.getItem('paicli_thinking_mode') || 'disabled',
   reasoningEffort: localStorage.getItem('paicli_reasoning_effort') || 'high',
   pendingAttachments: [],
+  templates: [],
+  modelProfiles: [],
+  modelProfileId: localStorage.getItem('paicli_model_profile') || '',
+  notifiedRunId: '',
   detailOpen: innerWidth > 1000
 };
 const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED']);
@@ -41,8 +45,21 @@ async function api(path, options = {}) {
     ...options,
     headers: {...headers(options.body !== undefined && !form), ...(options.headers || {})}
   });
-  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  if (!response.ok) {
+    const body = await response.text();
+    if (response.status === 401) openConnectionSettings('认证失败，请填写与服务端 PAICLI_API_KEY 一致的密钥。');
+    const error = new Error(response.status === 401 ? 'API Key 无效或未填写' : `${response.status} ${body}`);
+    error.status = response.status;
+    throw error;
+  }
   return response.status === 204 ? null : response.json();
+}
+
+function openConnectionSettings(message = '请输入 PAICLI_API_KEY；不要填写 DeepSeek 的 PAICLI_MODEL_API_KEY。') {
+  $('key').value = sessionStorage.getItem('paicli_api_key') || '';
+  $('connectionHint').textContent = message;
+  if (!$('dialog').open) $('dialog').showModal();
+  requestAnimationFrame(() => { $('key').focus(); $('key').select(); });
 }
 
 function element(tag, className, text) {
@@ -67,6 +84,12 @@ function setStatus(value = '') {
   const retryable = Boolean(state.runId && terminal.has(value));
   $('retryRun').hidden = !retryable;
   $('branchRun').hidden = !retryable;
+  if ((terminal.has(value) || value === 'WAITING_APPROVAL') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
+    state.notifiedRunId = `${state.runId}:${value}`;
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification(`PaiCLI · ${statusNames[value] || value}`, {body: $('chatTitle').textContent || state.runId});
+    }
+  }
 }
 
 function scrollBottom() {
@@ -219,6 +242,9 @@ async function selectSession(id, rerender = true) {
   const session = state.sessions.find(item => item.id === id);
   $('chatTitle').textContent = session?.title || '对话';
   $('runMeta').textContent = session ? `项目 · ${session.projectKey}` : '尚未开始';
+  $('input').value = localStorage.getItem(`paicli_draft_${id}`) || '';
+  resizeInput();
+  await refreshComposerOptions();
   setStatus();
   clearEvents();
   await loadMessages();
@@ -326,10 +352,12 @@ async function sendMessage() {
         input: text,
         thinkingMode: state.thinkingMode,
         reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
-        attachmentIds: state.pendingAttachments.map(item => item.id)
+        attachmentIds: state.pendingAttachments.map(item => item.id),
+        modelProfileId: state.modelProfileId || null
       })
     });
     $('input').value = '';
+    localStorage.removeItem(`paicli_draft_${state.sessionId}`);
     clearPendingAttachments();
     resizeInput();
     state.runId = run.id;
@@ -424,16 +452,36 @@ async function openCapabilities() {
 async function refreshCapabilities() {
   const project = encodeURIComponent(currentProjectKey());
   try {
-    const [skills, documents, status] = await Promise.all([
+    const [skills, documents, status, mcpServers, mcpTools] = await Promise.all([
       api(`/v1/skills?projectKey=${project}`),
       api(`/v1/knowledge/documents?projectKey=${project}`),
-      api(`/v1/capabilities/status?projectKey=${project}`)
+      api(`/v1/capabilities/status?projectKey=${project}`),
+      api('/v1/mcp/configurations'),
+      api('/v1/mcp/tools')
     ]);
     renderCapabilityStatus(status);
-    $('skillList').replaceChildren(...skills.map(skill => managedItem(
-      skill.name, `${skill.source} · ${skill.description || '无描述'}`,
-      () => deleteSkill(skill.name, skill.source === 'global')
-    )));
+    $('skillList').replaceChildren(...skills.map(skill => {
+      const item = workbenchItem(`${skill.enabled ? '●' : '○'} ${skill.name}`, `${skill.source} · ${skill.description || '无描述'} · ${skill.repository || '本地'}${skill.commit ? ` @ ${skill.commit.slice(0, 10)}` : ''} · ${skill.pinned ? '已固定版本' : '跟随更新'}`);
+      actionButton(item, skill.enabled ? '停用' : '启用', () => setSkillState(skill, !skill.enabled, skill.pinned));
+      actionButton(item, skill.pinned ? '取消固定' : '固定版本', () => setSkillState(skill, skill.enabled, !skill.pinned));
+      if (skill.repository) actionButton(item, '检查更新', async () => {
+        const global = skill.source === 'global';
+        const status = await api(`/v1/skills/${encodeURIComponent(skill.name)}/updates?projectKey=${project}&global=${global}`);
+        if (!status.updateAvailable) return showNotice(status.error || '当前已是最新版本');
+        if (confirm(`发现新 Commit ${status.latestCommit.slice(0, 10)}，立即升级？`)) {
+          await api(`/v1/skills/${encodeURIComponent(skill.name)}/upgrade?projectKey=${project}&global=${global}`, {method: 'POST', body: '{}'});
+          await refreshCapabilities();
+        }
+      });
+      if (skill.repository) actionButton(item, '回滚', async () => {
+        const global = skill.source === 'global';
+        await api(`/v1/skills/${encodeURIComponent(skill.name)}/rollback?projectKey=${project}&global=${global}`, {method: 'POST', body: '{}'});
+        await refreshCapabilities();
+      });
+      actionButton(item, '文件清单', async () => alert((await api(`/v1/skills/${encodeURIComponent(skill.name)}/files?projectKey=${project}`)).join('\n')));
+      actionButton(item, '删除', () => deleteSkill(skill.name, skill.source === 'global'));
+      return item;
+    }));
     if (!skills.length) $('skillList').append(element('div', 'hint', '尚未安装 Skill'));
     $('knowledgeList').replaceChildren(...documents.map(document => {
       const item = workbenchItem(document.name,
@@ -443,6 +491,14 @@ async function refreshCapabilities() {
       return item;
     }));
     if (!documents.length) $('knowledgeList').append(element('div', 'hint', '尚未上传知识文档'));
+    $('mcpList').replaceChildren(...mcpServers.map(server => {
+      const status = mcpTools.filter(tool => tool.server === server.name);
+      const item = workbenchItem(`${server.enabled ? '●' : '○'} ${server.name}`, `${server.url} · ${status.length} 个工具 · Header ${Object.keys(server.headers || {}).join(', ') || '无'}`);
+      actionButton(item, '测试', async () => { const result = await api(`/v1/mcp/servers/${server.name}/test`, {method: 'POST', body: '{}'}); showNotice(result.ready ? `${server.name} 连接正常` : `${server.name}：${result.error}`, !result.ready); await refreshCapabilities(); });
+      actionButton(item, server.enabled ? '停用' : '启用', () => saveMcp({...server, enabled: !server.enabled}));
+      actionButton(item, '删除', async () => { await api(`/v1/mcp/servers/${server.name}`, {method: 'DELETE'}); await refreshCapabilities(); }); return item;
+    }));
+    if (!mcpServers.length) $('mcpList').append(element('div', 'hint', '尚未配置 MCP Server'));
   } catch (error) {
     showNotice(`能力列表加载失败：${error.message}`, true);
   }
@@ -474,6 +530,24 @@ function managedItem(title, subtitle, removeAction) {
   return item;
 }
 
+async function setSkillState(skill, enabled, pinned) {
+  await api(`/v1/skills/${encodeURIComponent(skill.name)}/state?projectKey=${encodeURIComponent(currentProjectKey())}&global=${skill.source === 'global'}&enabled=${enabled}&pinned=${pinned}`, {method: 'POST', body: '{}'});
+  await refreshCapabilities();
+}
+
+async function saveMcp(server) {
+  await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}`, {method: 'PUT', body: JSON.stringify(server)});
+  await refreshCapabilities();
+}
+
+async function addMcp() {
+  const name = prompt('MCP Server 名称（字母、数字、点、下划线或连字符）'); if (!name) return;
+  const url = prompt('Streamable HTTP MCP 地址'); if (!url) return;
+  const header = prompt('敏感 Header 名称（可空，例如 Authorization）', '') || '';
+  const env = header ? prompt('环境变量引用（例如 env:MCP_TOKEN）', 'env:MCP_TOKEN') : '';
+  await saveMcp({name, url, enabled: true, headers: header ? {[header]: env} : {}});
+}
+
 function workbenchItem(title, subtitle) {
   const item = element('div', 'managed-item');
   const main = element('div', 'managed-main');
@@ -502,10 +576,12 @@ async function importSkill() {
   if (!gitUrl) return showNotice('请输入 Skill Git 地址', true);
   const global = $('skillGlobal').checked;
   try {
-    showNotice('正在下载并校验 Skill…');
-    await api('/v1/skills/imports', {method: 'POST', body: JSON.stringify({
-      projectKey: currentProjectKey(), gitUrl, name: $('skillName').value.trim() || null, global
-    })});
+    showNotice('正在预检 Skill 文件和权限声明…');
+    const request = {projectKey: currentProjectKey(), gitUrl, name: $('skillName').value.trim() || null, global};
+    const inspection = await api('/v1/skills/imports/inspect', {method: 'POST', body: JSON.stringify(request)});
+    if (!confirm(`安装 Skill“${inspection.name}”？\n权限声明：${inspection.permissions}\n\n文件清单：\n${inspection.files.join('\n')}`)) return;
+    showNotice('正在安装已确认的 Skill…');
+    await api('/v1/skills/imports', {method: 'POST', body: JSON.stringify(request)});
     $('skillGitUrl').value = '';
     $('skillName').value = '';
     $('skillGlobal').checked = false;
@@ -771,7 +847,7 @@ async function retryRun(branch) {
   if (!state.runId || !terminal.has(state.runStatus)) return;
   try {
     const result = await api(`/v1/runs/${state.runId}/retry`, {
-      method: 'POST', body: JSON.stringify({branch})
+      method: 'POST', body: JSON.stringify({branch, modelProfileId: state.modelProfileId || null})
     });
     if (branch) {
       await refreshSessions();
@@ -789,22 +865,391 @@ async function retryRun(branch) {
 
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
-  $('globalSearch').value = '';
-  clearSearchResults();
+  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification'].map($);
+  creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
-  await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies()]);
+  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]); }
+  finally { creationButtons.forEach(button => { button.disabled = false; }); }
 }
 
-function clearSearchResults() {
-  $('searchResults').replaceChildren();
+async function refreshComposerOptions() {
+  try {
+    const project = encodeURIComponent(currentProjectKey());
+    [state.templates, state.modelProfiles] = await Promise.all([
+      api(`/v1/productivity/templates?projectKey=${project}`),
+      api(`/v1/productivity/model-profiles?projectKey=${project}`)
+    ]);
+    const template = $('quickTemplate');
+    template.replaceChildren(element('option', '', '快捷指令'));
+    template.firstElementChild.value = '';
+    state.templates.forEach(value => {
+      const option = element('option', '', `${value.shortcut || '模板'} · ${value.name}`);
+      option.value = value.id; template.append(option);
+    });
+    const profile = $('modelProfile');
+    profile.replaceChildren(element('option', '', '默认模型'));
+    profile.firstElementChild.value = '';
+    state.modelProfiles.forEach(value => {
+      const option = element('option', '', `${value.defaultProfile ? '★ ' : ''}${value.name}`);
+      option.value = value.id; profile.append(option);
+    });
+    if (state.modelProfiles.some(value => value.id === state.modelProfileId)) profile.value = state.modelProfileId;
+    else state.modelProfileId = '';
+    scheduleEstimate();
+  } catch (error) { showNotice(`P1 配置加载失败：${error.message}`, true); }
+}
+
+let estimateTimer = 0;
+function scheduleEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(updateEstimate, 250);
+}
+
+async function updateEstimate() {
+  if (!state.sessionId) return;
+  try {
+    const query = new URLSearchParams({sessionId: state.sessionId, inputChars: String($('input').value.length)});
+    if (state.modelProfileId) query.set('modelProfileId', state.modelProfileId);
+    const value = await api(`/v1/productivity/estimate?${query}`);
+    const cost = value.estimatedMaxCost ? ` · 上限成本约 $${value.estimatedMaxCost.toFixed(4)}` : '';
+    $('estimate').textContent = `预计上下文 ${value.estimatedContextTokens.toLocaleString()} / ${value.maxContextTokens ? value.maxContextTokens.toLocaleString() : '默认'} Token · 输出上限 ${value.maxOutputTokens || '默认'}${cost}${value.warning ? ` · ${value.warning}` : ''}`;
+    $('estimate').classList.toggle('warning', Boolean(value.warning));
+  } catch { $('estimate').textContent = '暂时无法估算上下文与成本'; }
+}
+
+async function applyTemplate(id) {
+  if (!id) return;
+  try {
+    const value = await api(`/v1/productivity/templates/${encodeURIComponent(id)}/resolve?projectKey=${encodeURIComponent(currentProjectKey())}`, {method: 'POST', body: JSON.stringify({variables: {}})});
+    $('input').value = value.prompt;
+    if (value.modelProfileId) {
+      state.modelProfileId = value.modelProfileId;
+      $('modelProfile').value = value.modelProfileId;
+    }
+    localStorage.setItem(`paicli_draft_${state.sessionId}`, $('input').value);
+    resizeInput(); scheduleEstimate(); $('input').focus();
+  } catch (error) { showNotice(`模板解析失败：${error.message}`, true); }
+}
+
+async function loadP1Data() {
+  const project = encodeURIComponent(currentProjectKey());
+  try {
+    const [usage, templates, profiles, queue, schedules, notifications] = await Promise.all([
+      api(`/v1/productivity/usage?projectKey=${project}&days=30`),
+      api(`/v1/productivity/templates?projectKey=${project}`),
+      api(`/v1/productivity/model-profiles?projectKey=${project}`),
+      api(`/v1/productivity/queue?projectKey=${project}`),
+      api(`/v1/productivity/schedules?projectKey=${project}`),
+      api(`/v1/productivity/notifications?projectKey=${project}`)
+    ]);
+    renderUsage(usage); renderTemplates(templates); renderProfiles(profiles); renderQueue(queue);
+    renderSchedules(schedules, templates); renderNotifications(notifications);
+    state.templates = templates; state.modelProfiles = profiles;
+  } catch (error) { showNotice(`P1 工作台加载失败：${error.message}`, true); }
+}
+
+function renderUsage(value) {
+  const budget = value.budget;
+  const tokens = value.inputTokens + value.outputTokens;
+  const labels = [
+    ['调用', value.calls.toLocaleString()], ['Token', tokens.toLocaleString()],
+    ['缓存命中', value.cachedTokens.toLocaleString()], ['平均响应', `${Math.round(value.averageDurationMs)} ms`],
+    ['失败率', `${(value.failureRate * 100).toFixed(1)}%`], ['重试', value.retries.toLocaleString()],
+    ['估算成本', `$${value.estimatedCost.toFixed(4)}`]
+  ];
+  const tokenRatio = budget.monthlyTokens ? tokens / budget.monthlyTokens : 0;
+  const costRatio = budget.monthlyCost ? value.estimatedCost / budget.monthlyCost : 0;
+  if (Math.max(tokenRatio, costRatio) >= budget.warnRatio) {
+    labels.push(['预算提醒', `${Math.round(Math.max(tokenRatio, costRatio) * 100)}%`]);
+    showNotice('项目月度模型预算已接近上限', true);
+  }
+  $('usageSummary').replaceChildren(...labels.map(([name, text]) => {
+    const item = element('div', 'capability-status-item'); item.append(element('strong', '', name), element('small', '', text)); return item;
+  }));
+  const configure = element('button', 'secondary', '配置预算与并发');
+  configure.onclick = () => configureBudget(budget);
+  $('usageSummary').append(configure);
+  (value.breakdown || []).slice(0, 8).forEach(row => {
+    const item = element('div', 'capability-status-item');
+    const tokens = row.inputTokens + row.outputTokens;
+    item.append(element('strong', '', `${row.date} · ${row.model}`),
+      element('small', '', `${row.sessionTitle} · ${row.calls} 次 · ${tokens.toLocaleString()} Token · ${row.localModel ? `${Math.round(row.averageDurationMs)} ms` : `$${row.estimatedCost.toFixed(4)}`}`));
+    $('usageSummary').append(item);
+  });
+}
+
+async function configureBudget(current) {
+  const dailyTokens = prompt('每日 Token 预算（0 表示不限）', current.dailyTokens || 0); if (dailyTokens === null) return;
+  const monthlyTokens = prompt('每月 Token 预算（0 表示不限）', current.monthlyTokens || 0); if (monthlyTokens === null) return;
+  const dailyCost = prompt('每日成本预算 USD（0 表示不限）', current.dailyCost || 0); if (dailyCost === null) return;
+  const monthlyCost = prompt('每月成本预算 USD（0 表示不限）', current.monthlyCost || 0); if (monthlyCost === null) return;
+  const maxConcurrentRuns = prompt('项目最大并发 Run', current.maxConcurrentRuns || 4); if (maxConcurrentRuns === null) return;
+  await api(`/v1/productivity/budget?projectKey=${encodeURIComponent(currentProjectKey())}`, {method: 'PUT', body: JSON.stringify({dailyTokens:+dailyTokens, monthlyTokens:+monthlyTokens, dailyCost:+dailyCost, monthlyCost:+monthlyCost, warnRatio:.8, maxConcurrentRuns:+maxConcurrentRuns})});
+  await loadP1Data();
+}
+
+function renderTemplates(values) {
+  $('templateList').replaceChildren(...values.map(value => {
+    const item = workbenchItem(`${value.shortcut || '模板'} · ${value.name}`, `${value.prompt} · 使用 ${value.useCount} 次${value.attachmentRequirements ? ` · 附件：${value.attachmentRequirements}` : ''}`);
+    actionButton(item, '使用', async () => { $('workbenchDialog').close(); await applyTemplate(value.id); }, true);
+    actionButton(item, '删除', async () => { if (confirm(`删除模板“${value.name}”？`)) { await api(`/v1/productivity/templates/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    return item;
+  }));
+}
+
+function setFormError(id, message = '') { $(id).textContent = message; }
+
+function fillSelect(select, values, emptyLabel = '') {
+  const options = emptyLabel ? [new Option(emptyLabel, '')] : [];
+  options.push(...values.map(value => new Option(value.label, value.id)));
+  select.replaceChildren(...options);
+}
+
+function parseStringMap(text, label) {
+  let value;
+  try { value = JSON.parse(text.trim() || '{}'); }
+  catch { throw new Error(`${label}不是有效的 JSON`); }
+  if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`${label}必须是 JSON 对象`);
+  if (Object.values(value).some(item => typeof item !== 'string')) throw new Error(`${label}的值必须全部是字符串`);
+  return value;
+}
+
+function openTemplateDialog() {
+  $('templateForm').reset();
+  $('templateVariables').value = '{"repository":"当前仓库","outputFormat":"Markdown"}';
+  fillSelect($('templateProfile'), state.modelProfiles.map(value => ({id: value.id, label: `${value.name} · ${value.model}`})), '使用项目默认模型');
+  if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('templateProfile').value = state.modelProfileId;
+  setFormError('templateFormError');
+  $('templateDialog').showModal();
+  $('templateName').focus();
+}
+
+async function submitTemplate(event) {
+  event.preventDefault();
+  setFormError('templateFormError');
+  const button = $('saveTemplate'); button.disabled = true;
+  try {
+    const shortcut = $('templateShortcut').value.trim();
+    if (shortcut && !/^\/[a-zA-Z0-9_-]+$/.test(shortcut)) throw new Error('快捷指令需以 / 开头，且只能包含字母、数字、下划线和连字符');
+    const variables = parseStringMap($('templateVariables').value, '变量默认值');
+    const allowedTools = $('templateTools').value.split(',').map(value => value.trim()).filter(Boolean);
+    await api('/v1/productivity/templates', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('templateName').value.trim(), shortcut,
+      prompt: $('templatePrompt').value.trim(), variables,
+      attachmentRequirements: $('templateAttachments').value.trim(), allowedTools,
+      modelProfileId: $('templateProfile').value || null
+    })});
+    $('templateDialog').close();
+    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    showNotice('任务模板已创建');
+  } catch (error) { setFormError('templateFormError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function renderProfiles(values) {
+  $('profileList').replaceChildren(...values.map(value => {
+    const item = workbenchItem(`${value.defaultProfile ? '★ ' : ''}${value.name}`, `${value.localModel ? '本地模型' : '远程模型'} · ${value.model} · ${value.maxContextTokens.toLocaleString()} ctx · fallback ${value.fallbackModel || '无'}`);
+    actionButton(item, '选用', () => { state.modelProfileId = value.id; localStorage.setItem('paicli_model_profile', value.id); $('modelProfile').value = value.id; scheduleEstimate(); });
+    actionButton(item, '删除', async () => { if (confirm(`删除模型方案“${value.name}”？`)) { await api(`/v1/productivity/model-profiles/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    return item;
+  }));
+  if (!values.length) $('profileList').append(element('div', 'hint', '暂无项目级模型方案；继续使用服务端默认模型'));
+}
+
+function openProfileDialog() {
+  $('profileForm').reset();
+  setFormError('profileFormError');
+  updateProfilePriceFields();
+  $('profileDialog').showModal();
+  $('profileName').focus();
+}
+
+function updateProfilePriceFields() {
+  const local = $('profileLocal').checked;
+  for (const id of ['profileInputPrice', 'profileOutputPrice']) {
+    $(id).disabled = local;
+    if (local) $(id).value = '0';
+  }
+}
+
+async function submitProfile(event) {
+  event.preventDefault();
+  setFormError('profileFormError');
+  const button = $('saveProfile'); button.disabled = true;
+  try {
+    const localModel = $('profileLocal').checked;
+    await api('/v1/productivity/model-profiles', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('profileName').value.trim(),
+      baseUrl: $('profileBaseUrl').value.trim(), apiKeyEnv: $('profileApiKeyEnv').value.trim(),
+      model: $('profileModel').value.trim(), fallbackModel: $('profileFallback').value.trim(),
+      maxContextTokens: Number($('profileContext').value), maxOutputTokens: Number($('profileOutput').value),
+      inputPrice: localModel ? 0 : Number($('profileInputPrice').value || 0),
+      outputPrice: localModel ? 0 : Number($('profileOutputPrice').value || 0),
+      localModel, makeDefault: $('profileDefault').checked
+    })});
+    $('profileDialog').close();
+    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    showNotice('模型配置方案已创建');
+  } catch (error) { setFormError('profileFormError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function renderQueue(values) {
+  $('queueList').replaceChildren(...values.map(value => {
+    const run = value.run; const remaining = value.remainingBudgetTokens < 0 ? '预算不限' : `项目余量 ${value.remainingBudgetTokens.toLocaleString()} Token`;
+    const item = workbenchItem(`${run.status} · ${value.sessionTitle}`, `${run.id} · step ${run.currentStep} · 优先级 ${run.priority} · ${Math.round(value.elapsedMs / 1000)}s · 已用 ${value.usedTokens.toLocaleString()} Token · ${remaining} · retry ${run.retryCount}`);
+    if (run.status === 'QUEUED') { actionButton(item, '提高优先级', () => setRunPriority(run.id, run.priority + 1)); actionButton(item, '取消', () => batchQueue([run.id], 'CANCEL')); }
+    if (run.status === 'FAILED' || run.status === 'CANCELED') actionButton(item, '重新排队', () => batchQueue([run.id], 'REQUEUE'), true);
+    return item;
+  }));
+  if (!values.length) $('queueList').append(element('div', 'hint', '当前没有排队、运行、待审批或失败任务'));
+}
+async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadP1Data(); }
+async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadP1Data(); }
+
+function renderSchedules(values, templates) {
+  $('scheduleList').replaceChildren(...values.map(value => {
+    const template = templates.find(item => item.id === value.templateId); const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
+    actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } }); return item;
+  }));
+}
+function localDateTimeValue(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function nextDaily(time) {
+  const [hours, minutes] = time.split(':').map(Number); const value = new Date();
+  value.setSeconds(0, 0); value.setHours(hours, minutes, 0, 0);
+  if (value <= new Date()) value.setDate(value.getDate() + 1);
+  return value;
+}
+
+function nextWeekly(weekday, time) {
+  const value = nextDaily(time); const target = Number(weekday);
+  let days = (target - value.getDay() + 7) % 7;
+  value.setDate(value.getDate() + days);
+  return value;
+}
+
+function selectedTemplateVariables() {
+  const template = state.templates.find(value => value.id === $('scheduleTemplate').value);
+  return template?.variablesJson || '{}';
+}
+
+function updateScheduleFields() {
+  const type = $('scheduleType').value;
+  $('scheduleOnceFields').hidden = type !== 'ONCE';
+  $('scheduleDailyFields').hidden = type !== 'DAILY';
+  $('scheduleWeeklyFields').hidden = type !== 'WEEKLY';
+  $('scheduleCronFields').hidden = type !== 'CRON';
+}
+
+function openScheduleDialog() {
+  if (!state.templates.length) return showNotice('请先创建任务模板，再新建定时任务', true);
+  $('scheduleForm').reset();
+  fillSelect($('scheduleTemplate'), state.templates.map(value => ({id: value.id, label: `${value.shortcut || '模板'} · ${value.name}`})));
+  $('scheduleOnceAt').value = localDateTimeValue(new Date(Date.now() + 3600000));
+  $('scheduleVariables').value = selectedTemplateVariables();
+  setFormError('scheduleFormError');
+  updateScheduleFields();
+  $('scheduleDialog').showModal();
+  $('scheduleName').focus();
+}
+
+async function submitSchedule(event) {
+  event.preventDefault();
+  setFormError('scheduleFormError');
+  const button = $('saveSchedule'); button.disabled = true;
+  try {
+    const type = $('scheduleType').value;
+    let nextRunAt = null; let scheduleValue = '';
+    if (type === 'ONCE') {
+      const date = new Date($('scheduleOnceAt').value);
+      if (Number.isNaN(date.getTime()) || date <= new Date()) throw new Error('一次性任务的执行时间必须晚于当前时间');
+      nextRunAt = date.toISOString();
+    } else if (type === 'DAILY') {
+      if (!$('scheduleDailyTime').value) throw new Error('请选择每天执行时间');
+      scheduleValue = $('scheduleDailyTime').value; nextRunAt = nextDaily(scheduleValue).toISOString();
+    } else if (type === 'WEEKLY') {
+      const time = $('scheduleWeeklyTime').value; if (!time) throw new Error('请选择每周执行时间');
+      const weekday = $('scheduleWeekday').value;
+      scheduleValue = `${['SUN','MON','TUE','WED','THU','FRI','SAT'][Number(weekday)]} ${time}`;
+      nextRunAt = nextWeekly(weekday, time).toISOString();
+    } else {
+      scheduleValue = $('scheduleCron').value.trim();
+      if (!scheduleValue) throw new Error('请输入 Spring 六段 Cron 表达式');
+    }
+    const variables = parseStringMap($('scheduleVariables').value, '模板变量');
+    await api('/v1/productivity/schedules', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('scheduleName').value.trim(),
+      templateId: $('scheduleTemplate').value, scheduleType: type, scheduleValue,
+      variables, enabled: $('scheduleEnabled').checked, nextRunAt
+    })});
+    $('scheduleDialog').close();
+    await loadP1Data();
+    showNotice('定时任务已创建');
+  } catch (error) { setFormError('scheduleFormError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function renderNotifications(values) {
+  $('notificationList').replaceChildren(...values.map(value => { const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.type} · ${value.events} · 密钥环境变量 ${value.secretEnv || '无'}`); actionButton(item, '删除', async () => { await api(`/v1/productivity/notifications/${value.id}`, {method: 'DELETE'}); await loadP1Data(); }); return item; }));
+}
+const notificationNames = {BROWSER: '浏览器通知', WEBHOOK: 'Webhook 通知', EMAIL: '邮件通知', IM: '企业 IM 通知'};
+
+function updateNotificationFields(resetName = false) {
+  const browser = $('notificationType').value === 'BROWSER';
+  $('notificationEndpointFields').hidden = browser;
+  $('notificationSecretFields').hidden = browser;
+  $('notificationEndpoint').required = !browser;
+  if (resetName) $('notificationName').value = notificationNames[$('notificationType').value];
+}
+
+function openNotificationDialog() {
+  $('notificationForm').reset();
+  setFormError('notificationFormError');
+  updateNotificationFields(true);
+  $('notificationDialog').showModal();
+  $('notificationName').focus();
+  $('notificationName').select();
+}
+
+async function submitNotification(event) {
+  event.preventDefault();
+  setFormError('notificationFormError');
+  const button = $('saveNotification'); button.disabled = true;
+  try {
+    const type = $('notificationType').value;
+    const events = [...document.querySelectorAll('[name="notificationEvent"]:checked')].map(value => value.value);
+    if (!events.length) throw new Error('请至少选择一个通知事件');
+    if (type === 'BROWSER' && 'Notification' in window) {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('浏览器通知权限未授予');
+    }
+    await api('/v1/productivity/notifications', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('notificationName').value.trim(), type,
+      endpoint: type === 'BROWSER' ? '' : $('notificationEndpoint').value.trim(),
+      secretEnv: type === 'BROWSER' ? '' : $('notificationSecretEnv').value.trim(),
+      events, enabled: $('notificationEnabled').checked
+    })});
+    $('notificationDialog').close();
+    await loadP1Data();
+    showNotice('完成通知已创建');
+  } catch (error) { setFormError('notificationFormError', error.message); }
+  finally { button.disabled = false; }
+}
+
+async function exportSession(format) {
+  if (!state.sessionId) return showNotice('请先选择对话', true);
+  const response = await fetch(`/v1/sessions/${state.sessionId}/export?format=${format}&redactSecrets=${$('redactExport').checked}`, {headers: headers(false)});
+  if (!response.ok) throw new Error(await response.text()); const url = URL.createObjectURL(await response.blob()); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `paicli-session.${format === 'markdown' ? 'md' : 'json'}`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function importSession(file) {
+  const payload = await file.text(); const session = await api('/v1/sessions/import', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), payload, redactSecrets: $('redactExport').checked})}); await refreshSessions(); await selectSession(session.id); $('workbenchDialog').close();
 }
 
 async function searchAll() {
   const query = $('globalSearch').value.trim();
-  if (!query) {
-    clearSearchResults();
-    return;
-  }
   if (query.length < 2) return showNotice('搜索词至少 2 个字符', true);
   try {
     const values = await api(`/v1/search?projectKey=${encodeURIComponent(currentProjectKey())}&query=${encodeURIComponent(query)}&limit=50`);
@@ -845,8 +1290,8 @@ async function loadManagedMemories() {
       actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
       actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
       actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
-      actionButton(item, '合并到…', () => mergeMemory(memory, values));
-      actionButton(item, '修订', () => showMemoryRevisions(memory));
+      if (values.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, values));
+      actionButton(item, '修订', () => openMemoryRevision(memory));
       return item;
     }));
     if (!values.length) $('memoryList').append(element('div', 'hint', '暂无启用的 Memory'));
@@ -860,30 +1305,121 @@ async function setMemoryState(id, value) {
   } catch (error) { showNotice(`Memory 更新失败：${error.message}`, true); }
 }
 
-async function mergeMemory(source, values) {
-  const key = prompt('输入要合并到的目标 Memory Key：');
-  if (!key) return;
-  const target = values.find(value => value.memoryKey === key.trim());
-  if (!target || target.id === source.id) return showNotice('未找到其他同名目标 Memory', true);
-  try {
-    await api(`/v1/memories/${target.id}/merge`, {
-      method: 'POST', body: JSON.stringify({sourceIds: [source.id]})
-    });
-    showNotice(`已将 ${source.memoryKey} 合并到 ${target.memoryKey}`);
-    await loadManagedMemories();
-  } catch (error) { showNotice(`Memory 合并失败：${error.message}`, true); }
+let memoryMergeOptions = [];
+let memoryRevisionCurrent = null;
+
+function memorySummary(container, title, memory) {
+  container.replaceChildren(
+    element('strong', '', title),
+    document.createTextNode(`${memory.memoryKey}\n${memory.content}${memory.tags ? `\n标签：${memory.tags}` : ''}`)
+  );
 }
 
-async function showMemoryRevisions(memory) {
+function updateMemoryMergePreview() {
+  const target = memoryMergeOptions.find(value => value.id === $('memoryMergeTarget').value);
+  if (target) memorySummary($('memoryMergePreview'), '目标 Memory', target);
+  else $('memoryMergePreview').replaceChildren();
+}
+
+function openMemoryMerge(source, values) {
+  memoryMergeOptions = values.filter(value => value.id !== source.id);
+  if (!memoryMergeOptions.length) return showNotice('没有可合并的目标 Memory', true);
+  $('memoryMergeForm').dataset.sourceId = source.id;
+  memorySummary($('memoryMergeSource'), '源 Memory（合并后删除）', source);
+  fillSelect($('memoryMergeTarget'), memoryMergeOptions.map(value => ({
+    id: value.id, label: `${value.memoryKey} · ${value.content.slice(0, 60)}`
+  })));
+  setFormError('memoryMergeError');
+  updateMemoryMergePreview();
+  $('memoryMergeDialog').showModal();
+  $('memoryMergeTarget').focus();
+}
+
+async function submitMemoryMerge(event) {
+  event.preventDefault();
+  setFormError('memoryMergeError');
+  const sourceId = $('memoryMergeForm').dataset.sourceId;
+  const target = memoryMergeOptions.find(value => value.id === $('memoryMergeTarget').value);
+  if (!target || !sourceId) return setFormError('memoryMergeError', '请选择有效的目标 Memory');
+  const button = $('saveMemoryMerge'); button.disabled = true;
   try {
-    const revisions = await api(`/v1/memories/${memory.id}/revisions`);
-    if (!revisions.length) return showNotice('该 Memory 暂无历史修订');
-    const revision = revisions[0];
-    if (confirm(`恢复最近一次修订（${new Date(revision.replacedAt).toLocaleString()}）？\n\n${revision.content}`)) {
-      await api(`/v1/memories/${memory.id}/revisions/${revision.id}/restore`, {method: 'POST'});
-      await loadManagedMemories();
-    }
-  } catch (error) { showNotice(`修订加载失败：${error.message}`, true); }
+    await api(`/v1/memories/${target.id}/merge`, {
+      method: 'POST', body: JSON.stringify({sourceIds: [sourceId]})
+    });
+    $('memoryMergeDialog').close();
+    await loadManagedMemories();
+    showNotice(`Memory 已合并到 ${target.memoryKey}`);
+  } catch (error) { setFormError('memoryMergeError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function openMemoryRevision(memory) {
+  memoryRevisionCurrent = memory;
+  $('memoryRevisionForm').dataset.memoryId = memory.id;
+  $('memoryRevisionKey').value = memory.memoryKey;
+  $('memoryRevisionContent').value = memory.content;
+  $('memoryRevisionTags').value = memory.tags || '';
+  setFormError('memoryRevisionError');
+  $('memoryRevisionStatus').textContent = '';
+  $('memoryRevisionList').replaceChildren(element('div', 'hint', '正在加载历史版本…'));
+  $('memoryRevisionDialog').showModal();
+  loadMemoryRevisionHistory();
+}
+
+async function loadMemoryRevisionHistory() {
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  if (!memoryId) return;
+  $('refreshMemoryRevisions').disabled = true;
+  try {
+    const revisions = await api(`/v1/memories/${memoryId}/revisions`);
+    $('memoryRevisionList').replaceChildren(...revisions.map(revision => {
+      const item = workbenchItem(
+        new Date(revision.replacedAt).toLocaleString(),
+        `${revision.layer}/${revision.memoryType} · 置信度 ${Math.round(revision.confidence * 100)}% · ${revision.content}${revision.tags ? ` · 标签：${revision.tags}` : ''}`
+      );
+      actionButton(item, '恢复此版本', () => restoreMemoryRevision(revision, item), true);
+      return item;
+    }));
+    if (!revisions.length) $('memoryRevisionList').append(element('div', 'hint', '暂无历史版本；保存一次修订后会在这里生成记录。'));
+  } catch (error) {
+    $('memoryRevisionList').replaceChildren(element('div', 'form-error', `历史版本加载失败：${error.message}`));
+  } finally { $('refreshMemoryRevisions').disabled = false; }
+}
+
+async function restoreMemoryRevision(revision, item) {
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  const button = item.querySelector('button'); button.disabled = true;
+  setFormError('memoryRevisionError');
+  try {
+    const restored = await api(`/v1/memories/${memoryId}/revisions/${revision.id}/restore`, {method: 'POST'});
+    memoryRevisionCurrent = restored;
+    $('memoryRevisionKey').value = restored.memoryKey;
+    $('memoryRevisionContent').value = restored.content;
+    $('memoryRevisionTags').value = restored.tags || '';
+    await Promise.all([loadManagedMemories(), loadMemoryRevisionHistory()]);
+    $('memoryRevisionStatus').textContent = `已恢复 ${new Date(revision.replacedAt).toLocaleString()} 的版本；恢复前内容已保留为历史版本。`;
+  } catch (error) { setFormError('memoryRevisionError', error.message); }
+  finally { button.disabled = false; }
+}
+
+async function submitMemoryRevision(event) {
+  event.preventDefault();
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  if (!memoryId) return;
+  setFormError('memoryRevisionError');
+  $('memoryRevisionStatus').textContent = '';
+  const button = $('saveMemoryRevision'); button.disabled = true;
+  try {
+    const updated = await api(`/v1/memories/${memoryId}`, {method: 'PUT', body: JSON.stringify({
+      memoryKey: $('memoryRevisionKey').value.trim(),
+      content: $('memoryRevisionContent').value.trim(),
+      tags: $('memoryRevisionTags').value.trim()
+    })});
+    memoryRevisionCurrent = {...memoryRevisionCurrent, ...updated};
+    await Promise.all([loadManagedMemories(), loadMemoryRevisionHistory()]);
+    $('memoryRevisionStatus').textContent = '修订已保存，修改前内容已加入历史版本。';
+  } catch (error) { setFormError('memoryRevisionError', error.message); }
+  finally { button.disabled = false; }
 }
 
 async function loadArtifacts() {
@@ -1025,7 +1561,10 @@ $('send').onclick = sendMessage;
 $('attach').onclick = () => $('attachmentInput').click();
 $('attachmentInput').onchange = () => uploadAttachments([...$('attachmentInput').files]);
 $('stop').onclick = stopRun;
-$('input').oninput = resizeInput;
+$('input').oninput = () => {
+  resizeInput(); scheduleEstimate();
+  if (state.sessionId) localStorage.setItem(`paicli_draft_${state.sessionId}`, $('input').value);
+};
 $('input').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
@@ -1050,30 +1589,81 @@ $('toggle').onclick = () => {
 $('retryRun').onclick = () => retryRun(false);
 $('branchRun').onclick = () => retryRun(true);
 $('menu').onclick = () => $('sidebar').classList.toggle('open');
-$('settings').onclick = () => {
-  $('key').value = sessionStorage.getItem('paicli_api_key') || '';
-  $('dialog').showModal();
-};
+$('settings').onclick = () => openConnectionSettings();
 $('capabilities').onclick = openCapabilities;
 $('workbench').onclick = openWorkbench;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
-$('globalSearch').oninput = () => { if (!$('globalSearch').value.trim()) clearSearchResults(); };
 $('refreshMemories').onclick = loadManagedMemories;
 $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
+$('refreshP1').onclick = loadP1Data;
+$('refreshQueue').onclick = loadP1Data;
+$('addTemplate').onclick = openTemplateDialog;
+$('addProfile').onclick = openProfileDialog;
+$('addSchedule').onclick = openScheduleDialog;
+$('addNotification').onclick = openNotificationDialog;
+$('cancelTemplate').onclick = () => $('templateDialog').close();
+$('cancelProfile').onclick = () => $('profileDialog').close();
+$('cancelSchedule').onclick = () => $('scheduleDialog').close();
+$('cancelNotification').onclick = () => $('notificationDialog').close();
+$('templateForm').onsubmit = submitTemplate;
+$('profileForm').onsubmit = submitProfile;
+$('scheduleForm').onsubmit = submitSchedule;
+$('notificationForm').onsubmit = submitNotification;
+$('profileLocal').onchange = updateProfilePriceFields;
+$('scheduleType').onchange = updateScheduleFields;
+$('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };
+$('notificationType').onchange = () => updateNotificationFields(true);
+$('cancelMemoryMerge').onclick = () => $('memoryMergeDialog').close();
+$('cancelMemoryRevision').onclick = () => $('memoryRevisionDialog').close();
+$('memoryMergeForm').onsubmit = submitMemoryMerge;
+$('memoryRevisionForm').onsubmit = submitMemoryRevision;
+$('memoryMergeTarget').onchange = updateMemoryMergePreview;
+$('refreshMemoryRevisions').onclick = loadMemoryRevisionHistory;
+$('templateName').oninput = () => {
+  if (!$('templateShortcut').value) {
+    const slug = $('templateName').value.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');
+    $('templateShortcut').value = slug ? `/${slug}` : '';
+  }
+};
+$('quickTemplate').onchange = () => applyTemplate($('quickTemplate').value);
+$('modelProfile').onchange = () => {
+  state.modelProfileId = $('modelProfile').value;
+  localStorage.setItem('paicli_model_profile', state.modelProfileId);
+  scheduleEstimate();
+};
+document.querySelectorAll('[data-export]').forEach(button => button.onclick = () => exportSession(button.dataset.export).catch(error => showNotice(`导出失败：${error.message}`, true)));
+$('sessionImport').onchange = () => { const file = $('sessionImport').files[0]; if (file) importSession(file).catch(error => showNotice(`导入失败：${error.message}`, true)); };
 $('closeCapabilities').onclick = () => $('capabilityDialog').close();
 $('importSkill').onclick = importSkill;
+$('addMcp').onclick = () => addMcp().catch(error => showNotice(`MCP 配置失败：${error.message}`, true));
 $('uploadKnowledge').onclick = uploadKnowledge;
 $('close').onclick = () => $('dialog').close();
-$('save').onclick = () => {
-  sessionStorage.setItem('paicli_api_key', $('key').value.trim());
-  $('dialog').close();
-  refreshSessions();
+$('save').onclick = async () => {
+  const key = $('key').value.trim();
+  if (key) sessionStorage.setItem('paicli_api_key', key);
+  else sessionStorage.removeItem('paicli_api_key');
+  $('save').disabled = true;
+  $('connectionHint').textContent = '正在验证连接…';
+  try {
+    await api('/v1/system/info');
+    $('dialog').close();
+    showNotice('连接成功');
+    await refreshSessions();
+  } catch (error) {
+    if (error.status !== 401) $('connectionHint').textContent = `连接验证失败：${error.message}`;
+  } finally {
+    $('save').disabled = false;
+  }
 };
 document.addEventListener('click', () => {
   document.querySelectorAll('.session-menu.open').forEach(menu => menu.classList.remove('open'));
+});
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('input').focus(); }
+  if (event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); createSession(); }
 });
 
 $('workspace').classList.toggle('hide-detail', !state.detailOpen);

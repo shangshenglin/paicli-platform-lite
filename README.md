@@ -8,9 +8,24 @@
 - 工具调用在执行前持久化，使用幂等键避免恢复时重复副作用。
 - 企业级 PostgreSQL、S3、消息队列和 MicroVM 分别由 SQLite、本地目录、进程内 Worker 和 Docker 替代。
 
+## 产品站点
+
+- 在线站点：[PaiCLI Platform Lite 产品站](https://paicli-platform-lite.fuermalin2002.chatgpt.site)
+- 站点源码：`paicli-site/`
+
+本地开发产品站点：
+
+```powershell
+cd paicli-site
+npm install
+npm run dev
+```
+
+站点使用 Node.js `>= 22.13.0`，详细验证和目录说明见 `paicli-site/README.md`。
+
 ## 当前阶段
 
-阶段 1 至阶段 10 已完成：
+阶段 1 至阶段 11 已完成：
 
 - 三模块 Maven 工程。
 - Spring Boot REST/SSE Server。
@@ -25,7 +40,7 @@
 - `write_file` / `execute_command` 持久化审批。
 - JSONL 工具与审批审计。
 - 服务启动时清理带 PaiCLI label 的孤儿容器。
-- OpenAI-compatible 流式模型适配，可配置 OpenAI、GLM、DeepSeek 等兼容端点。
+- OpenAI 兼容的流式模型适配，可配置 OpenAI、GLM、DeepSeek 等兼容端点。
 - 分层 Prompt、主模型结构化摘要（失败时确定性降级）、Token 预算和持久化模型 usage。
 - 大工具结果外置到本地 Artifact Store，并提供 `read_artifact` 分段读取。
 - L0 对话到 L1/L2/L3 的持久化自动 Memory 提取、时序修订、混合召回，并保留显式 CRUD 纠错。
@@ -37,8 +52,9 @@
 - 可选 API Key 认证、生产强制密钥模式、管理端点保护、安全响应头和聊天式 Web Console。
 - SQLite WAL checkpoint、可选 Event/Audit 保留策略、孤儿文件清理和扩展 Micrometer 指标。
 - 带 SHA-256 校验、路径校验和 SQLite 文件头校验的停机备份/恢复脚本。
-- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 59 个自动化测试。
+- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 61 个自动化测试。
 - P0 业务工作台：Run 重试/分支、持久化审批策略、统一检索、Memory 管理、知识版本/索引状态和 Artifact 复用。
+- P1 长期使用效率：任务模板、项目模型方案、用量预算、Run 队列、定时任务、完成通知、Session 迁移、Skill 生命周期与 MCP 配置界面。
 
 Docker Desktop / WSL2 真实容器验收已完成：审批恢复、容器内命令执行、工作区挂载、SSE 重放、资源/安全限制和结束回收均已通过。
 
@@ -61,12 +77,15 @@ java -jar paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar
 默认监听 `http://127.0.0.1:8080`，数据写入当前目录下的 `data/`。
 浏览器访问 `http://127.0.0.1:8080/` 使用聊天式 Console；对话区和右侧执行详情均在视口内独立滚动，流式事件会批量持久化并合并渲染，访问 `/docs` 查看 OpenAPI。历史对话可创建持久化分组、在分组间移动并删除；删除分组不删对话，删除对话会清理其消息和执行记录。Console 可在每次提交前选择“深度思考：关闭/开启”和“推理等级：高/最高”；关闭是默认快速模式。
 `start-local.ps1` 和 `start-docker.ps1` 会自动读取被 Git 忽略的项目 `.env`；已经存在的进程环境变量优先。
-Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。启用 API Key 后，
+本地服务已经监听 `8080` 时，再次运行 `start-local.ps1` 会直接提示服务已启动，不会重复打包并触发 Windows JAR 文件锁。修改代码后需要重新构建并重启时使用 `.\scripts\start-local.ps1 -Restart`。
+Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。接口返回 401 时会自动打开连接设置，密钥验证成功后才刷新工作台。启用 API Key 后，
 `/actuator/**` 与 `/v3/api-docs` 默认使用同一密钥保护。
+
+注意区分两把密钥：Console“连接设置”填写 `PAICLI_API_KEY`，它只用于访问本机 PaiCLI API；`PAICLI_MODEL_API_KEY` 是 DeepSeek/OpenAI 兼容模型的密钥，只保存在 Server 环境中，不能填写到浏览器。
 
 ## P0 业务工作台
 
-Console 左侧“业务工作台”统一提供项目级搜索、Memory 管理、Artifact 管理和审批策略撤销。终态 Run 顶部提供“重试”和“分支”：重试沿用原 Session，分支会复制源 Run 之前的对话到新 Session，再沿用原输入与推理设置执行。
+Console 左侧“业务工作台”统一提供项目级搜索、Memory 管理、Artifact 管理和审批策略撤销。Memory 合并使用目标下拉选择和内容预览；修订界面可直接编辑当前内容，并查看、恢复全部历史版本。终态 Run 顶部提供“重试”和“分支”：重试沿用原 Session，分支会复制源 Run 之前的对话到新 Session，再沿用原输入与推理设置执行。
 
 危险工具审批支持三种范围：
 
@@ -94,6 +113,40 @@ GET    /v1/artifacts/{id}/download
 POST   /v1/artifacts/{id}/reuse
 DELETE /v1/artifacts/{id}
 ```
+
+## P1 长期使用效率
+
+Console 的“业务工作台”新增以下持久化能力：
+
+- 创建体验：任务模板、模型方案、定时任务和完成通知统一使用一次性结构化表单，集中校验后提交，不再通过连续弹窗逐项询问。
+- 任务模板：保存 Prompt、`${变量}`、附件要求、允许工具和模型方案；项目首次访问会提供 `/review`、`/summarize`、`/research` 三个快捷模板。
+- 模型方案：保存 OpenAI 兼容的 Base URL、模型、后备模型、上下文/输出上限和价格；密钥只保存环境变量名。失败 Run 可在切换方案后重试。
+- 用量预算：按项目和时间窗口统计调用、输入/输出/缓存 Token、平均响应时间、失败率、重试和估算成本；本地模型只统计耗时。支持日/月 Token、成本提醒和项目最大并发。
+- Run 队列：按项目公平领取，支持 `-10..10` 优先级、批量取消、失败/取消任务重新排队，并展示当前步骤、耗时和重试次数。
+- 定时任务：模板通过下拉框选择，按一次性、每日、每周或 Spring 六段 Cron 动态显示所需字段；Cron 按服务端系统时区计算首次及后续执行时间。每次触发仍创建普通 Session/Run，继续经过持久化审批、事件、审计和预算边界。
+- 完成通知：表单可一次选择浏览器、Webhook、邮件网关或企业 IM 网关及多个触发事件；服务端只记录密钥环境变量名，事件覆盖完成、失败、等待审批和预算不足。
+- Session 迁移：导出 Markdown、JSON 或包含 Event/ToolCall/Approval/Artifact 清单的完整审计包；支持隐私脱敏和导入另一套 Lite 实例。
+- Skill 生命周期：显示来源、Ref、Commit、安装时间和作用域；安装前预览文件与权限声明，支持启停、固定版本、检查更新、升级及单级回滚。
+- MCP 管理：Console 内新增、测试、启停和删除远程 Streamable HTTP Server，查看工具 Schema 与健康状态；敏感 Header 必须写成 `env:VARIABLE_NAME`。
+
+主要 API：
+
+```text
+GET/POST/PUT/DELETE /v1/productivity/templates
+GET/POST/PUT/DELETE /v1/productivity/model-profiles
+GET                    /v1/productivity/estimate
+GET/PUT                /v1/productivity/usage | /budget
+GET/PATCH/POST         /v1/productivity/queue/**
+GET/POST/PUT/DELETE    /v1/productivity/schedules
+GET/POST/PUT/DELETE    /v1/productivity/notifications
+GET                    /v1/sessions/{sessionId}/export
+POST                   /v1/sessions/import
+POST                   /v1/skills/imports/inspect
+POST                   /v1/skills/{name}/state | /upgrade | /rollback
+GET/PUT/POST/DELETE    /v1/mcp/configurations | /servers/** | /tools
+```
+
+快捷键：`Ctrl/Cmd + K` 聚焦输入框，`Alt + N` 新建对话；未提交草稿按 Session 保存在浏览器本地。
 
 ## 最小验收
 
@@ -201,7 +254,7 @@ Local 模式故意不允许命令和写文件；批准后的危险工具只有 D
 
 ## 真实模型
 
-统一使用 OpenAI-compatible 流式接口，密钥只存在 Server 进程，不进入 Sandbox。完整变量见 `.env.example`。例如 DeepSeek：
+统一使用 OpenAI 兼容的流式接口，密钥只存在 Server 进程，不进入 Sandbox。完整变量见 `.env.example`。例如 DeepSeek：
 
 ```powershell
 $env:PAICLI_MODEL_PROVIDER="openai-compatible"
@@ -293,7 +346,7 @@ Content-Type: application/json
 - RAG：Console 支持上传 PDF、Office、HTML、Markdown、CSV、JSON、文本等文档。Tika 提取正文后，
   分块器识别 Markdown 标题层级、编号标题、段落、句子、列表、表格行和代码围栏。检索使用 BM25 与
   真实 embedding 双路召回、RRF 融合、标题/短语 boost、重叠去重和单文档配额，并在每轮模型前自动召回。
-  Ollama/OpenAI-compatible 提供真实向量；未配置时明确降级为本地词法投影，不冒充语义 embedding。
+  Ollama/OpenAI 兼容服务提供真实向量；未配置时明确降级为本地词法投影，不冒充语义 embedding。
   图片型/扫描 PDF 在没有文本层时由 PDFBox 按页渲染，再交给当前视觉模型做 OCR 并进入同一分块与索引链路；
   OCR 不可用时聊天附件仍可成功暂存，并仅在当前 Run 以页面图像发送，Console 会明确提示模型必须支持视觉。
 - 历史会话检索：`session_search` 是 Agent 主动调用的内置工具，对当前项目的历史会话消息做 BM25 全文检索，
@@ -308,7 +361,7 @@ Content-Type: application/json
   崩溃恢复不会重复派生。委派限制三层深度、每个父 Run 最多六个子 Run；取消父 Run 会级联取消后代，
   `cancel_agent` 也经过持久化审批。父 Run 用 `get_agent_result` 查询，不同步占住 Worker 等待。
 - 统一附件：聊天输入框“＋”可同时选择最多 4 张 PNG/JPEG/GIF 和 4 个文档。图片经校验后作为
-  OpenAI-compatible `image_url` 发给视觉模型；TXT、Markdown、PDF、Word、PowerPoint、Excel、CSV、
+  OpenAI 兼容格式的 `image_url` 发给视觉模型；TXT、Markdown、PDF、Word、PowerPoint、Excel、CSV、
   HTML、JSON、XML、RTF、EPUB 和 OpenDocument 文件由 Tika 提取并写入当前项目知识库，再以附件 id
   绑定当前 Run，优先进入本轮 RAG。普通“请总结附件”会做跨文档分段采样，具体问题走 BM25/向量召回。
   扫描 PDF 默认最多处理 6 页、150 DPI，可由 `PAICLI_RAG_PDF_OCR_*` 调整；OCR/页面图像只留在 Server，

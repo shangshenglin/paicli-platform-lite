@@ -8,6 +8,7 @@ import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.model.ModelToolDefinition;
 import com.paicli.platform.server.tool.ServerToolProvider;
+import com.paicli.platform.server.io.AtomicFileWriter;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
@@ -105,6 +106,38 @@ public class McpToolProvider implements ServerToolProvider {
                     state == null ? "" : state.error));
         }
         return values;
+    }
+
+    public List<ServerConfig> configuredServers() { return configurations(); }
+
+    public List<ToolStatus> toolStatuses() {
+        refreshIfNeeded();
+        return tools.values().stream().sorted(Comparator.comparing(RemoteTool::namespacedName))
+                .map(value -> new ToolStatus(value.server(), value.remoteName(), value.namespacedName(),
+                        value.description(), value.inputSchema())).toList();
+    }
+
+    public synchronized ServerConfig saveServer(String name,String url,boolean enabled,Map<String,String> headers) {
+        if(name==null||!NAME.matcher(name).matches())throw new IllegalArgumentException("invalid MCP server name");
+        URI uri=URI.create(url);String scheme=uri.getScheme();
+        if(!("http".equalsIgnoreCase(scheme)||"https".equalsIgnoreCase(scheme)))throw new IllegalArgumentException("MCP URL must use http or https");
+        Map<String,String> safeHeaders=new LinkedHashMap<>();
+        if(headers!=null)headers.forEach((key,value)->{
+            if(!key.matches("[A-Za-z0-9-]{1,80}"))throw new IllegalArgumentException("invalid MCP header name");
+            if(value==null||!value.matches("env:[A-Z][A-Z0-9_]{1,119}"))throw new IllegalArgumentException("sensitive MCP headers must reference env:VARIABLE_NAME");
+            safeHeaders.put(key,value);
+        });
+        List<ServerConfig> values=new ArrayList<>(configurations());values.removeIf(value->value.name().equals(name));
+        values.add(new ServerConfig(name,url,enabled,Map.copyOf(safeHeaders)));writeConfigurations(values);invalidate();
+        return values.stream().filter(value->value.name().equals(name)).findFirst().orElseThrow();
+    }
+
+    public synchronized boolean deleteServer(String name){List<ServerConfig> values=new ArrayList<>(configurations());boolean removed=values.removeIf(value->value.name().equals(name));if(removed){writeConfigurations(values);states.remove(name);invalidate();}return removed;}
+    public ServerStatus testServer(String name){invalidate();refreshIfNeeded();return statuses().stream().filter(value->value.name().equals(name)).findFirst().orElseThrow(()->new IllegalArgumentException("MCP server not found"));}
+    private void invalidate(){refreshedAt=Instant.EPOCH;tools=Map.of();}
+    private void writeConfigurations(List<ServerConfig> values){
+        try{AtomicFileWriter.write(configPath,mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(Map.of("servers",values.stream().sorted(Comparator.comparing(ServerConfig::name)).toList())));}
+        catch(Exception e){throw new IllegalStateException("failed to save MCP configuration",e);}
     }
 
     private synchronized void refreshIfNeeded() {
@@ -244,7 +277,7 @@ public class McpToolProvider implements ServerToolProvider {
     private static long elapsed(long start) { return (System.nanoTime() - start) / 1_000_000; }
     private static String message(Exception e) { return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(); }
 
-    private record ServerConfig(String name, String url, boolean enabled, Map<String, String> headers) { }
+    public record ServerConfig(String name, String url, boolean enabled, Map<String, String> headers) { }
     private record RemoteTool(String server, String remoteName, String namespacedName,
                               String description, Map<String, Object> inputSchema) { }
     private static final class ServerState {
@@ -273,4 +306,5 @@ public class McpToolProvider implements ServerToolProvider {
         }
     }
     public record ServerStatus(String name, boolean enabled, boolean ready, String error) { }
+    public record ToolStatus(String server,String remoteName,String name,String description,Map<String,Object> inputSchema) { }
 }
