@@ -19,7 +19,7 @@ body {
   color: var(--text);
   font: 14px/1.55 system-ui, sans-serif;
 }
-button, input, textarea { color: inherit; font: inherit; }
+button, input, textarea, select { color: inherit; font: inherit; }
 .app {
   height: 100%;
   min-height: 0;
@@ -235,6 +235,26 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .managed-item small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .managed-item button { padding: 4px 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.form-dialog { width: min(680px, calc(100% - 28px)); max-height: min(820px, calc(100vh - 32px)); overflow-y: auto; }
+.entity-form { display: grid; gap: 14px; }
+.entity-form .hint { margin: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.form-field { min-width: 0; display: grid; align-content: start; gap: 6px; color: var(--muted); font-size: 12px; }
+.form-field.full { grid-column: 1 / -1; }
+.form-field[hidden] { display: none; }
+.form-field input, .form-field textarea, .form-field select { box-sizing: border-box; width: 100%; min-height: 40px; margin: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: #101319; color: var(--text); }
+.form-field textarea { min-height: 76px; max-height: 220px; resize: vertical; }
+.form-field input:focus, .form-field textarea:focus, .form-field select:focus { border-color: #39765b; box-shadow: 0 0 0 2px #39765b33; }
+.form-field small { line-height: 1.4; }
+.checkbox-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
+.checkbox-row label { display: inline-flex; align-items: center; gap: 7px; color: var(--text); }
+.checkbox-row input, .form-field .checkbox-row input { width: auto; min-height: auto; margin: 0; padding: 0; }
+.schedule-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.schedule-pair label { display: grid; gap: 6px; }
+.event-field { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: 9px; }
+.event-field legend { padding: 0 5px; }
+.form-error { min-height: 18px; color: var(--red); font-size: 12px; }
+.form-error:empty { display: none; }
 .workbench-dialog { width: min(920px, calc(100% - 28px)); }
 .workbench-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .workbench-search input { margin: 0; }
@@ -264,5 +284,7 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .status { display: none; }
   .model-controls { overflow-x: auto; white-space: nowrap; }
   .inline-form { grid-template-columns: 1fr; }
+  .form-grid { grid-template-columns: 1fr; }
+  .form-field.full { grid-column: auto; }
   .upload-row { align-items: stretch; flex-direction: column; }
 }

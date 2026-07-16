@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260705-capabilities">
+  <link rel="stylesheet" href="/app.css?v=20260716-p1-forms">
 </head>
 <body>
 <div class="app">
@@ -168,6 +168,95 @@
     <div class="managed-list" id="policyList"></div>
   </section>
 </dialog>
+<dialog id="templateDialog" class="form-dialog">
+  <form id="templateForm" class="entity-form">
+    <div class="dialog-title"><strong>新建任务模板</strong><button type="button" class="secondary" id="cancelTemplate">取消</button></div>
+    <p class="hint">一次填写 Prompt、变量、附件要求、工具权限和模型方案。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>模板名称 *</span><input id="templateName" maxlength="80" required placeholder="例如：代码审查"></label>
+      <label class="form-field"><span>快捷指令</span><input id="templateShortcut" maxlength="60" placeholder="例如：/review"></label>
+      <label class="form-field full"><span>Prompt *</span><textarea id="templatePrompt" rows="5" required placeholder="可使用 ${repository}、${outputFormat} 等变量"></textarea></label>
+      <label class="form-field full"><span>变量默认值（JSON）</span><textarea id="templateVariables" rows="3" spellcheck="false">{"repository":"当前仓库","outputFormat":"Markdown"}</textarea></label>
+      <label class="form-field"><span>附件要求</span><input id="templateAttachments" placeholder="例如：可选代码或补丁附件"></label>
+      <label class="form-field"><span>允许工具</span><input id="templateTools" placeholder="逗号分隔，例如 read_file,search"></label>
+      <label class="form-field full"><span>模型配置方案</span><select id="templateProfile"><option value="">使用项目默认模型</option></select></label>
+    </div>
+    <div class="form-error" id="templateFormError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveTemplate">创建模板</button></div>
+  </form>
+</dialog>
+<dialog id="profileDialog" class="form-dialog">
+  <form id="profileForm" class="entity-form">
+    <div class="dialog-title"><strong>新建模型配置方案</strong><button type="button" class="secondary" id="cancelProfile">取消</button></div>
+    <p class="hint">保存服务地址、模型、后备模型、上下文限制与成本信息；真实密钥仍只保存在服务端环境变量中。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>方案名称 *</span><input id="profileName" maxlength="80" required placeholder="例如：深度模式"></label>
+      <label class="form-field"><span>模型名称 *</span><input id="profileModel" required placeholder="例如：deepseek-chat"></label>
+      <label class="form-field full"><span>OpenAI 兼容 Base URL *</span><input id="profileBaseUrl" type="url" required value="https://api.deepseek.com"></label>
+      <label class="form-field"><span>API Key 环境变量名</span><input id="profileApiKeyEnv" value="PAICLI_MODEL_API_KEY" placeholder="本地无密钥模型可留空"></label>
+      <label class="form-field"><span>后备模型</span><input id="profileFallback" placeholder="失败后切换的模型，可留空"></label>
+      <label class="form-field"><span>上下文上限</span><input id="profileContext" type="number" min="1" step="1" value="128000" required></label>
+      <label class="form-field"><span>输出上限</span><input id="profileOutput" type="number" min="1" step="1" value="4096" required></label>
+      <label class="form-field"><span>输入价格（USD / 1M Token）</span><input id="profileInputPrice" type="number" min="0" step="0.000001" value="0"></label>
+      <label class="form-field"><span>输出价格（USD / 1M Token）</span><input id="profileOutputPrice" type="number" min="0" step="0.000001" value="0"></label>
+      <div class="form-field full checkbox-row">
+        <label><input id="profileLocal" type="checkbox"> 本地模型（仅统计耗时，不计算价格）</label>
+        <label><input id="profileDefault" type="checkbox"> 设为当前项目默认方案</label>
+      </div>
+    </div>
+    <div class="form-error" id="profileFormError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveProfile">创建方案</button></div>
+  </form>
+</dialog>
+<dialog id="scheduleDialog" class="form-dialog">
+  <form id="scheduleForm" class="entity-form">
+    <div class="dialog-title"><strong>新建定时任务</strong><button type="button" class="secondary" id="cancelSchedule">取消</button></div>
+    <p class="hint">选择已保存模板并设置执行周期，结果会进入普通 Session / Run 链路。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>任务名称 *</span><input id="scheduleName" maxlength="80" required placeholder="例如：每日代码检查"></label>
+      <label class="form-field"><span>任务模板 *</span><select id="scheduleTemplate" required></select></label>
+      <label class="form-field"><span>执行周期 *</span>
+        <select id="scheduleType">
+          <option value="ONCE">一次性</option><option value="DAILY" selected>每日</option><option value="WEEKLY">每周</option><option value="CRON">Cron</option>
+        </select>
+      </label>
+      <label class="form-field" id="scheduleOnceFields"><span>执行时间 *</span><input id="scheduleOnceAt" type="datetime-local"></label>
+      <label class="form-field" id="scheduleDailyFields"><span>每天执行时间 *</span><input id="scheduleDailyTime" type="time" value="09:00"></label>
+      <div class="form-field schedule-pair" id="scheduleWeeklyFields">
+        <label><span>星期 *</span><select id="scheduleWeekday"><option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option><option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option><option value="0">星期日</option></select></label>
+        <label><span>时间 *</span><input id="scheduleWeeklyTime" type="time" value="09:00"></label>
+      </div>
+      <label class="form-field full" id="scheduleCronFields"><span>Spring 六段 Cron *</span><input id="scheduleCron" value="0 0 9 * * *" spellcheck="false"><small>按服务端系统时区计算，例如工作日 9 点：0 0 9 * * MON-FRI</small></label>
+      <label class="form-field full"><span>模板变量（JSON）</span><textarea id="scheduleVariables" rows="3" spellcheck="false">{}</textarea></label>
+      <div class="form-field full checkbox-row"><label><input id="scheduleEnabled" type="checkbox" checked> 创建后立即启用</label></div>
+    </div>
+    <div class="form-error" id="scheduleFormError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveSchedule">创建定时任务</button></div>
+  </form>
+</dialog>
+<dialog id="notificationDialog" class="form-dialog">
+  <form id="notificationForm" class="entity-form">
+    <div class="dialog-title"><strong>新建完成通知</strong><button type="button" class="secondary" id="cancelNotification">取消</button></div>
+    <p class="hint">浏览器通知无需服务端地址；Webhook、邮件和企业 IM 通过对应网关投递。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>通知类型 *</span><select id="notificationType"><option value="BROWSER">浏览器通知</option><option value="WEBHOOK">Webhook</option><option value="EMAIL">邮件网关</option><option value="IM">企业 IM 网关</option></select></label>
+      <label class="form-field"><span>通知名称 *</span><input id="notificationName" maxlength="80" required value="浏览器通知"></label>
+      <label class="form-field full" id="notificationEndpointFields"><span>接收地址 *</span><input id="notificationEndpoint" type="url" placeholder="https://example.com/webhook"></label>
+      <label class="form-field full" id="notificationSecretFields"><span>服务端密钥环境变量名</span><input id="notificationSecretEnv" placeholder="例如：PAICLI_NOTIFICATION_TOKEN"></label>
+      <fieldset class="form-field full event-field"><legend>通知事件 *</legend>
+        <div class="checkbox-row">
+          <label><input type="checkbox" name="notificationEvent" value="COMPLETED" checked> 完成</label>
+          <label><input type="checkbox" name="notificationEvent" value="FAILED" checked> 失败</label>
+          <label><input type="checkbox" name="notificationEvent" value="WAITING_APPROVAL" checked> 等待审批</label>
+          <label><input type="checkbox" name="notificationEvent" value="BUDGET_INSUFFICIENT" checked> 预算不足</label>
+        </div>
+      </fieldset>
+      <div class="form-field full checkbox-row"><label><input id="notificationEnabled" type="checkbox" checked> 创建后立即启用</label></div>
+    </div>
+    <div class="form-error" id="notificationFormError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveNotification">创建通知</button></div>
+  </form>
+</dialog>
 <dialog id="groupDialog">
   <strong>新建对话分组</strong>
   <div class="hint">例如：工作、学习、个人</div>
@@ -177,6 +266,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260716-auth-key-separation"></script>
+<script src="/app.js?v=20260716-p1-forms"></script>
 </body>
 </html>

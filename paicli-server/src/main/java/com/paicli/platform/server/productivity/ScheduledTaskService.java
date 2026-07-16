@@ -9,7 +9,7 @@ import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -60,7 +60,7 @@ public class ScheduledTaskService {
         Instant now=Instant.now();return switch(task.scheduleType()){
             case "DAILY"->now.plus(1,ChronoUnit.DAYS);
             case "WEEKLY"->now.plus(7,ChronoUnit.DAYS);
-            case "CRON"->{ZonedDateTime value=CronExpression.parse(task.scheduleValue()).next(ZonedDateTime.now(ZoneOffset.UTC));yield value==null?null:value.toInstant();}
+            case "CRON"->{ZonedDateTime value=CronExpression.parse(task.scheduleValue()).next(ZonedDateTime.now(ZoneId.systemDefault()));yield value==null?null:value.toInstant();}
             default->null;};
     }
     private Map<String,String> read(String json){try{return new LinkedHashMap<>(mapper.readValue(json,MAP));}catch(Exception e){return new LinkedHashMap<>();}}

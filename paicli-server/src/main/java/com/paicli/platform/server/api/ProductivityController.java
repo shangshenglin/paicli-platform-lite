@@ -8,14 +8,18 @@ import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -174,7 +178,12 @@ public class ProductivityController {
     }
     private ProductivityStore.ModelProfile saveProfile(String id,ApiDtos.ModelProfileRequest r){return productivity.saveModelProfile(id,r.projectKey(),r.name(),r.baseUrl(),r.apiKeyEnv(),r.model(),r.fallbackModel(),r.maxContextTokens()==null?128000:r.maxContextTokens(),r.maxOutputTokens()==null?4096:r.maxOutputTokens(),r.inputPrice()==null?0:r.inputPrice(),r.outputPrice()==null?0:r.outputPrice(),Boolean.TRUE.equals(r.localModel()),Boolean.TRUE.equals(r.makeDefault()));}
     private ProductivityStore.ScheduledTask saveSchedule(String id,ApiDtos.ScheduledTaskRequest r){
-        try{return productivity.saveSchedule(id,r.projectKey(),r.name(),r.templateId(),r.scheduleType(),r.scheduleValue(),mapper.writeValueAsString(r.variables()==null?Map.of():r.variables()),r.enabled()==null||r.enabled(),r.nextRunAt()==null||r.nextRunAt().isBlank()?Instant.now():Instant.parse(r.nextRunAt()));}
+        try{
+            productivity.findTemplate(r.projectKey(),r.templateId()).orElseThrow(()->notFound("template"));
+            String type=r.scheduleType().trim().toUpperCase();
+            Instant next=firstScheduleRun(type,r.scheduleValue(),r.nextRunAt());
+            return productivity.saveSchedule(id,r.projectKey(),r.name(),r.templateId(),type,r.scheduleValue(),mapper.writeValueAsString(r.variables()==null?Map.of():r.variables()),r.enabled()==null||r.enabled(),next);
+        }
         catch(Exception e){throw e instanceof RuntimeException runtime?runtime:new IllegalArgumentException("invalid schedule",e);}
     }
     private ProductivityStore.NotificationChannel saveNotification(String id,ApiDtos.NotificationChannelRequest r){return productivity.saveNotification(id,r.projectKey(),r.name(),r.type(),r.endpoint(),r.secretEnv(),String.join(",",r.events()),r.enabled()==null||r.enabled());}
@@ -185,6 +194,21 @@ public class ProductivityController {
     }catch(Exception ignored){}}
     private Map<String,String> readMap(String json){try{return new LinkedHashMap<>(mapper.readValue(json,STRING_MAP));}catch(Exception e){return new LinkedHashMap<>();}}
     private static String render(String prompt,Map<String,String> vars){Matcher m=VARIABLE.matcher(prompt);StringBuffer out=new StringBuffer();List<String> missing=new ArrayList<>();while(m.find()){String value=vars.get(m.group(1));if(value==null||value.isBlank()){missing.add(m.group(1));value=m.group();}m.appendReplacement(out,Matcher.quoteReplacement(value));}m.appendTail(out);if(!missing.isEmpty())throw new IllegalArgumentException("missing template variables: "+String.join(", ",missing));return out.toString();}
+    private static Instant firstScheduleRun(String type,String value,String requested){
+        if(!Set.of("ONCE","DAILY","WEEKLY","CRON").contains(type))
+            throw new IllegalArgumentException("scheduleType must be ONCE, DAILY, WEEKLY, or CRON");
+        if("CRON".equals(type)){
+            CronExpression cron=CronExpression.parse(value==null?"":value.trim());
+            if(requested!=null&&!requested.isBlank())return Instant.parse(requested);
+            ZonedDateTime next=cron.next(ZonedDateTime.now(ZoneId.systemDefault()));
+            if(next==null)throw new IllegalArgumentException("cron expression has no next execution");
+            return next.toInstant();
+        }
+        if(requested==null||requested.isBlank())throw new IllegalArgumentException("nextRunAt is required for "+type);
+        Instant next=Instant.parse(requested);
+        if(next.isBefore(Instant.now()))throw new IllegalArgumentException("nextRunAt must be in the future");
+        return next;
+    }
     private static long value(Long v){return v==null?0:v;}private static double value(Double v){return v==null?0:v;}
     private static ResponseStatusException notFound(String name){return new ResponseStatusException(HttpStatus.NOT_FOUND,name+" not found");}
 }

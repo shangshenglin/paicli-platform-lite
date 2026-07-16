@@ -865,8 +865,11 @@ async function retryRun(branch) {
 
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
+  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification'].map($);
+  creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
-  await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]);
+  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]); }
+  finally { creationButtons.forEach(button => { button.disabled = false; }); }
 }
 
 async function refreshComposerOptions() {
@@ -994,14 +997,53 @@ function renderTemplates(values) {
   }));
 }
 
-async function addTemplate() {
-  const name = prompt('模板名称'); if (!name) return;
-  const shortcut = prompt('快捷指令，例如 /review', `/${name.toLowerCase().replace(/\s+/g, '-')}`); if (shortcut === null) return;
-  const promptText = prompt('Prompt（变量写成 ${repository}）'); if (!promptText) return;
-  const variablesText = prompt('变量默认值 JSON', '{"repository":"当前仓库","outputFormat":"Markdown"}'); if (variablesText === null) return;
-  const variables = JSON.parse(variablesText || '{}');
-  await api('/v1/productivity/templates', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, shortcut, prompt: promptText, variables, attachmentRequirements: prompt('附件要求（可空）', '') || '', allowedTools: [], modelProfileId: state.modelProfileId || null})});
-  await Promise.all([loadP1Data(), refreshComposerOptions()]);
+function setFormError(id, message = '') { $(id).textContent = message; }
+
+function fillSelect(select, values, emptyLabel = '') {
+  const options = emptyLabel ? [new Option(emptyLabel, '')] : [];
+  options.push(...values.map(value => new Option(value.label, value.id)));
+  select.replaceChildren(...options);
+}
+
+function parseStringMap(text, label) {
+  let value;
+  try { value = JSON.parse(text.trim() || '{}'); }
+  catch { throw new Error(`${label}不是有效的 JSON`); }
+  if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`${label}必须是 JSON 对象`);
+  if (Object.values(value).some(item => typeof item !== 'string')) throw new Error(`${label}的值必须全部是字符串`);
+  return value;
+}
+
+function openTemplateDialog() {
+  $('templateForm').reset();
+  $('templateVariables').value = '{"repository":"当前仓库","outputFormat":"Markdown"}';
+  fillSelect($('templateProfile'), state.modelProfiles.map(value => ({id: value.id, label: `${value.name} · ${value.model}`})), '使用项目默认模型');
+  if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('templateProfile').value = state.modelProfileId;
+  setFormError('templateFormError');
+  $('templateDialog').showModal();
+  $('templateName').focus();
+}
+
+async function submitTemplate(event) {
+  event.preventDefault();
+  setFormError('templateFormError');
+  const button = $('saveTemplate'); button.disabled = true;
+  try {
+    const shortcut = $('templateShortcut').value.trim();
+    if (shortcut && !/^\/[a-zA-Z0-9_-]+$/.test(shortcut)) throw new Error('快捷指令需以 / 开头，且只能包含字母、数字、下划线和连字符');
+    const variables = parseStringMap($('templateVariables').value, '变量默认值');
+    const allowedTools = $('templateTools').value.split(',').map(value => value.trim()).filter(Boolean);
+    await api('/v1/productivity/templates', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('templateName').value.trim(), shortcut,
+      prompt: $('templatePrompt').value.trim(), variables,
+      attachmentRequirements: $('templateAttachments').value.trim(), allowedTools,
+      modelProfileId: $('templateProfile').value || null
+    })});
+    $('templateDialog').close();
+    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    showNotice('任务模板已创建');
+  } catch (error) { setFormError('templateFormError', error.message); }
+  finally { button.disabled = false; }
 }
 
 function renderProfiles(values) {
@@ -1014,15 +1056,42 @@ function renderProfiles(values) {
   if (!values.length) $('profileList').append(element('div', 'hint', '暂无项目级模型方案；继续使用服务端默认模型'));
 }
 
-async function addProfile() {
-  const name = prompt('方案名称，例如 快速 / 深度 / 本地模型'); if (!name) return;
-  const baseUrl = prompt('OpenAI-compatible Base URL', 'https://api.openai.com/v1'); if (!baseUrl) return;
-  const model = prompt('模型名称'); if (!model) return;
-  const apiKeyEnv = prompt('API Key 环境变量名（本地无密钥可空）', 'PAICLI_MODEL_API_KEY'); if (apiKeyEnv === null) return;
-  const fallbackModel = prompt('Fallback 模型（可空）', '') || '';
-  const localModel = confirm('这是本地模型吗？本地模型只统计耗时，不计算价格。');
-  await api('/v1/productivity/model-profiles', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, baseUrl, apiKeyEnv, model, fallbackModel, maxContextTokens: +(prompt('上下文上限', '128000') || 128000), maxOutputTokens: +(prompt('输出上限', '4096') || 4096), inputPrice: localModel ? 0 : +(prompt('输入价格 USD / 1M Token', '0') || 0), outputPrice: localModel ? 0 : +(prompt('输出价格 USD / 1M Token', '0') || 0), localModel, makeDefault: confirm('设为项目默认模型方案？')})});
-  await Promise.all([loadP1Data(), refreshComposerOptions()]);
+function openProfileDialog() {
+  $('profileForm').reset();
+  setFormError('profileFormError');
+  updateProfilePriceFields();
+  $('profileDialog').showModal();
+  $('profileName').focus();
+}
+
+function updateProfilePriceFields() {
+  const local = $('profileLocal').checked;
+  for (const id of ['profileInputPrice', 'profileOutputPrice']) {
+    $(id).disabled = local;
+    if (local) $(id).value = '0';
+  }
+}
+
+async function submitProfile(event) {
+  event.preventDefault();
+  setFormError('profileFormError');
+  const button = $('saveProfile'); button.disabled = true;
+  try {
+    const localModel = $('profileLocal').checked;
+    await api('/v1/productivity/model-profiles', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('profileName').value.trim(),
+      baseUrl: $('profileBaseUrl').value.trim(), apiKeyEnv: $('profileApiKeyEnv').value.trim(),
+      model: $('profileModel').value.trim(), fallbackModel: $('profileFallback').value.trim(),
+      maxContextTokens: Number($('profileContext').value), maxOutputTokens: Number($('profileOutput').value),
+      inputPrice: localModel ? 0 : Number($('profileInputPrice').value || 0),
+      outputPrice: localModel ? 0 : Number($('profileOutputPrice').value || 0),
+      localModel, makeDefault: $('profileDefault').checked
+    })});
+    $('profileDialog').close();
+    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    showNotice('模型配置方案已创建');
+  } catch (error) { setFormError('profileFormError', error.message); }
+  finally { button.disabled = false; }
 }
 
 function renderQueue(values) {
@@ -1044,25 +1113,130 @@ function renderSchedules(values, templates) {
     actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } }); return item;
   }));
 }
-async function addSchedule() {
-  if (!state.templates.length) return showNotice('请先创建任务模板', true);
-  const name = prompt('定时任务名称'); if (!name) return;
-  const templateId = prompt(`模板 ID：\n${state.templates.map(v => `${v.id} · ${v.name}`).join('\n')}`, state.templates[0].id); if (!templateId) return;
-  const scheduleType = (prompt('类型：ONCE / DAILY / WEEKLY / CRON', 'DAILY') || '').toUpperCase(); if (!scheduleType) return;
-  const scheduleValue = scheduleType === 'CRON' ? prompt('Spring Cron（6 段，例如 0 0 9 * * MON-FRI）', '0 0 9 * * *') : '';
-  await api('/v1/productivity/schedules', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, templateId, scheduleType, scheduleValue, variables: {}, enabled: true, nextRunAt: new Date(Date.now() + 60000).toISOString()})}); await loadP1Data();
+function localDateTimeValue(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function nextDaily(time) {
+  const [hours, minutes] = time.split(':').map(Number); const value = new Date();
+  value.setSeconds(0, 0); value.setHours(hours, minutes, 0, 0);
+  if (value <= new Date()) value.setDate(value.getDate() + 1);
+  return value;
+}
+
+function nextWeekly(weekday, time) {
+  const value = nextDaily(time); const target = Number(weekday);
+  let days = (target - value.getDay() + 7) % 7;
+  value.setDate(value.getDate() + days);
+  return value;
+}
+
+function selectedTemplateVariables() {
+  const template = state.templates.find(value => value.id === $('scheduleTemplate').value);
+  return template?.variablesJson || '{}';
+}
+
+function updateScheduleFields() {
+  const type = $('scheduleType').value;
+  $('scheduleOnceFields').hidden = type !== 'ONCE';
+  $('scheduleDailyFields').hidden = type !== 'DAILY';
+  $('scheduleWeeklyFields').hidden = type !== 'WEEKLY';
+  $('scheduleCronFields').hidden = type !== 'CRON';
+}
+
+function openScheduleDialog() {
+  if (!state.templates.length) return showNotice('请先创建任务模板，再新建定时任务', true);
+  $('scheduleForm').reset();
+  fillSelect($('scheduleTemplate'), state.templates.map(value => ({id: value.id, label: `${value.shortcut || '模板'} · ${value.name}`})));
+  $('scheduleOnceAt').value = localDateTimeValue(new Date(Date.now() + 3600000));
+  $('scheduleVariables').value = selectedTemplateVariables();
+  setFormError('scheduleFormError');
+  updateScheduleFields();
+  $('scheduleDialog').showModal();
+  $('scheduleName').focus();
+}
+
+async function submitSchedule(event) {
+  event.preventDefault();
+  setFormError('scheduleFormError');
+  const button = $('saveSchedule'); button.disabled = true;
+  try {
+    const type = $('scheduleType').value;
+    let nextRunAt = null; let scheduleValue = '';
+    if (type === 'ONCE') {
+      const date = new Date($('scheduleOnceAt').value);
+      if (Number.isNaN(date.getTime()) || date <= new Date()) throw new Error('一次性任务的执行时间必须晚于当前时间');
+      nextRunAt = date.toISOString();
+    } else if (type === 'DAILY') {
+      if (!$('scheduleDailyTime').value) throw new Error('请选择每天执行时间');
+      scheduleValue = $('scheduleDailyTime').value; nextRunAt = nextDaily(scheduleValue).toISOString();
+    } else if (type === 'WEEKLY') {
+      const time = $('scheduleWeeklyTime').value; if (!time) throw new Error('请选择每周执行时间');
+      const weekday = $('scheduleWeekday').value;
+      scheduleValue = `${['SUN','MON','TUE','WED','THU','FRI','SAT'][Number(weekday)]} ${time}`;
+      nextRunAt = nextWeekly(weekday, time).toISOString();
+    } else {
+      scheduleValue = $('scheduleCron').value.trim();
+      if (!scheduleValue) throw new Error('请输入 Spring 六段 Cron 表达式');
+    }
+    const variables = parseStringMap($('scheduleVariables').value, '模板变量');
+    await api('/v1/productivity/schedules', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('scheduleName').value.trim(),
+      templateId: $('scheduleTemplate').value, scheduleType: type, scheduleValue,
+      variables, enabled: $('scheduleEnabled').checked, nextRunAt
+    })});
+    $('scheduleDialog').close();
+    await loadP1Data();
+    showNotice('定时任务已创建');
+  } catch (error) { setFormError('scheduleFormError', error.message); }
+  finally { button.disabled = false; }
 }
 
 function renderNotifications(values) {
   $('notificationList').replaceChildren(...values.map(value => { const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.type} · ${value.events} · 密钥环境变量 ${value.secretEnv || '无'}`); actionButton(item, '删除', async () => { await api(`/v1/productivity/notifications/${value.id}`, {method: 'DELETE'}); await loadP1Data(); }); return item; }));
 }
-async function addNotification() {
-  const type = (prompt('通知类型：BROWSER / WEBHOOK / EMAIL / IM', 'BROWSER') || '').toUpperCase(); if (!type) return;
-  if (type === 'BROWSER') { if ('Notification' in window) await Notification.requestPermission(); }
-  const name = prompt('通知名称', type === 'BROWSER' ? '浏览器通知' : `${type} 通知`); if (!name) return;
-  const endpoint = type === 'BROWSER' ? '' : prompt('Webhook 接收地址（邮件/企业 IM 使用对应网关）', ''); if (endpoint === null) return;
-  const secretEnv = type === 'BROWSER' ? '' : prompt('服务端密钥环境变量名（可空）', '') || '';
-  await api('/v1/productivity/notifications', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, type, endpoint, secretEnv, events: ['COMPLETED','FAILED','WAITING_APPROVAL','BUDGET_INSUFFICIENT'], enabled: true})}); await loadP1Data();
+const notificationNames = {BROWSER: '浏览器通知', WEBHOOK: 'Webhook 通知', EMAIL: '邮件通知', IM: '企业 IM 通知'};
+
+function updateNotificationFields(resetName = false) {
+  const browser = $('notificationType').value === 'BROWSER';
+  $('notificationEndpointFields').hidden = browser;
+  $('notificationSecretFields').hidden = browser;
+  $('notificationEndpoint').required = !browser;
+  if (resetName) $('notificationName').value = notificationNames[$('notificationType').value];
+}
+
+function openNotificationDialog() {
+  $('notificationForm').reset();
+  setFormError('notificationFormError');
+  updateNotificationFields(true);
+  $('notificationDialog').showModal();
+  $('notificationName').focus();
+  $('notificationName').select();
+}
+
+async function submitNotification(event) {
+  event.preventDefault();
+  setFormError('notificationFormError');
+  const button = $('saveNotification'); button.disabled = true;
+  try {
+    const type = $('notificationType').value;
+    const events = [...document.querySelectorAll('[name="notificationEvent"]:checked')].map(value => value.value);
+    if (!events.length) throw new Error('请至少选择一个通知事件');
+    if (type === 'BROWSER' && 'Notification' in window) {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('浏览器通知权限未授予');
+    }
+    await api('/v1/productivity/notifications', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('notificationName').value.trim(), type,
+      endpoint: type === 'BROWSER' ? '' : $('notificationEndpoint').value.trim(),
+      secretEnv: type === 'BROWSER' ? '' : $('notificationSecretEnv').value.trim(),
+      events, enabled: $('notificationEnabled').checked
+    })});
+    $('notificationDialog').close();
+    await loadP1Data();
+    showNotice('完成通知已创建');
+  } catch (error) { setFormError('notificationFormError', error.message); }
+  finally { button.disabled = false; }
 }
 
 async function exportSession(format) {
@@ -1335,10 +1509,28 @@ $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
 $('refreshP1').onclick = loadP1Data;
 $('refreshQueue').onclick = loadP1Data;
-$('addTemplate').onclick = () => addTemplate().catch(error => showNotice(error.message, true));
-$('addProfile').onclick = () => addProfile().catch(error => showNotice(error.message, true));
-$('addSchedule').onclick = () => addSchedule().catch(error => showNotice(error.message, true));
-$('addNotification').onclick = () => addNotification().catch(error => showNotice(error.message, true));
+$('addTemplate').onclick = openTemplateDialog;
+$('addProfile').onclick = openProfileDialog;
+$('addSchedule').onclick = openScheduleDialog;
+$('addNotification').onclick = openNotificationDialog;
+$('cancelTemplate').onclick = () => $('templateDialog').close();
+$('cancelProfile').onclick = () => $('profileDialog').close();
+$('cancelSchedule').onclick = () => $('scheduleDialog').close();
+$('cancelNotification').onclick = () => $('notificationDialog').close();
+$('templateForm').onsubmit = submitTemplate;
+$('profileForm').onsubmit = submitProfile;
+$('scheduleForm').onsubmit = submitSchedule;
+$('notificationForm').onsubmit = submitNotification;
+$('profileLocal').onchange = updateProfilePriceFields;
+$('scheduleType').onchange = updateScheduleFields;
+$('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };
+$('notificationType').onchange = () => updateNotificationFields(true);
+$('templateName').oninput = () => {
+  if (!$('templateShortcut').value) {
+    const slug = $('templateName').value.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');
+    $('templateShortcut').value = slug ? `/${slug}` : '';
+  }
+};
 $('quickTemplate').onchange = () => applyTemplate($('quickTemplate').value);
 $('modelProfile').onchange = () => {
   state.modelProfileId = $('modelProfile').value;

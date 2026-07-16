@@ -40,7 +40,7 @@ npm run dev
 - `write_file` / `execute_command` 持久化审批。
 - JSONL 工具与审批审计。
 - 服务启动时清理带 PaiCLI label 的孤儿容器。
-- OpenAI-compatible 流式模型适配，可配置 OpenAI、GLM、DeepSeek 等兼容端点。
+- OpenAI 兼容的流式模型适配，可配置 OpenAI、GLM、DeepSeek 等兼容端点。
 - 分层 Prompt、主模型结构化摘要（失败时确定性降级）、Token 预算和持久化模型 usage。
 - 大工具结果外置到本地 Artifact Store，并提供 `read_artifact` 分段读取。
 - L0 对话到 L1/L2/L3 的持久化自动 Memory 提取、时序修订、混合召回，并保留显式 CRUD 纠错。
@@ -81,7 +81,7 @@ java -jar paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar
 Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。接口返回 401 时会自动打开连接设置，密钥验证成功后才刷新工作台。启用 API Key 后，
 `/actuator/**` 与 `/v3/api-docs` 默认使用同一密钥保护。
 
-注意区分两把密钥：Console“连接设置”填写 `PAICLI_API_KEY`，它只用于访问本机 PaiCLI API；`PAICLI_MODEL_API_KEY` 是 DeepSeek/OpenAI-compatible 模型密钥，只保存在 Server 环境中，不能填写到浏览器。
+注意区分两把密钥：Console“连接设置”填写 `PAICLI_API_KEY`，它只用于访问本机 PaiCLI API；`PAICLI_MODEL_API_KEY` 是 DeepSeek/OpenAI 兼容模型的密钥，只保存在 Server 环境中，不能填写到浏览器。
 
 ## P0 业务工作台
 
@@ -118,12 +118,13 @@ DELETE /v1/artifacts/{id}
 
 Console 的“业务工作台”新增以下持久化能力：
 
+- 创建体验：任务模板、模型方案、定时任务和完成通知统一使用一次性结构化表单，集中校验后提交，不再通过连续弹窗逐项询问。
 - 任务模板：保存 Prompt、`${变量}`、附件要求、允许工具和模型方案；项目首次访问会提供 `/review`、`/summarize`、`/research` 三个快捷模板。
-- 模型方案：保存 OpenAI-compatible Base URL、模型、Fallback、上下文/输出上限和价格；密钥只保存环境变量名。失败 Run 可在切换方案后重试。
+- 模型方案：保存 OpenAI 兼容的 Base URL、模型、后备模型、上下文/输出上限和价格；密钥只保存环境变量名。失败 Run 可在切换方案后重试。
 - 用量预算：按项目和时间窗口统计调用、输入/输出/缓存 Token、平均响应时间、失败率、重试和估算成本；本地模型只统计耗时。支持日/月 Token、成本提醒和项目最大并发。
 - Run 队列：按项目公平领取，支持 `-10..10` 优先级、批量取消、失败/取消任务重新排队，并展示当前步骤、耗时和重试次数。
-- 定时任务：一次性、每日、每周及 Spring 六段 Cron；每次触发仍创建普通 Session/Run，继续经过持久化审批、事件、审计和预算边界。
-- 完成通知：浏览器通知以及通用 Webhook/邮件网关/企业 IM 网关；服务端只记录密钥环境变量名，事件覆盖完成、失败、等待审批和预算不足。
+- 定时任务：模板通过下拉框选择，按一次性、每日、每周或 Spring 六段 Cron 动态显示所需字段；Cron 按服务端系统时区计算首次及后续执行时间。每次触发仍创建普通 Session/Run，继续经过持久化审批、事件、审计和预算边界。
+- 完成通知：表单可一次选择浏览器、Webhook、邮件网关或企业 IM 网关及多个触发事件；服务端只记录密钥环境变量名，事件覆盖完成、失败、等待审批和预算不足。
 - Session 迁移：导出 Markdown、JSON 或包含 Event/ToolCall/Approval/Artifact 清单的完整审计包；支持隐私脱敏和导入另一套 Lite 实例。
 - Skill 生命周期：显示来源、Ref、Commit、安装时间和作用域；安装前预览文件与权限声明，支持启停、固定版本、检查更新、升级及单级回滚。
 - MCP 管理：Console 内新增、测试、启停和删除远程 Streamable HTTP Server，查看工具 Schema 与健康状态；敏感 Header 必须写成 `env:VARIABLE_NAME`。
@@ -253,7 +254,7 @@ Local 模式故意不允许命令和写文件；批准后的危险工具只有 D
 
 ## 真实模型
 
-统一使用 OpenAI-compatible 流式接口，密钥只存在 Server 进程，不进入 Sandbox。完整变量见 `.env.example`。例如 DeepSeek：
+统一使用 OpenAI 兼容的流式接口，密钥只存在 Server 进程，不进入 Sandbox。完整变量见 `.env.example`。例如 DeepSeek：
 
 ```powershell
 $env:PAICLI_MODEL_PROVIDER="openai-compatible"
@@ -345,7 +346,7 @@ Content-Type: application/json
 - RAG：Console 支持上传 PDF、Office、HTML、Markdown、CSV、JSON、文本等文档。Tika 提取正文后，
   分块器识别 Markdown 标题层级、编号标题、段落、句子、列表、表格行和代码围栏。检索使用 BM25 与
   真实 embedding 双路召回、RRF 融合、标题/短语 boost、重叠去重和单文档配额，并在每轮模型前自动召回。
-  Ollama/OpenAI-compatible 提供真实向量；未配置时明确降级为本地词法投影，不冒充语义 embedding。
+  Ollama/OpenAI 兼容服务提供真实向量；未配置时明确降级为本地词法投影，不冒充语义 embedding。
   图片型/扫描 PDF 在没有文本层时由 PDFBox 按页渲染，再交给当前视觉模型做 OCR 并进入同一分块与索引链路；
   OCR 不可用时聊天附件仍可成功暂存，并仅在当前 Run 以页面图像发送，Console 会明确提示模型必须支持视觉。
 - 历史会话检索：`session_search` 是 Agent 主动调用的内置工具，对当前项目的历史会话消息做 BM25 全文检索，
@@ -360,7 +361,7 @@ Content-Type: application/json
   崩溃恢复不会重复派生。委派限制三层深度、每个父 Run 最多六个子 Run；取消父 Run 会级联取消后代，
   `cancel_agent` 也经过持久化审批。父 Run 用 `get_agent_result` 查询，不同步占住 Worker 等待。
 - 统一附件：聊天输入框“＋”可同时选择最多 4 张 PNG/JPEG/GIF 和 4 个文档。图片经校验后作为
-  OpenAI-compatible `image_url` 发给视觉模型；TXT、Markdown、PDF、Word、PowerPoint、Excel、CSV、
+  OpenAI 兼容格式的 `image_url` 发给视觉模型；TXT、Markdown、PDF、Word、PowerPoint、Excel、CSV、
   HTML、JSON、XML、RTF、EPUB 和 OpenDocument 文件由 Tika 提取并写入当前项目知识库，再以附件 id
   绑定当前 Run，优先进入本轮 RAG。普通“请总结附件”会做跨文档分段采样，具体问题走 BM25/向量召回。
   扫描 PDF 默认最多处理 6 页、150 DPI，可由 `PAICLI_RAG_PDF_OCR_*` 调整；OCR/页面图像只留在 Server，

@@ -56,7 +56,15 @@ class WebSecurityIntegrationTest {
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "PAICLI_MODEL_API_KEY")));
+                        "PAICLI_MODEL_API_KEY")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"templateForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"profileForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"scheduleForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"notificationForm\"")));
         mvc.perform(get("/app.js"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -87,5 +95,18 @@ class WebSecurityIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.template.id").value(id))
                 .andExpect(jsonPath("$.prompt").isNotEmpty());
+
+        String scheduleName = "工作日检查-" + System.nanoTime();
+        mvc.perform(post("/v1/productivity/schedules")
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"projectKey":"template-regression","name":"%s",
+                                 "templateId":"%s","scheduleType":"CRON",
+                                 "scheduleValue":"0 0 9 * * MON-FRI","variables":{},"enabled":true}
+                                """.formatted(scheduleName, id)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.templateId").value(id))
+                .andExpect(jsonPath("$.nextRunAt").isNotEmpty());
     }
 }
