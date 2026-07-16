@@ -1290,8 +1290,8 @@ async function loadManagedMemories() {
       actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
       actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
       actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
-      actionButton(item, '合并到…', () => mergeMemory(memory, values));
-      actionButton(item, '修订', () => showMemoryRevisions(memory));
+      if (values.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, values));
+      actionButton(item, '修订', () => openMemoryRevision(memory));
       return item;
     }));
     if (!values.length) $('memoryList').append(element('div', 'hint', '暂无启用的 Memory'));
@@ -1305,30 +1305,121 @@ async function setMemoryState(id, value) {
   } catch (error) { showNotice(`Memory 更新失败：${error.message}`, true); }
 }
 
-async function mergeMemory(source, values) {
-  const key = prompt('输入要合并到的目标 Memory Key：');
-  if (!key) return;
-  const target = values.find(value => value.memoryKey === key.trim());
-  if (!target || target.id === source.id) return showNotice('未找到其他同名目标 Memory', true);
-  try {
-    await api(`/v1/memories/${target.id}/merge`, {
-      method: 'POST', body: JSON.stringify({sourceIds: [source.id]})
-    });
-    showNotice(`已将 ${source.memoryKey} 合并到 ${target.memoryKey}`);
-    await loadManagedMemories();
-  } catch (error) { showNotice(`Memory 合并失败：${error.message}`, true); }
+let memoryMergeOptions = [];
+let memoryRevisionCurrent = null;
+
+function memorySummary(container, title, memory) {
+  container.replaceChildren(
+    element('strong', '', title),
+    document.createTextNode(`${memory.memoryKey}\n${memory.content}${memory.tags ? `\n标签：${memory.tags}` : ''}`)
+  );
 }
 
-async function showMemoryRevisions(memory) {
+function updateMemoryMergePreview() {
+  const target = memoryMergeOptions.find(value => value.id === $('memoryMergeTarget').value);
+  if (target) memorySummary($('memoryMergePreview'), '目标 Memory', target);
+  else $('memoryMergePreview').replaceChildren();
+}
+
+function openMemoryMerge(source, values) {
+  memoryMergeOptions = values.filter(value => value.id !== source.id);
+  if (!memoryMergeOptions.length) return showNotice('没有可合并的目标 Memory', true);
+  $('memoryMergeForm').dataset.sourceId = source.id;
+  memorySummary($('memoryMergeSource'), '源 Memory（合并后删除）', source);
+  fillSelect($('memoryMergeTarget'), memoryMergeOptions.map(value => ({
+    id: value.id, label: `${value.memoryKey} · ${value.content.slice(0, 60)}`
+  })));
+  setFormError('memoryMergeError');
+  updateMemoryMergePreview();
+  $('memoryMergeDialog').showModal();
+  $('memoryMergeTarget').focus();
+}
+
+async function submitMemoryMerge(event) {
+  event.preventDefault();
+  setFormError('memoryMergeError');
+  const sourceId = $('memoryMergeForm').dataset.sourceId;
+  const target = memoryMergeOptions.find(value => value.id === $('memoryMergeTarget').value);
+  if (!target || !sourceId) return setFormError('memoryMergeError', '请选择有效的目标 Memory');
+  const button = $('saveMemoryMerge'); button.disabled = true;
   try {
-    const revisions = await api(`/v1/memories/${memory.id}/revisions`);
-    if (!revisions.length) return showNotice('该 Memory 暂无历史修订');
-    const revision = revisions[0];
-    if (confirm(`恢复最近一次修订（${new Date(revision.replacedAt).toLocaleString()}）？\n\n${revision.content}`)) {
-      await api(`/v1/memories/${memory.id}/revisions/${revision.id}/restore`, {method: 'POST'});
-      await loadManagedMemories();
-    }
-  } catch (error) { showNotice(`修订加载失败：${error.message}`, true); }
+    await api(`/v1/memories/${target.id}/merge`, {
+      method: 'POST', body: JSON.stringify({sourceIds: [sourceId]})
+    });
+    $('memoryMergeDialog').close();
+    await loadManagedMemories();
+    showNotice(`Memory 已合并到 ${target.memoryKey}`);
+  } catch (error) { setFormError('memoryMergeError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function openMemoryRevision(memory) {
+  memoryRevisionCurrent = memory;
+  $('memoryRevisionForm').dataset.memoryId = memory.id;
+  $('memoryRevisionKey').value = memory.memoryKey;
+  $('memoryRevisionContent').value = memory.content;
+  $('memoryRevisionTags').value = memory.tags || '';
+  setFormError('memoryRevisionError');
+  $('memoryRevisionStatus').textContent = '';
+  $('memoryRevisionList').replaceChildren(element('div', 'hint', '正在加载历史版本…'));
+  $('memoryRevisionDialog').showModal();
+  loadMemoryRevisionHistory();
+}
+
+async function loadMemoryRevisionHistory() {
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  if (!memoryId) return;
+  $('refreshMemoryRevisions').disabled = true;
+  try {
+    const revisions = await api(`/v1/memories/${memoryId}/revisions`);
+    $('memoryRevisionList').replaceChildren(...revisions.map(revision => {
+      const item = workbenchItem(
+        new Date(revision.replacedAt).toLocaleString(),
+        `${revision.layer}/${revision.memoryType} · 置信度 ${Math.round(revision.confidence * 100)}% · ${revision.content}${revision.tags ? ` · 标签：${revision.tags}` : ''}`
+      );
+      actionButton(item, '恢复此版本', () => restoreMemoryRevision(revision, item), true);
+      return item;
+    }));
+    if (!revisions.length) $('memoryRevisionList').append(element('div', 'hint', '暂无历史版本；保存一次修订后会在这里生成记录。'));
+  } catch (error) {
+    $('memoryRevisionList').replaceChildren(element('div', 'form-error', `历史版本加载失败：${error.message}`));
+  } finally { $('refreshMemoryRevisions').disabled = false; }
+}
+
+async function restoreMemoryRevision(revision, item) {
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  const button = item.querySelector('button'); button.disabled = true;
+  setFormError('memoryRevisionError');
+  try {
+    const restored = await api(`/v1/memories/${memoryId}/revisions/${revision.id}/restore`, {method: 'POST'});
+    memoryRevisionCurrent = restored;
+    $('memoryRevisionKey').value = restored.memoryKey;
+    $('memoryRevisionContent').value = restored.content;
+    $('memoryRevisionTags').value = restored.tags || '';
+    await Promise.all([loadManagedMemories(), loadMemoryRevisionHistory()]);
+    $('memoryRevisionStatus').textContent = `已恢复 ${new Date(revision.replacedAt).toLocaleString()} 的版本；恢复前内容已保留为历史版本。`;
+  } catch (error) { setFormError('memoryRevisionError', error.message); }
+  finally { button.disabled = false; }
+}
+
+async function submitMemoryRevision(event) {
+  event.preventDefault();
+  const memoryId = $('memoryRevisionForm').dataset.memoryId;
+  if (!memoryId) return;
+  setFormError('memoryRevisionError');
+  $('memoryRevisionStatus').textContent = '';
+  const button = $('saveMemoryRevision'); button.disabled = true;
+  try {
+    const updated = await api(`/v1/memories/${memoryId}`, {method: 'PUT', body: JSON.stringify({
+      memoryKey: $('memoryRevisionKey').value.trim(),
+      content: $('memoryRevisionContent').value.trim(),
+      tags: $('memoryRevisionTags').value.trim()
+    })});
+    memoryRevisionCurrent = {...memoryRevisionCurrent, ...updated};
+    await Promise.all([loadManagedMemories(), loadMemoryRevisionHistory()]);
+    $('memoryRevisionStatus').textContent = '修订已保存，修改前内容已加入历史版本。';
+  } catch (error) { setFormError('memoryRevisionError', error.message); }
+  finally { button.disabled = false; }
 }
 
 async function loadArtifacts() {
@@ -1525,6 +1616,12 @@ $('profileLocal').onchange = updateProfilePriceFields;
 $('scheduleType').onchange = updateScheduleFields;
 $('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };
 $('notificationType').onchange = () => updateNotificationFields(true);
+$('cancelMemoryMerge').onclick = () => $('memoryMergeDialog').close();
+$('cancelMemoryRevision').onclick = () => $('memoryRevisionDialog').close();
+$('memoryMergeForm').onsubmit = submitMemoryMerge;
+$('memoryRevisionForm').onsubmit = submitMemoryRevision;
+$('memoryMergeTarget').onchange = updateMemoryMergePreview;
+$('refreshMemoryRevisions').onclick = loadMemoryRevisionHistory;
 $('templateName').oninput = () => {
   if (!$('templateShortcut').value) {
     const slug = $('templateName').value.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');

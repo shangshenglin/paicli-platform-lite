@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260716-p1-forms">
+  <link rel="stylesheet" href="/app.css?v=20260716-memory-forms">
 </head>
 <body>
 <div class="app">
@@ -257,6 +257,37 @@
     <div class="dialog-actions"><button type="submit" class="primary" id="saveNotification">创建通知</button></div>
   </form>
 </dialog>
+<dialog id="memoryMergeDialog" class="form-dialog">
+  <form id="memoryMergeForm" class="entity-form">
+    <div class="dialog-title"><strong>合并 Memory</strong><button type="button" class="secondary" id="cancelMemoryMerge">取消</button></div>
+    <p class="hint">源 Memory 的内容和标签会追加到目标 Memory，合并成功后源 Memory 将被删除；目标原内容会进入修订历史。</p>
+    <div class="revision-current" id="memoryMergeSource"></div>
+    <div class="form-grid">
+      <label class="form-field full"><span>合并到 *</span><select id="memoryMergeTarget" required></select></label>
+    </div>
+    <div class="revision-current" id="memoryMergePreview"></div>
+    <div class="form-error" id="memoryMergeError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveMemoryMerge">确认合并</button></div>
+  </form>
+</dialog>
+<dialog id="memoryRevisionDialog" class="form-dialog memory-revision-dialog">
+  <form id="memoryRevisionForm" class="entity-form">
+    <div class="dialog-title"><strong>修订 Memory</strong><button type="button" class="secondary" id="cancelMemoryRevision">关闭</button></div>
+    <p class="hint">保存修改前会自动保留当前版本，下面可查看并恢复任意历史版本。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>Memory Key *</span><input id="memoryRevisionKey" maxlength="120" required></label>
+      <label class="form-field"><span>标签</span><input id="memoryRevisionTags" placeholder="逗号分隔"></label>
+      <label class="form-field full"><span>内容 *</span><textarea id="memoryRevisionContent" rows="6" maxlength="32000" required></textarea></label>
+    </div>
+    <div class="form-error" id="memoryRevisionError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveMemoryRevision">保存修订</button></div>
+    <section class="revision-section">
+      <div class="section-title"><h3>历史版本</h3><button type="button" class="secondary" id="refreshMemoryRevisions">刷新</button></div>
+      <div class="form-status" id="memoryRevisionStatus" role="status"></div>
+      <div class="managed-list" id="memoryRevisionList"></div>
+    </section>
+  </form>
+</dialog>
 <dialog id="groupDialog">
   <strong>新建对话分组</strong>
   <div class="hint">例如：工作、学习、个人</div>
@@ -266,6 +297,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260716-p1-forms"></script>
+<script src="/app.js?v=20260716-memory-forms"></script>
 </body>
 </html>

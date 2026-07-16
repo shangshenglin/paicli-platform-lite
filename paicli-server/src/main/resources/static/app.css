@@ -255,6 +255,13 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .event-field legend { padding: 0 5px; }
 .form-error { min-height: 18px; color: var(--red); font-size: 12px; }
 .form-error:empty { display: none; }
+.form-status { min-height: 18px; color: var(--green); font-size: 12px; }
+.form-status:empty { display: none; }
+.revision-current { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+.revision-current strong { display: block; margin-bottom: 3px; color: var(--text); }
+.revision-section { padding-top: 14px; border-top: 1px solid var(--line); }
+.revision-section h3 { margin: 0; font-size: 14px; }
+.memory-revision-dialog { width: min(760px, calc(100% - 28px)); }
 .workbench-dialog { width: min(920px, calc(100% - 28px)); }
 .workbench-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .workbench-search input { margin: 0; }
