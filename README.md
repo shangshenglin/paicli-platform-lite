@@ -81,6 +81,8 @@ java -jar paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar
 Console 只在当前标签页的 `sessionStorage` 中保存 API Key；关闭标签页后需重新填写。接口返回 401 时会自动打开连接设置，密钥验证成功后才刷新工作台。启用 API Key 后，
 `/actuator/**` 与 `/v3/api-docs` 默认使用同一密钥保护。
 
+注意区分两把密钥：Console“连接设置”填写 `PAICLI_API_KEY`，它只用于访问本机 PaiCLI API；`PAICLI_MODEL_API_KEY` 是 DeepSeek/OpenAI-compatible 模型密钥，只保存在 Server 环境中，不能填写到浏览器。
+
 ## P0 业务工作台
 
 Console 左侧“业务工作台”统一提供项目级搜索、Memory 管理、Artifact 管理和审批策略撤销。终态 Run 顶部提供“重试”和“分支”：重试沿用原 Session，分支会复制源 Run 之前的对话到新 Session，再沿用原输入与推理设置执行。

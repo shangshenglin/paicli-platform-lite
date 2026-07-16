@@ -75,8 +75,8 @@
 </div>
 <dialog id="dialog">
   <strong>连接设置</strong>
-  <div class="hint" id="connectionHint">服务端 API Key（未启用认证时留空）</div>
-  <input id="key" type="password" autocomplete="off">
+  <div class="hint" id="connectionHint">请输入 PaiCLI 访问密钥 PAICLI_API_KEY，不是 DeepSeek 模型密钥 PAICLI_MODEL_API_KEY。</div>
+  <input id="key" type="password" autocomplete="off" placeholder="PAICLI_API_KEY">
   <div class="dialog-actions">
     <button class="secondary" id="close">取消</button>
     <button class="primary" id="save">验证并连接</button>
@@ -177,6 +177,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260716-auth-guide"></script>
+<script src="/app.js?v=20260716-auth-key-separation"></script>
 </body>
 </html>

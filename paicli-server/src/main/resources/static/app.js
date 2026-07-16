@@ -55,7 +55,7 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-function openConnectionSettings(message = '服务端 API Key（未启用认证时留空）') {
+function openConnectionSettings(message = '请输入 PAICLI_API_KEY；不要填写 DeepSeek 的 PAICLI_MODEL_API_KEY。') {
   $('key').value = sessionStorage.getItem('paicli_api_key') || '';
   $('connectionHint').textContent = message;
   if (!$('dialog').open) $('dialog').showModal();
