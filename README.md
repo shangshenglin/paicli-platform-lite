@@ -25,7 +25,7 @@ npm run dev
 
 ## 当前阶段
 
-阶段 1 至阶段 11 已完成：
+阶段 1 至阶段 12 已完成：
 
 - 三模块 Maven 工程。
 - Spring Boot REST/SSE Server。
@@ -52,9 +52,10 @@ npm run dev
 - 可选 API Key 认证、生产强制密钥模式、管理端点保护、安全响应头和聊天式 Web Console。
 - SQLite WAL checkpoint、可选 Event/Audit 保留策略、孤儿文件清理和扩展 Micrometer 指标。
 - 带 SHA-256 校验、路径校验和 SQLite 文件头校验的停机备份/恢复脚本。
-- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 61 个自动化测试。
+- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和自动化测试。
 - P0 业务工作台：Run 重试/分支、持久化审批策略、统一检索、Memory 管理、知识版本/索引状态和 Artifact 复用。
 - P1 长期使用效率：任务模板、项目模型方案、用量预算、Run 队列、定时任务、完成通知、Session 迁移、Skill 生命周期与 MCP 配置界面。
+- Agent 评测中心：项目级套件/用例、内部多 Trial Run、确定性评分、稳定性聚合、人工确认基线和逐项扣分报告。
 
 Docker Desktop / WSL2 真实容器验收已完成：审批恢复、容器内命令执行、工作区挂载、SSE 重放、资源/安全限制和结束回收均已通过。
 
@@ -147,6 +148,34 @@ GET/PUT/POST/DELETE    /v1/mcp/configurations | /servers/** | /tools
 ```
 
 快捷键：`Ctrl/Cmd + K` 聚焦输入框，`Alt + N` 新建对话；未提交草稿按 Session 保存在浏览器本地。
+
+## Agent 评测中心
+
+Console“业务工作台”中的 Agent 评测中心把评测作为产品能力，而不是普通 Java 测试。套件保存项目级用例和发布阈值；每次执行为每个启用用例创建独立的内部 Session/Run，并按套件配置重复 1–10 个 Trial。内部 Session 不进入普通会话列表，完成后也不触发自动 Memory 提取。
+
+评测 Run 不绕过危险工具审批；报告会显示等待中的审批，并允许用户选择“仅本次允许”或拒绝，然后由原 Run 继续执行。
+
+第一版使用可复现的确定性评分器，初始 100 分并记录每条扣分证据：
+
+- Run 未正常完成直接扣至 0 分。
+- 缺少必需工具每项扣 20 分，出现禁止工具每项扣 50 分。
+- 缺少回答关键内容每项扣 15 分，出现禁止内容每项扣 50 分。
+- 工具调用数、Token 或耗时超过显式上限，各扣 10 分。
+- 人工确认基线用于检查关键工具保留情况；Token 或耗时超过基线 50% 时扣分。
+- 单个 Trial 达到套件阈值才通过；一个 Execution 的全部 Trial 均通过才通过，形成 `pass^k` 稳定性门禁。
+
+基线只能从已完成的 Trial 创建，更新时保留新的来源 Run、工具序列、回答、Token 和耗时快照。当前版本不使用 LLM-as-Judge，也不严格比较原始 reasoning；开放式语义 Rubric 留给后续阶段。
+
+主要 API：
+
+```text
+GET/POST/PUT/DELETE /v1/evaluations/suites
+GET/POST              /v1/evaluations/suites/{suiteId}/cases
+PUT/DELETE            /v1/evaluations/cases/{caseId}
+POST/GET               /v1/evaluations/suites/{suiteId}/executions
+GET                    /v1/evaluations/executions/{executionId}
+POST                   /v1/evaluations/trials/{trialId}/baseline
+```
 
 ## 最小验收
 

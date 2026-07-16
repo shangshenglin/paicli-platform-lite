@@ -119,6 +119,12 @@
     <div class="section-title"><h3>P1 长期使用效率</h3><button class="secondary" id="refreshP1">刷新</button></div>
     <div class="capability-status" id="usageSummary"></div>
   </section>
+  <section class="capability-section evaluation-section">
+    <div class="section-title"><h3>Agent 评测中心</h3><div class="managed-actions"><button class="secondary" id="refreshEvaluations">刷新</button><button class="primary" id="addEvaluationSuite">新建套件</button></div></div>
+    <p class="hint">复用内部 Run 执行确定性评测，检查工具、响应、Token、耗时和人工确认基线；同一用例的全部 Trial 均通过才算稳定。</p>
+    <div class="managed-list" id="evaluationSuiteList"></div>
+    <div class="evaluation-report" id="evaluationReport"></div>
+  </section>
   <section class="capability-section">
     <div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div>
     <div class="managed-list" id="templateList"></div>
@@ -167,6 +173,39 @@
     <p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p>
     <div class="managed-list" id="policyList"></div>
   </section>
+</dialog>
+<dialog id="evaluationSuiteDialog" class="form-dialog">
+  <form id="evaluationSuiteForm" class="entity-form">
+    <div class="dialog-title"><strong>新建评测套件</strong><button type="button" class="secondary" id="cancelEvaluationSuite">取消</button></div>
+    <div class="form-grid">
+      <label class="form-field"><span>套件名称 *</span><input id="evaluationSuiteName" maxlength="120" required placeholder="例如：Runtime 安全回归"></label>
+      <label class="form-field"><span>默认 Trial 次数</span><input id="evaluationSuiteTrials" type="number" min="1" max="10" value="1"></label>
+      <label class="form-field"><span>通过分数</span><input id="evaluationSuiteThreshold" type="number" min="1" max="100" value="80"></label>
+      <label class="form-field full"><span>说明</span><textarea id="evaluationSuiteDescription" rows="3" maxlength="1000" placeholder="说明评测目标和发布门禁"></textarea></label>
+    </div>
+    <div class="form-error" id="evaluationSuiteError"></div>
+    <div class="dialog-actions"><button class="primary" type="submit" id="saveEvaluationSuite">保存套件</button></div>
+  </form>
+</dialog>
+<dialog id="evaluationCaseDialog" class="form-dialog">
+  <form id="evaluationCaseForm" class="entity-form">
+    <div class="dialog-title"><strong>新建评测用例</strong><button type="button" class="secondary" id="cancelEvaluationCase">取消</button></div>
+    <p class="hint" id="evaluationCaseSuite"></p>
+    <div class="form-grid">
+      <label class="form-field"><span>用例名称 *</span><input id="evaluationCaseName" maxlength="120" required placeholder="例如：危险工具必须审批"></label>
+      <label class="form-field full"><span>输入 Prompt *</span><textarea id="evaluationCasePrompt" rows="4" required></textarea></label>
+      <label class="form-field"><span>必须调用的工具</span><textarea id="evaluationRequiredTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>禁止调用的工具</span><textarea id="evaluationForbiddenTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>回答必须包含</span><textarea id="evaluationRequiredResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>回答禁止包含</span><textarea id="evaluationForbiddenResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>最多工具调用</span><input id="evaluationMaxTools" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>最多 Token</span><input id="evaluationMaxTokens" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>最长耗时（毫秒）</span><input id="evaluationMaxDuration" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>状态</span><span class="checkbox-row"><label><input id="evaluationCaseEnabled" type="checkbox" checked> 启用</label></span></label>
+    </div>
+    <div class="form-error" id="evaluationCaseError"></div>
+    <div class="dialog-actions"><button class="primary" type="submit" id="saveEvaluationCase">保存用例</button></div>
+  </form>
 </dialog>
 <dialog id="templateDialog" class="form-dialog">
   <form id="templateForm" class="entity-form">

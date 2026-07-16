@@ -221,6 +221,43 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, endpoint TEXT NOT NULL DEFAULT '', " +
                     "secret_env TEXT NOT NULL DEFAULT '', events TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_suites (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', " +
+                    "default_trials INTEGER NOT NULL DEFAULT 1, pass_threshold INTEGER NOT NULL DEFAULT 80, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_suites_project " +
+                    "ON evaluation_suites(project_key,updated_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_cases (" +
+                    "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, " +
+                    "required_tools_json TEXT NOT NULL DEFAULT '[]', forbidden_tools_json TEXT NOT NULL DEFAULT '[]', " +
+                    "required_response_json TEXT NOT NULL DEFAULT '[]', forbidden_response_json TEXT NOT NULL DEFAULT '[]', " +
+                    "max_tool_calls INTEGER NOT NULL DEFAULT 0, max_tokens INTEGER NOT NULL DEFAULT 0, " +
+                    "max_duration_ms INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(suite_id,name), " +
+                    "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_cases_suite " +
+                    "ON evaluation_cases(suite_id,enabled,name)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_executions (" +
+                    "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, project_key TEXT NOT NULL, status TEXT NOT NULL, " +
+                    "model_profile_id TEXT, trial_count INTEGER NOT NULL, pass_threshold INTEGER NOT NULL, " +
+                    "average_score REAL, passed INTEGER, created_at TEXT NOT NULL, completed_at TEXT, " +
+                    "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_executions_suite " +
+                    "ON evaluation_executions(suite_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_trials (" +
+                    "id TEXT PRIMARY KEY, execution_id TEXT NOT NULL, case_id TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
+                    "session_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, score INTEGER, " +
+                    "passed INTEGER, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, completed_at TEXT, " +
+                    "UNIQUE(execution_id,case_id,ordinal), " +
+                    "FOREIGN KEY(execution_id) REFERENCES evaluation_executions(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_trials_execution " +
+                    "ON evaluation_trials(execution_id,case_id,ordinal)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_baselines (" +
+                    "case_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, response TEXT NOT NULL, " +
+                    "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, duration_ms INTEGER NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id) ON DELETE CASCADE)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING'");
             SqliteSchemaMigrator.recordAppliedVersions(connection);
@@ -239,21 +276,30 @@ public class SqliteRuntimeStore {
     }
 
     public SessionRecord createSession(String title, String projectKey, String groupId) {
+        return createSession(title, projectKey, groupId, false);
+    }
+
+    public SessionRecord createInternalSession(String title, String projectKey) {
+        return createSession(title, projectKey, null, true);
+    }
+
+    private SessionRecord createSession(String title, String projectKey, String groupId, boolean internal) {
         String id = id("session");
         Instant now = Instant.now();
         String resolvedTitle = title == null || title.isBlank() ? "New session" : title.trim();
         String resolvedProject = normalizeProjectKey(projectKey);
         String resolvedGroup = normalizeGroupId(groupId);
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO sessions(id,title,project_key,group_id,status,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?)")) {
+                "INSERT INTO sessions(id,title,project_key,group_id,status,is_internal,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id);
             ps.setString(2, resolvedTitle);
             ps.setString(3, resolvedProject);
             ps.setString(4, resolvedGroup);
             ps.setString(5, "ACTIVE");
-            ps.setString(6, now.toString());
+            ps.setInt(6, internal ? 1 : 0);
             ps.setString(7, now.toString());
+            ps.setString(8, now.toString());
             ps.executeUpdate();
             return new SessionRecord(id, resolvedTitle, resolvedProject, resolvedGroup, "ACTIVE", now, now);
         } catch (SQLException e) {
@@ -777,6 +823,16 @@ public class SqliteRuntimeStore {
 
     public List<MessageRecord> messages(String sessionId) {
         return messages(sessionId, false);
+    }
+
+    public boolean isInternalRun(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT s.is_internal FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() && rs.getInt(1) != 0; }
+        } catch (SQLException e) {
+            throw failure("read internal run flag", e);
+        }
     }
 
     public SessionRecord createBranchSession(String sourceRunId) {

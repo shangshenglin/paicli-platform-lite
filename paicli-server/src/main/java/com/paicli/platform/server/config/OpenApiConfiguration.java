@@ -15,7 +15,7 @@ public class OpenApiConfiguration {
         String scheme = "apiKey";
         return new OpenAPI()
                 .info(new Info().title("PaiCLI Platform Lite API").version("0.6.0")
-                        .description("Single-node managed Agent runtime REST/SSE API"))
+                        .description("Single-node managed Agent runtime REST/SSE API with deterministic Agent evaluation suites, trials, baselines, and reports"))
                 .addSecurityItem(new SecurityRequirement().addList(scheme))
                 .components(new Components().addSecuritySchemes(scheme,
                         new SecurityScheme().type(SecurityScheme.Type.APIKEY)

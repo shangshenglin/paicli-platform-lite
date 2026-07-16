@@ -51,6 +51,17 @@ final class ApiDtos {
                                       @NotBlank String type, String endpoint, String secretEnv,
                                       @NotNull List<String> events, Boolean enabled) { }
 
+    record EvaluationSuiteRequest(@NotBlank String projectKey, @NotBlank String name,
+                                  String description, Integer defaultTrials, Integer passThreshold) { }
+
+    record EvaluationCaseRequest(@NotBlank String name, @NotBlank String prompt,
+                                 List<String> requiredTools, List<String> forbiddenTools,
+                                 List<String> requiredResponse, List<String> forbiddenResponse,
+                                 Integer maxToolCalls, Integer maxTokens, Long maxDurationMs,
+                                 Boolean enabled) { }
+
+    record EvaluationStartRequest(String modelProfileId, Integer trialCount, Integer passThreshold) { }
+
     record McpServerRequest(@NotBlank String name, @NotBlank String url, Boolean enabled,
                             Map<String, String> headers) { }
 

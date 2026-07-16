@@ -865,11 +865,166 @@ async function retryRun(branch) {
 
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
-  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification'].map($);
+  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification', 'addEvaluationSuite'].map($);
   creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
-  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]); }
+  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data(), loadEvaluations()]); }
   finally { creationButtons.forEach(button => { button.disabled = false; }); }
+}
+
+let evaluationSuites = [];
+let currentEvaluationExecution = '';
+
+async function loadEvaluations() {
+  const project = encodeURIComponent(currentProjectKey());
+  try {
+    evaluationSuites = await api(`/v1/evaluations/suites?projectKey=${project}`);
+    const groups = await Promise.all(evaluationSuites.map(async suite => ({
+      suite,
+      cases: await api(`/v1/evaluations/suites/${suite.id}/cases`),
+      executions: await api(`/v1/evaluations/suites/${suite.id}/executions?limit=5`)
+    })));
+    const nodes = [];
+    groups.forEach(({suite, cases, executions}) => {
+      const block = element('div', 'evaluation-suite-block');
+      const latest = executions[0];
+      const summary = `${cases.filter(value => value.enabled).length}/${cases.length} 个启用用例 · 默认 ${suite.defaultTrials} Trial · ${suite.passThreshold} 分通过${latest ? ` · 最近 ${latest.status}${latest.averageScore == null ? '' : ` ${latest.averageScore.toFixed(1)} 分`}` : ''}`;
+      const item = workbenchItem(suite.name, `${suite.description || '未填写说明'} · ${summary}`);
+      actionButton(item, '新建用例', () => openEvaluationCaseDialog(suite), true);
+      actionButton(item, '运行', () => startEvaluation(suite));
+      if (latest) actionButton(item, '查看报告', () => loadEvaluationReport(latest.id));
+      actionButton(item, '删除', async () => {
+        if (!confirm(`删除评测套件“${suite.name}”？`)) return;
+        try { await api(`/v1/evaluations/suites/${suite.id}`, {method: 'DELETE'}); await loadEvaluations(); }
+        catch (error) { showNotice(`套件删除失败：${error.message}`, true); }
+      });
+      block.append(item);
+      cases.forEach(value => {
+        const ruleCount = value.requiredTools.length + value.forbiddenTools.length + value.requiredResponse.length + value.forbiddenResponse.length;
+        const child = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`,
+          `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} Token` : ''}`);
+        child.classList.add('evaluation-case-item');
+        actionButton(child, '删除', async () => {
+          if (!confirm(`删除评测用例“${value.name}”？`)) return;
+          try { await api(`/v1/evaluations/cases/${value.id}`, {method: 'DELETE'}); await loadEvaluations(); }
+          catch (error) { showNotice(`用例删除失败：${error.message}`, true); }
+        });
+        block.append(child);
+      });
+      nodes.push(block);
+    });
+    $('evaluationSuiteList').replaceChildren(...nodes);
+    if (!nodes.length) $('evaluationSuiteList').append(element('div', 'hint', '尚未创建评测套件。先建立一组关键任务和确定性规则。'));
+    if (currentEvaluationExecution) await loadEvaluationReport(currentEvaluationExecution, false);
+  } catch (error) { showNotice(`评测中心加载失败：${error.message}`, true); }
+}
+
+function openEvaluationSuiteDialog() {
+  $('evaluationSuiteForm').reset();
+  $('evaluationSuiteTrials').value = '1'; $('evaluationSuiteThreshold').value = '80';
+  setFormError('evaluationSuiteError'); $('evaluationSuiteDialog').showModal(); $('evaluationSuiteName').focus();
+}
+
+async function submitEvaluationSuite(event) {
+  event.preventDefault(); setFormError('evaluationSuiteError'); $('saveEvaluationSuite').disabled = true;
+  try {
+    await api('/v1/evaluations/suites', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('evaluationSuiteName').value.trim(),
+      description: $('evaluationSuiteDescription').value.trim(),
+      defaultTrials: +$('evaluationSuiteTrials').value, passThreshold: +$('evaluationSuiteThreshold').value
+    })});
+    $('evaluationSuiteDialog').close(); await loadEvaluations(); showNotice('评测套件已创建');
+  } catch (error) { setFormError('evaluationSuiteError', error.message); }
+  finally { $('saveEvaluationSuite').disabled = false; }
+}
+
+function openEvaluationCaseDialog(suite) {
+  $('evaluationCaseForm').reset(); $('evaluationCaseForm').dataset.suiteId = suite.id;
+  $('evaluationCaseSuite').textContent = `所属套件：${suite.name}`; $('evaluationCaseEnabled').checked = true;
+  ['evaluationMaxTools', 'evaluationMaxTokens', 'evaluationMaxDuration'].forEach(id => { $(id).value = '0'; });
+  setFormError('evaluationCaseError'); $('evaluationCaseDialog').showModal(); $('evaluationCaseName').focus();
+}
+
+function evaluationRuleList(id) {
+  return $(id).value.split(/[\n,，]+/).map(value => value.trim()).filter(Boolean);
+}
+
+async function submitEvaluationCase(event) {
+  event.preventDefault(); setFormError('evaluationCaseError'); $('saveEvaluationCase').disabled = true;
+  try {
+    const suiteId = $('evaluationCaseForm').dataset.suiteId;
+    await api(`/v1/evaluations/suites/${suiteId}/cases`, {method: 'POST', body: JSON.stringify({
+      name: $('evaluationCaseName').value.trim(), prompt: $('evaluationCasePrompt').value.trim(),
+      requiredTools: evaluationRuleList('evaluationRequiredTools'), forbiddenTools: evaluationRuleList('evaluationForbiddenTools'),
+      requiredResponse: evaluationRuleList('evaluationRequiredResponse'), forbiddenResponse: evaluationRuleList('evaluationForbiddenResponse'),
+      maxToolCalls: +$('evaluationMaxTools').value, maxTokens: +$('evaluationMaxTokens').value,
+      maxDurationMs: +$('evaluationMaxDuration').value, enabled: $('evaluationCaseEnabled').checked
+    })});
+    $('evaluationCaseDialog').close(); await loadEvaluations(); showNotice('评测用例已创建');
+  } catch (error) { setFormError('evaluationCaseError', error.message); }
+  finally { $('saveEvaluationCase').disabled = false; }
+}
+
+async function startEvaluation(suite) {
+  if (!confirm(`运行“${suite.name}”？每个启用用例将执行 ${suite.defaultTrials} 次。`)) return;
+  try {
+    const body = state.modelProfileId ? {modelProfileId: state.modelProfileId} : {};
+    const execution = await api(`/v1/evaluations/suites/${suite.id}/executions`, {method: 'POST', body: JSON.stringify(body)});
+    currentEvaluationExecution = execution.id; showNotice('评测已排队，将复用内部 Run 执行');
+    await Promise.all([loadEvaluations(), loadEvaluationReport(execution.id)]);
+  } catch (error) { showNotice(`评测启动失败：${error.message}`, true); }
+}
+
+async function loadEvaluationReport(executionId, notify = true) {
+  try {
+    currentEvaluationExecution = executionId;
+    const report = await api(`/v1/evaluations/executions/${executionId}`);
+    const execution = report.execution;
+    const header = element('div', 'evaluation-report-header');
+    const score = execution.averageScore == null ? '执行中' : `${execution.averageScore.toFixed(1)} 分`;
+    header.append(element('strong', '', `${report.suite.name} · ${score}`),
+      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过`));
+    const refresh = element('button', 'secondary', '刷新报告'); refresh.onclick = () => loadEvaluationReport(executionId); header.append(refresh);
+    const nodes = [header];
+    report.trials.forEach(value => {
+      const trial = value.trial; const details = value.details || {};
+      const status = trial.score == null ? '运行中' : `${trial.score} 分 · ${trial.passed ? '通过' : '未通过'}`;
+      const item = element('div', `evaluation-trial ${trial.score == null ? '' : trial.passed ? 'pass' : 'fail'}`);
+      item.append(element('strong', '', `${value.caseName} · Trial ${trial.ordinal} · ${status}`));
+      if (details.toolCalls != null) item.append(element('div', 'evaluation-checks',
+        `${details.toolCalls} 次工具调用 · ${details.tokens || 0} Token · ${details.durationMs || 0} ms · Run ${trial.runId}`));
+      const failures = (details.checks || []).filter(check => !check.passed);
+      if (failures.length) item.append(element('div', 'evaluation-checks', failures.map(check => `${check.rule}：${check.evidence}（-${check.deduction}）`).join('\n')));
+      (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
+        const approvalText = element('div', 'evaluation-checks', `等待审批：${approval.reason}`);
+        const allow = element('button', 'primary', '仅本次允许');
+        const deny = element('button', 'secondary', '拒绝');
+        allow.onclick = () => resolveEvaluationApproval(approval.id, 'APPROVED', executionId);
+        deny.onclick = () => resolveEvaluationApproval(approval.id, 'DENIED', executionId);
+        approvalText.append(allow, deny); item.append(approvalText);
+      });
+      if (details.runStatus === 'COMPLETED') {
+        const baseline = element('button', 'secondary', value.hasBaseline ? '更新基线' : '设为基线');
+        baseline.onclick = async () => {
+          await api(`/v1/evaluations/trials/${trial.id}/baseline`, {method: 'POST'});
+          showNotice('人工确认基线已保存'); await loadEvaluationReport(executionId, false);
+        };
+        item.append(baseline);
+      }
+      nodes.push(item);
+    });
+    $('evaluationReport').replaceChildren(...nodes);
+    if (notify) showNotice(execution.status === 'RUNNING' ? '评测仍在执行，可稍后刷新报告' : `评测${execution.passed ? '通过' : '未通过'}`,
+      execution.status !== 'RUNNING' && !execution.passed);
+  } catch (error) { showNotice(`评测报告加载失败：${error.message}`, true); }
+}
+
+async function resolveEvaluationApproval(id, decision, executionId) {
+  try {
+    await api(`/v1/approvals/${id}`, {method: 'POST', body: JSON.stringify({decision, rememberScope: null})});
+    showNotice(decision === 'APPROVED' ? '评测工具已允许，将继续执行' : '评测工具已拒绝');
+    await loadEvaluationReport(executionId, false);
+  } catch (error) { showNotice(`评测审批失败：${error.message}`, true); }
 }
 
 async function refreshComposerOptions() {
@@ -1600,6 +1755,8 @@ $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
 $('refreshP1').onclick = loadP1Data;
 $('refreshQueue').onclick = loadP1Data;
+$('refreshEvaluations').onclick = loadEvaluations;
+$('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
 $('addTemplate').onclick = openTemplateDialog;
 $('addProfile').onclick = openProfileDialog;
 $('addSchedule').onclick = openScheduleDialog;
@@ -1608,10 +1765,14 @@ $('cancelTemplate').onclick = () => $('templateDialog').close();
 $('cancelProfile').onclick = () => $('profileDialog').close();
 $('cancelSchedule').onclick = () => $('scheduleDialog').close();
 $('cancelNotification').onclick = () => $('notificationDialog').close();
+$('cancelEvaluationSuite').onclick = () => $('evaluationSuiteDialog').close();
+$('cancelEvaluationCase').onclick = () => $('evaluationCaseDialog').close();
 $('templateForm').onsubmit = submitTemplate;
 $('profileForm').onsubmit = submitProfile;
 $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
+$('evaluationSuiteForm').onsubmit = submitEvaluationSuite;
+$('evaluationCaseForm').onsubmit = submitEvaluationCase;
 $('profileLocal').onchange = updateProfilePriceFields;
 $('scheduleType').onchange = updateScheduleFields;
 $('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };

@@ -269,6 +269,16 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .portability-actions label { color: var(--muted); font-size: 12px; }
 .portability-actions .file-action { color: var(--text); cursor: pointer; }
 .p1-overview { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.evaluation-section { border-color: color-mix(in srgb, #6c8cff 45%, var(--line)); }
+.evaluation-suite-block { display: grid; gap: 6px; }
+.evaluation-case-item { margin-left: 18px; background: #141922; }
+.evaluation-report { display: grid; gap: 8px; margin-top: 12px; }
+.evaluation-report:empty { display: none; }
+.evaluation-report-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.evaluation-trial { padding: 9px 11px; border-left: 3px solid var(--line); border-radius: 7px; background: #141820; }
+.evaluation-trial.pass { border-left-color: var(--green); }
+.evaluation-trial.fail { border-left-color: var(--red); }
+.evaluation-checks { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .section-title h3 { margin: 0; }
 .managed-actions { display: flex; flex-wrap: wrap; gap: 5px; }

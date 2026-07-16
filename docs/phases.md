@@ -91,6 +91,17 @@
 - [x] Schema 迁移 11、P1 Console、Store 回归测试和中文文档
 - [x] 61 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
+## 阶段 12：Agent 评测中心
+
+- [x] 项目级评测套件、确定性 Case 规则、默认 Trial 次数与通过阈值
+- [x] 每个 Case/Trial 复用隐藏内部 Session 和普通 Run，不新增第二套 Agent Loop
+- [x] 工具、回答、Token、耗时和 Run 终态的逐项扣分与证据报告
+- [x] 多 Trial 全通过的 `pass^k` 稳定性聚合及可刷新异步执行报告
+- [x] 人工确认基线、关键工具保留检查和 Token/耗时 150% 退化判断
+- [x] 内部评测 Run 排除自动 Memory 提取，避免评测输入污染长期记忆
+- [x] Schema 迁移 12、评测 Console、Store/评分回归测试和中文文档
+- [x] 64 项自动化测试覆盖 Common、Server 与 Sandbox Agent，并通过真实 REST 多 Trial/基线冒烟
+
 ## 明确不做
 
 - Kubernetes、MicroVM、多地域和多租户
