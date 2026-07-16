@@ -77,6 +77,19 @@
 - [x] Schema 迁移 10、Console 业务工作台、Store 回归测试和中文文档
 - [x] 59 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
+## 阶段 11：P1 长期使用效率
+
+- [x] 项目级任务模板、`${变量}`、附件/工具要求和 `/review`、`/summarize`、`/research` 快捷指令
+- [x] 模型配置方案、项目默认/Fallback、提交前上下文/输出/成本预估和切换模型重试
+- [x] 按项目与日期统计 Token、缓存、耗时、失败率、重试和估算成本；日/月预算与接近上限提醒
+- [x] Run 优先级、批量取消/重新排队、项目最大并发和 SQLite 单机公平调度
+- [x] 一次性/每日/每周/Cron 定时任务，继续复用普通 Session/Run、Approval、Event 和 Audit 链路
+- [x] 浏览器与通用 Webhook/邮件网关/企业 IM 网关通知，密钥仅引用 Server 环境变量
+- [x] Session Markdown/JSON/完整审计包导出、隐私脱敏和跨实例导入
+- [x] Skill 来源/Ref/Commit/作用域、预检、启停、固定、升级、回滚与 MCP Console 配置
+- [x] Schema 迁移 11、P1 Console、Store 回归测试和中文文档
+- [x] 60 项自动化测试覆盖 Common、Server 与 Sandbox Agent
+
 ## 明确不做
 
 - Kubernetes、MicroVM、多地域和多租户

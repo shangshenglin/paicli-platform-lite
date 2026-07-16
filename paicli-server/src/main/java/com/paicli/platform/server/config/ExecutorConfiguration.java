@@ -31,4 +31,15 @@ public class ExecutorConfiguration {
         executor.initialize();
         return executor;
     }
+
+    @Bean("notificationTaskExecutor")
+    TaskExecutor notificationTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("paicli-notify-");
+        executor.initialize();
+        return executor;
+    }
 }

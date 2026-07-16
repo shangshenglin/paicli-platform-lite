@@ -58,9 +58,6 @@ public class OpenAiCompatibleModelClient implements ModelClient {
 
     @PostConstruct
     void initialize() {
-        if (properties.apiKey().isBlank()) {
-            throw new IllegalStateException("PAICLI_MODEL_API_KEY is required for openai-compatible provider");
-        }
         String base = properties.baseUrl().replaceAll("/+$", "");
         this.endpoint = URI.create(base.endsWith("/chat/completions") ? base : base + "/chat/completions");
     }
@@ -93,21 +90,26 @@ public class OpenAiCompatibleModelClient implements ModelClient {
     }
 
     private HttpResponse<InputStream> sendWithRetry(ActiveRequest active, ModelRequest request) throws Exception {
-        List<String> models = properties.fallbackModel().isBlank()
-                || properties.fallbackModel().equals(properties.model())
-                ? List.of(properties.model()) : List.of(properties.model(), properties.fallbackModel());
+        ModelRoute route = request.route();
+        String primaryModel = route == null ? properties.model() : route.model();
+        String fallbackModel = route == null ? properties.fallbackModel() : route.fallbackModel();
+        String apiKey = route == null ? properties.apiKey() : route.apiKey();
+        URI selectedEndpoint = route == null ? endpoint : endpoint(route.baseUrl());
+        List<String> models = fallbackModel == null || fallbackModel.isBlank() || fallbackModel.equals(primaryModel)
+                ? List.of(primaryModel) : List.of(primaryModel, fallbackModel);
         String lastError = "model request failed";
         for (String selectedModel : models) {
             for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
                 if (active.canceled) throw new CancellationException("Model request canceled");
                 acquireRatePermit();
                 String body = mapper.writeValueAsString(requestBody(request, selectedModel));
-                HttpRequest httpRequest = HttpRequest.newBuilder(endpoint)
+                HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(selectedEndpoint)
                         .timeout(Duration.ofSeconds(properties.requestTimeoutSeconds()))
-                        .header("Authorization", "Bearer " + properties.apiKey())
                         .header("Content-Type", "application/json")
                         .header("Accept", "text/event-stream")
-                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build();
+                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+                if (apiKey != null && !apiKey.isBlank()) requestBuilder.header("Authorization", "Bearer " + apiKey);
+                HttpRequest httpRequest = requestBuilder.build();
                 CompletableFuture<HttpResponse<InputStream>> future = httpClient.sendAsync(
                         httpRequest, HttpResponse.BodyHandlers.ofInputStream());
                 active.future = future;
@@ -163,6 +165,16 @@ public class OpenAiCompatibleModelClient implements ModelClient {
 
     private static boolean retriable(int status) {
         return status == 408 || status == 409 || status == 429 || status >= 500;
+    }
+
+    private static URI endpoint(String baseUrl) {
+        String base = baseUrl == null ? "" : baseUrl.trim().replaceAll("/+$", "");
+        if (base.isBlank()) throw new IllegalArgumentException("model profile baseUrl is required");
+        URI value = URI.create(base.endsWith("/chat/completions") ? base : base + "/chat/completions");
+        if (!"http".equalsIgnoreCase(value.getScheme()) && !"https".equalsIgnoreCase(value.getScheme())) {
+            throw new IllegalArgumentException("model profile baseUrl must use http or https");
+        }
+        return value;
     }
 
     @Override

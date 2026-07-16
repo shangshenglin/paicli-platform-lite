@@ -25,7 +25,7 @@ npm run dev
 
 ## 当前阶段
 
-阶段 1 至阶段 10 已完成：
+阶段 1 至阶段 11 已完成：
 
 - 三模块 Maven 工程。
 - Spring Boot REST/SSE Server。
@@ -52,8 +52,9 @@ npm run dev
 - 可选 API Key 认证、生产强制密钥模式、管理端点保护、安全响应头和聊天式 Web Console。
 - SQLite WAL checkpoint、可选 Event/Audit 保留策略、孤儿文件清理和扩展 Micrometer 指标。
 - 带 SHA-256 校验、路径校验和 SQLite 文件头校验的停机备份/恢复脚本。
-- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 59 个自动化测试。
+- GitHub Actions Reactor/Docker 构建、Dependabot、CycloneDX SBOM 和 60 个自动化测试。
 - P0 业务工作台：Run 重试/分支、持久化审批策略、统一检索、Memory 管理、知识版本/索引状态和 Artifact 复用。
+- P1 长期使用效率：任务模板、项目模型方案、用量预算、Run 队列、定时任务、完成通知、Session 迁移、Skill 生命周期与 MCP 配置界面。
 
 Docker Desktop / WSL2 真实容器验收已完成：审批恢复、容器内命令执行、工作区挂载、SSE 重放、资源/安全限制和结束回收均已通过。
 
@@ -109,6 +110,39 @@ GET    /v1/artifacts/{id}/download
 POST   /v1/artifacts/{id}/reuse
 DELETE /v1/artifacts/{id}
 ```
+
+## P1 长期使用效率
+
+Console 的“业务工作台”新增以下持久化能力：
+
+- 任务模板：保存 Prompt、`${变量}`、附件要求、允许工具和模型方案；项目首次访问会提供 `/review`、`/summarize`、`/research` 三个快捷模板。
+- 模型方案：保存 OpenAI-compatible Base URL、模型、Fallback、上下文/输出上限和价格；密钥只保存环境变量名。失败 Run 可在切换方案后重试。
+- 用量预算：按项目和时间窗口统计调用、输入/输出/缓存 Token、平均响应时间、失败率、重试和估算成本；本地模型只统计耗时。支持日/月 Token、成本提醒和项目最大并发。
+- Run 队列：按项目公平领取，支持 `-10..10` 优先级、批量取消、失败/取消任务重新排队，并展示当前步骤、耗时和重试次数。
+- 定时任务：一次性、每日、每周及 Spring 六段 Cron；每次触发仍创建普通 Session/Run，继续经过持久化审批、事件、审计和预算边界。
+- 完成通知：浏览器通知以及通用 Webhook/邮件网关/企业 IM 网关；服务端只记录密钥环境变量名，事件覆盖完成、失败、等待审批和预算不足。
+- Session 迁移：导出 Markdown、JSON 或包含 Event/ToolCall/Approval/Artifact 清单的完整审计包；支持隐私脱敏和导入另一套 Lite 实例。
+- Skill 生命周期：显示来源、Ref、Commit、安装时间和作用域；安装前预览文件与权限声明，支持启停、固定版本、检查更新、升级及单级回滚。
+- MCP 管理：Console 内新增、测试、启停和删除远程 Streamable HTTP Server，查看工具 Schema 与健康状态；敏感 Header 必须写成 `env:VARIABLE_NAME`。
+
+主要 API：
+
+```text
+GET/POST/PUT/DELETE /v1/productivity/templates
+GET/POST/PUT/DELETE /v1/productivity/model-profiles
+GET                    /v1/productivity/estimate
+GET/PUT                /v1/productivity/usage | /budget
+GET/PATCH/POST         /v1/productivity/queue/**
+GET/POST/PUT/DELETE    /v1/productivity/schedules
+GET/POST/PUT/DELETE    /v1/productivity/notifications
+GET                    /v1/sessions/{sessionId}/export
+POST                   /v1/sessions/import
+POST                   /v1/skills/imports/inspect
+POST                   /v1/skills/{name}/state | /upgrade | /rollback
+GET/PUT/POST/DELETE    /v1/mcp/configurations | /servers/** | /tools
+```
+
+快捷键：`Ctrl/Cmd + K` 聚焦输入框，`Alt + N` 新建对话；未提交草稿按 Session 保存在浏览器本地。
 
 ## 最小验收
 

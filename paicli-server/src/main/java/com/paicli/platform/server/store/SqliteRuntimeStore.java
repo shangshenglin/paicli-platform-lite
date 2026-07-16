@@ -77,8 +77,13 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "thinking_mode", "TEXT NOT NULL DEFAULT 'auto'");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "queued_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "priority", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "model_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "retry_count", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("UPDATE runs SET queued_at=created_at WHERE queued_at IS NULL");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_status_created ON runs(status, created_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_queue_priority " +
+                    "ON runs(status, priority DESC, queued_at, created_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS messages (" +
                     "id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, role TEXT NOT NULL, " +
@@ -154,6 +159,10 @@ public class SqliteRuntimeStore {
                     "output_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_model_usage_run ON model_usage(run_id, created_at)");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "model_name", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "duration_ms", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "retry_count", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "local_model", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE TABLE IF NOT EXISTS approval_policies (" +
                     "id TEXT PRIMARY KEY, scope TEXT NOT NULL, session_id TEXT, project_key TEXT NOT NULL, " +
                     "tool_name TEXT NOT NULL, arguments_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, " +
@@ -181,6 +190,37 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(child_session_id) REFERENCES sessions(id), " +
                     "FOREIGN KEY(child_run_id) REFERENCES runs(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_parent ON run_delegations(parent_run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS task_templates (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, shortcut TEXT NOT NULL DEFAULT '', " +
+                    "prompt TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', attachment_requirements TEXT NOT NULL DEFAULT '', " +
+                    "allowed_tools TEXT NOT NULL DEFAULT '', model_profile_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "last_used_at TEXT, use_count INTEGER NOT NULL DEFAULT 0, UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_task_templates_project ON task_templates(project_key,updated_at)");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_task_templates_shortcut " +
+                    "ON task_templates(project_key,shortcut) WHERE shortcut<>''");
+            statement.execute("CREATE TABLE IF NOT EXISTS model_profiles (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, " +
+                    "api_key_env TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, fallback_model TEXT NOT NULL DEFAULT '', " +
+                    "max_context_tokens INTEGER NOT NULL, max_output_tokens INTEGER NOT NULL, input_price REAL NOT NULL DEFAULT 0, " +
+                    "output_price REAL NOT NULL DEFAULT 0, local_model INTEGER NOT NULL DEFAULT 0, is_default INTEGER NOT NULL DEFAULT 0, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_model_profiles_project ON model_profiles(project_key,is_default DESC,name)");
+            statement.execute("CREATE TABLE IF NOT EXISTS budget_policies (" +
+                    "project_key TEXT PRIMARY KEY, daily_tokens INTEGER NOT NULL DEFAULT 0, monthly_tokens INTEGER NOT NULL DEFAULT 0, " +
+                    "daily_cost REAL NOT NULL DEFAULT 0, monthly_cost REAL NOT NULL DEFAULT 0, warn_ratio REAL NOT NULL DEFAULT 0.8, " +
+                    "max_concurrent_runs INTEGER NOT NULL DEFAULT 4, updated_at TEXT NOT NULL)");
+            SqliteSchemaMigrator.ensureColumn(connection, "budget_policies", "max_concurrent_runs",
+                    "INTEGER NOT NULL DEFAULT 4");
+            statement.execute("CREATE TABLE IF NOT EXISTS scheduled_tasks (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, template_id TEXT NOT NULL, " +
+                    "schedule_type TEXT NOT NULL, schedule_value TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', " +
+                    "enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON scheduled_tasks(enabled,next_run_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS notification_channels (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, endpoint TEXT NOT NULL DEFAULT '', " +
+                    "secret_env TEXT NOT NULL DEFAULT '', events TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING'");
             SqliteSchemaMigrator.recordAppliedVersions(connection);
@@ -420,6 +460,13 @@ public class SqliteRuntimeStore {
     public RunRecord createRun(String sessionId, String input,
                                String thinkingMode, String reasoningEffort,
                                List<String> attachmentIds) {
+        return createRun(sessionId, input, thinkingMode, reasoningEffort, attachmentIds, null, 0, 0);
+    }
+
+    public RunRecord createRun(String sessionId, String input,
+                               String thinkingMode, String reasoningEffort,
+                               List<String> attachmentIds, String modelProfileId,
+                               int priority, int retryCount) {
         if (input == null || input.isBlank()) {
             throw new IllegalArgumentException("input must not be blank");
         }
@@ -438,15 +485,19 @@ public class SqliteRuntimeStore {
             try {
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode," +
-                                "reasoning_effort,created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,0)")) {
+                                "reasoning_effort,priority,model_profile_id,retry_count,created_at,queued_at,version) " +
+                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,?,0)")) {
                     ps.setString(1, runId);
                     ps.setString(2, sessionId);
                     ps.setString(3, RunStatus.QUEUED.name());
                     ps.setString(4, input.trim());
                     ps.setString(5, resolvedThinking);
                     ps.setString(6, resolvedEffort);
-                    ps.setString(7, now.toString());
-                    ps.setString(8, now.toString());
+                    ps.setInt(7, Math.max(-10, Math.min(priority, 10)));
+                    ps.setString(8, modelProfileId == null || modelProfileId.isBlank() ? null : modelProfileId);
+                    ps.setInt(9, Math.max(0, retryCount));
+                    ps.setString(10, now.toString());
+                    ps.setString(11, now.toString());
                     ps.executeUpdate();
                 }
                 MessageRecord userMessage = insertMessage(connection, sessionId, runId, "user", input.trim(),
@@ -456,7 +507,8 @@ public class SqliteRuntimeStore {
                 touchSession(connection, sessionId, now);
                 connection.commit();
                 return new RunRecord(runId, sessionId, RunStatus.QUEUED, input.trim(), 0,
-                        null, resolvedThinking, resolvedEffort, now, null, null, 0);
+                        null, resolvedThinking, resolvedEffort, Math.max(-10, Math.min(priority, 10)),
+                        modelProfileId, Math.max(0, retryCount), now, null, null, 0);
             } catch (Exception e) {
                 rollback(connection);
                 throw e;
@@ -534,7 +586,12 @@ public class SqliteRuntimeStore {
             try {
                 RunRecord selected = null;
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "SELECT * FROM runs WHERE status=? ORDER BY queued_at, created_at LIMIT 1")) {
+                        "SELECT r.* FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.status=? " +
+                                "AND (SELECT COUNT(*) FROM runs active JOIN sessions owner ON owner.id=active.session_id " +
+                                "WHERE owner.project_key=s.project_key AND active.status NOT IN ('QUEUED','COMPLETED','FAILED','CANCELED')) " +
+                                "< COALESCE((SELECT max_concurrent_runs FROM budget_policies b " +
+                                "WHERE b.project_key=s.project_key),4) " +
+                                "ORDER BY r.priority DESC, queued_at, r.created_at LIMIT 1")) {
                     ps.setString(1, RunStatus.QUEUED.name());
                     try (ResultSet rs = ps.executeQuery()) {
                         if (rs.next()) selected = mapRun(rs);
@@ -1411,6 +1468,26 @@ public class SqliteRuntimeStore {
         }
     }
 
+    public List<ToolCallRecord> toolCallsForRun(String runId) {
+        List<ToolCallRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) values.add(mapToolCall(rs)); }
+            return values;
+        } catch (SQLException e) { throw failure("list run tool calls", e); }
+    }
+
+    public List<ApprovalRecord> approvalsForRun(String runId) {
+        List<ApprovalRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM approvals WHERE run_id=? ORDER BY created_at")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) values.add(mapApproval(rs)); }
+            return values;
+        } catch (SQLException e) { throw failure("list run approvals", e); }
+    }
+
     public boolean deleteMemory(String id) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
@@ -1456,16 +1533,28 @@ public class SqliteRuntimeStore {
 
     public void recordModelUsage(String runId, String provider, int estimatedInputTokens,
                                  int inputTokens, int outputTokens, int cachedInputTokens) {
+        recordModelUsage(runId, provider, "", estimatedInputTokens, inputTokens, outputTokens,
+                cachedInputTokens, 0, 0, false);
+    }
+
+    public void recordModelUsage(String runId, String provider, String modelName, int estimatedInputTokens,
+                                 int inputTokens, int outputTokens, int cachedInputTokens,
+                                 long durationMs, int retryCount, boolean localModel) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "INSERT INTO model_usage(run_id,provider,estimated_input_tokens,input_tokens," +
-                        "output_tokens,cached_input_tokens,created_at) VALUES(?,?,?,?,?,?,?)")) {
+                        "output_tokens,cached_input_tokens,model_name,duration_ms,retry_count,local_model,created_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, runId);
             ps.setString(2, provider == null ? "unknown" : provider);
             ps.setInt(3, Math.max(0, estimatedInputTokens));
             ps.setInt(4, Math.max(0, inputTokens));
             ps.setInt(5, Math.max(0, outputTokens));
             ps.setInt(6, Math.max(0, cachedInputTokens));
-            ps.setString(7, Instant.now().toString());
+            ps.setString(7, modelName == null ? "" : modelName);
+            ps.setLong(8, Math.max(0, durationMs));
+            ps.setInt(9, Math.max(0, retryCount));
+            ps.setInt(10, localModel ? 1 : 0);
+            ps.setString(11, Instant.now().toString());
             ps.executeUpdate();
         } catch (SQLException e) {
             throw failure("record model usage", e);
@@ -2202,6 +2291,7 @@ public class SqliteRuntimeStore {
         return new RunRecord(rs.getString("id"), rs.getString("session_id"),
                 RunStatus.valueOf(rs.getString("status")), rs.getString("input"), rs.getInt("current_step"),
                 rs.getString("error"), rs.getString("thinking_mode"), rs.getString("reasoning_effort"),
+                rs.getInt("priority"), rs.getString("model_profile_id"), rs.getInt("retry_count"),
                 instant(rs.getString("created_at")), instant(rs.getString("started_at")),
                 instant(rs.getString("finished_at")), rs.getLong("version"));
     }

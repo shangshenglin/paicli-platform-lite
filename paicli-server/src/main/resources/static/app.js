@@ -14,6 +14,10 @@ const state = {
   thinkingMode: localStorage.getItem('paicli_thinking_mode') || 'disabled',
   reasoningEffort: localStorage.getItem('paicli_reasoning_effort') || 'high',
   pendingAttachments: [],
+  templates: [],
+  modelProfiles: [],
+  modelProfileId: localStorage.getItem('paicli_model_profile') || '',
+  notifiedRunId: '',
   detailOpen: innerWidth > 1000
 };
 const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED']);
@@ -67,6 +71,12 @@ function setStatus(value = '') {
   const retryable = Boolean(state.runId && terminal.has(value));
   $('retryRun').hidden = !retryable;
   $('branchRun').hidden = !retryable;
+  if ((terminal.has(value) || value === 'WAITING_APPROVAL') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
+    state.notifiedRunId = `${state.runId}:${value}`;
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification(`PaiCLI · ${statusNames[value] || value}`, {body: $('chatTitle').textContent || state.runId});
+    }
+  }
 }
 
 function scrollBottom() {
@@ -219,6 +229,9 @@ async function selectSession(id, rerender = true) {
   const session = state.sessions.find(item => item.id === id);
   $('chatTitle').textContent = session?.title || '对话';
   $('runMeta').textContent = session ? `项目 · ${session.projectKey}` : '尚未开始';
+  $('input').value = localStorage.getItem(`paicli_draft_${id}`) || '';
+  resizeInput();
+  await refreshComposerOptions();
   setStatus();
   clearEvents();
   await loadMessages();
@@ -326,10 +339,12 @@ async function sendMessage() {
         input: text,
         thinkingMode: state.thinkingMode,
         reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
-        attachmentIds: state.pendingAttachments.map(item => item.id)
+        attachmentIds: state.pendingAttachments.map(item => item.id),
+        modelProfileId: state.modelProfileId || null
       })
     });
     $('input').value = '';
+    localStorage.removeItem(`paicli_draft_${state.sessionId}`);
     clearPendingAttachments();
     resizeInput();
     state.runId = run.id;
@@ -424,16 +439,36 @@ async function openCapabilities() {
 async function refreshCapabilities() {
   const project = encodeURIComponent(currentProjectKey());
   try {
-    const [skills, documents, status] = await Promise.all([
+    const [skills, documents, status, mcpServers, mcpTools] = await Promise.all([
       api(`/v1/skills?projectKey=${project}`),
       api(`/v1/knowledge/documents?projectKey=${project}`),
-      api(`/v1/capabilities/status?projectKey=${project}`)
+      api(`/v1/capabilities/status?projectKey=${project}`),
+      api('/v1/mcp/configurations'),
+      api('/v1/mcp/tools')
     ]);
     renderCapabilityStatus(status);
-    $('skillList').replaceChildren(...skills.map(skill => managedItem(
-      skill.name, `${skill.source} · ${skill.description || '无描述'}`,
-      () => deleteSkill(skill.name, skill.source === 'global')
-    )));
+    $('skillList').replaceChildren(...skills.map(skill => {
+      const item = workbenchItem(`${skill.enabled ? '●' : '○'} ${skill.name}`, `${skill.source} · ${skill.description || '无描述'} · ${skill.repository || '本地'}${skill.commit ? ` @ ${skill.commit.slice(0, 10)}` : ''} · ${skill.pinned ? '已固定版本' : '跟随更新'}`);
+      actionButton(item, skill.enabled ? '停用' : '启用', () => setSkillState(skill, !skill.enabled, skill.pinned));
+      actionButton(item, skill.pinned ? '取消固定' : '固定版本', () => setSkillState(skill, skill.enabled, !skill.pinned));
+      if (skill.repository) actionButton(item, '检查更新', async () => {
+        const global = skill.source === 'global';
+        const status = await api(`/v1/skills/${encodeURIComponent(skill.name)}/updates?projectKey=${project}&global=${global}`);
+        if (!status.updateAvailable) return showNotice(status.error || '当前已是最新版本');
+        if (confirm(`发现新 Commit ${status.latestCommit.slice(0, 10)}，立即升级？`)) {
+          await api(`/v1/skills/${encodeURIComponent(skill.name)}/upgrade?projectKey=${project}&global=${global}`, {method: 'POST', body: '{}'});
+          await refreshCapabilities();
+        }
+      });
+      if (skill.repository) actionButton(item, '回滚', async () => {
+        const global = skill.source === 'global';
+        await api(`/v1/skills/${encodeURIComponent(skill.name)}/rollback?projectKey=${project}&global=${global}`, {method: 'POST', body: '{}'});
+        await refreshCapabilities();
+      });
+      actionButton(item, '文件清单', async () => alert((await api(`/v1/skills/${encodeURIComponent(skill.name)}/files?projectKey=${project}`)).join('\n')));
+      actionButton(item, '删除', () => deleteSkill(skill.name, skill.source === 'global'));
+      return item;
+    }));
     if (!skills.length) $('skillList').append(element('div', 'hint', '尚未安装 Skill'));
     $('knowledgeList').replaceChildren(...documents.map(document => {
       const item = workbenchItem(document.name,
@@ -443,6 +478,14 @@ async function refreshCapabilities() {
       return item;
     }));
     if (!documents.length) $('knowledgeList').append(element('div', 'hint', '尚未上传知识文档'));
+    $('mcpList').replaceChildren(...mcpServers.map(server => {
+      const status = mcpTools.filter(tool => tool.server === server.name);
+      const item = workbenchItem(`${server.enabled ? '●' : '○'} ${server.name}`, `${server.url} · ${status.length} 个工具 · Header ${Object.keys(server.headers || {}).join(', ') || '无'}`);
+      actionButton(item, '测试', async () => { const result = await api(`/v1/mcp/servers/${server.name}/test`, {method: 'POST', body: '{}'}); showNotice(result.ready ? `${server.name} 连接正常` : `${server.name}：${result.error}`, !result.ready); await refreshCapabilities(); });
+      actionButton(item, server.enabled ? '停用' : '启用', () => saveMcp({...server, enabled: !server.enabled}));
+      actionButton(item, '删除', async () => { await api(`/v1/mcp/servers/${server.name}`, {method: 'DELETE'}); await refreshCapabilities(); }); return item;
+    }));
+    if (!mcpServers.length) $('mcpList').append(element('div', 'hint', '尚未配置 MCP Server'));
   } catch (error) {
     showNotice(`能力列表加载失败：${error.message}`, true);
   }
@@ -474,6 +517,24 @@ function managedItem(title, subtitle, removeAction) {
   return item;
 }
 
+async function setSkillState(skill, enabled, pinned) {
+  await api(`/v1/skills/${encodeURIComponent(skill.name)}/state?projectKey=${encodeURIComponent(currentProjectKey())}&global=${skill.source === 'global'}&enabled=${enabled}&pinned=${pinned}`, {method: 'POST', body: '{}'});
+  await refreshCapabilities();
+}
+
+async function saveMcp(server) {
+  await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}`, {method: 'PUT', body: JSON.stringify(server)});
+  await refreshCapabilities();
+}
+
+async function addMcp() {
+  const name = prompt('MCP Server 名称（字母、数字、点、下划线或连字符）'); if (!name) return;
+  const url = prompt('Streamable HTTP MCP 地址'); if (!url) return;
+  const header = prompt('敏感 Header 名称（可空，例如 Authorization）', '') || '';
+  const env = header ? prompt('环境变量引用（例如 env:MCP_TOKEN）', 'env:MCP_TOKEN') : '';
+  await saveMcp({name, url, enabled: true, headers: header ? {[header]: env} : {}});
+}
+
 function workbenchItem(title, subtitle) {
   const item = element('div', 'managed-item');
   const main = element('div', 'managed-main');
@@ -502,10 +563,12 @@ async function importSkill() {
   if (!gitUrl) return showNotice('请输入 Skill Git 地址', true);
   const global = $('skillGlobal').checked;
   try {
-    showNotice('正在下载并校验 Skill…');
-    await api('/v1/skills/imports', {method: 'POST', body: JSON.stringify({
-      projectKey: currentProjectKey(), gitUrl, name: $('skillName').value.trim() || null, global
-    })});
+    showNotice('正在预检 Skill 文件和权限声明…');
+    const request = {projectKey: currentProjectKey(), gitUrl, name: $('skillName').value.trim() || null, global};
+    const inspection = await api('/v1/skills/imports/inspect', {method: 'POST', body: JSON.stringify(request)});
+    if (!confirm(`安装 Skill“${inspection.name}”？\n权限声明：${inspection.permissions}\n\n文件清单：\n${inspection.files.join('\n')}`)) return;
+    showNotice('正在安装已确认的 Skill…');
+    await api('/v1/skills/imports', {method: 'POST', body: JSON.stringify(request)});
     $('skillGitUrl').value = '';
     $('skillName').value = '';
     $('skillGlobal').checked = false;
@@ -771,7 +834,7 @@ async function retryRun(branch) {
   if (!state.runId || !terminal.has(state.runStatus)) return;
   try {
     const result = await api(`/v1/runs/${state.runId}/retry`, {
-      method: 'POST', body: JSON.stringify({branch})
+      method: 'POST', body: JSON.stringify({branch, modelProfileId: state.modelProfileId || null})
     });
     if (branch) {
       await refreshSessions();
@@ -790,7 +853,212 @@ async function retryRun(branch) {
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
   $('workbenchDialog').showModal();
-  await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies()]);
+  await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]);
+}
+
+async function refreshComposerOptions() {
+  try {
+    const project = encodeURIComponent(currentProjectKey());
+    [state.templates, state.modelProfiles] = await Promise.all([
+      api(`/v1/productivity/templates?projectKey=${project}`),
+      api(`/v1/productivity/model-profiles?projectKey=${project}`)
+    ]);
+    const template = $('quickTemplate');
+    template.replaceChildren(element('option', '', '快捷指令'));
+    template.firstElementChild.value = '';
+    state.templates.forEach(value => {
+      const option = element('option', '', `${value.shortcut || '模板'} · ${value.name}`);
+      option.value = value.id; template.append(option);
+    });
+    const profile = $('modelProfile');
+    profile.replaceChildren(element('option', '', '默认模型'));
+    profile.firstElementChild.value = '';
+    state.modelProfiles.forEach(value => {
+      const option = element('option', '', `${value.defaultProfile ? '★ ' : ''}${value.name}`);
+      option.value = value.id; profile.append(option);
+    });
+    if (state.modelProfiles.some(value => value.id === state.modelProfileId)) profile.value = state.modelProfileId;
+    else state.modelProfileId = '';
+    scheduleEstimate();
+  } catch (error) { showNotice(`P1 配置加载失败：${error.message}`, true); }
+}
+
+let estimateTimer = 0;
+function scheduleEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(updateEstimate, 250);
+}
+
+async function updateEstimate() {
+  if (!state.sessionId) return;
+  try {
+    const query = new URLSearchParams({sessionId: state.sessionId, inputChars: String($('input').value.length)});
+    if (state.modelProfileId) query.set('modelProfileId', state.modelProfileId);
+    const value = await api(`/v1/productivity/estimate?${query}`);
+    const cost = value.estimatedMaxCost ? ` · 上限成本约 $${value.estimatedMaxCost.toFixed(4)}` : '';
+    $('estimate').textContent = `预计上下文 ${value.estimatedContextTokens.toLocaleString()} / ${value.maxContextTokens ? value.maxContextTokens.toLocaleString() : '默认'} Token · 输出上限 ${value.maxOutputTokens || '默认'}${cost}${value.warning ? ` · ${value.warning}` : ''}`;
+    $('estimate').classList.toggle('warning', Boolean(value.warning));
+  } catch { $('estimate').textContent = '暂时无法估算上下文与成本'; }
+}
+
+async function applyTemplate(id) {
+  if (!id) return;
+  try {
+    const value = await api(`/v1/productivity/templates/${encodeURIComponent(id)}/resolve?projectKey=${encodeURIComponent(currentProjectKey())}`, {method: 'POST', body: JSON.stringify({variables: {}})});
+    $('input').value = value.prompt;
+    if (value.modelProfileId) {
+      state.modelProfileId = value.modelProfileId;
+      $('modelProfile').value = value.modelProfileId;
+    }
+    localStorage.setItem(`paicli_draft_${state.sessionId}`, $('input').value);
+    resizeInput(); scheduleEstimate(); $('input').focus();
+  } catch (error) { showNotice(`模板解析失败：${error.message}`, true); }
+}
+
+async function loadP1Data() {
+  const project = encodeURIComponent(currentProjectKey());
+  try {
+    const [usage, templates, profiles, queue, schedules, notifications] = await Promise.all([
+      api(`/v1/productivity/usage?projectKey=${project}&days=30`),
+      api(`/v1/productivity/templates?projectKey=${project}`),
+      api(`/v1/productivity/model-profiles?projectKey=${project}`),
+      api(`/v1/productivity/queue?projectKey=${project}`),
+      api(`/v1/productivity/schedules?projectKey=${project}`),
+      api(`/v1/productivity/notifications?projectKey=${project}`)
+    ]);
+    renderUsage(usage); renderTemplates(templates); renderProfiles(profiles); renderQueue(queue);
+    renderSchedules(schedules, templates); renderNotifications(notifications);
+    state.templates = templates; state.modelProfiles = profiles;
+  } catch (error) { showNotice(`P1 工作台加载失败：${error.message}`, true); }
+}
+
+function renderUsage(value) {
+  const budget = value.budget;
+  const tokens = value.inputTokens + value.outputTokens;
+  const labels = [
+    ['调用', value.calls.toLocaleString()], ['Token', tokens.toLocaleString()],
+    ['缓存命中', value.cachedTokens.toLocaleString()], ['平均响应', `${Math.round(value.averageDurationMs)} ms`],
+    ['失败率', `${(value.failureRate * 100).toFixed(1)}%`], ['重试', value.retries.toLocaleString()],
+    ['估算成本', `$${value.estimatedCost.toFixed(4)}`]
+  ];
+  const tokenRatio = budget.monthlyTokens ? tokens / budget.monthlyTokens : 0;
+  const costRatio = budget.monthlyCost ? value.estimatedCost / budget.monthlyCost : 0;
+  if (Math.max(tokenRatio, costRatio) >= budget.warnRatio) {
+    labels.push(['预算提醒', `${Math.round(Math.max(tokenRatio, costRatio) * 100)}%`]);
+    showNotice('项目月度模型预算已接近上限', true);
+  }
+  $('usageSummary').replaceChildren(...labels.map(([name, text]) => {
+    const item = element('div', 'capability-status-item'); item.append(element('strong', '', name), element('small', '', text)); return item;
+  }));
+  const configure = element('button', 'secondary', '配置预算与并发');
+  configure.onclick = () => configureBudget(budget);
+  $('usageSummary').append(configure);
+  (value.breakdown || []).slice(0, 8).forEach(row => {
+    const item = element('div', 'capability-status-item');
+    const tokens = row.inputTokens + row.outputTokens;
+    item.append(element('strong', '', `${row.date} · ${row.model}`),
+      element('small', '', `${row.sessionTitle} · ${row.calls} 次 · ${tokens.toLocaleString()} Token · ${row.localModel ? `${Math.round(row.averageDurationMs)} ms` : `$${row.estimatedCost.toFixed(4)}`}`));
+    $('usageSummary').append(item);
+  });
+}
+
+async function configureBudget(current) {
+  const dailyTokens = prompt('每日 Token 预算（0 表示不限）', current.dailyTokens || 0); if (dailyTokens === null) return;
+  const monthlyTokens = prompt('每月 Token 预算（0 表示不限）', current.monthlyTokens || 0); if (monthlyTokens === null) return;
+  const dailyCost = prompt('每日成本预算 USD（0 表示不限）', current.dailyCost || 0); if (dailyCost === null) return;
+  const monthlyCost = prompt('每月成本预算 USD（0 表示不限）', current.monthlyCost || 0); if (monthlyCost === null) return;
+  const maxConcurrentRuns = prompt('项目最大并发 Run', current.maxConcurrentRuns || 4); if (maxConcurrentRuns === null) return;
+  await api(`/v1/productivity/budget?projectKey=${encodeURIComponent(currentProjectKey())}`, {method: 'PUT', body: JSON.stringify({dailyTokens:+dailyTokens, monthlyTokens:+monthlyTokens, dailyCost:+dailyCost, monthlyCost:+monthlyCost, warnRatio:.8, maxConcurrentRuns:+maxConcurrentRuns})});
+  await loadP1Data();
+}
+
+function renderTemplates(values) {
+  $('templateList').replaceChildren(...values.map(value => {
+    const item = workbenchItem(`${value.shortcut || '模板'} · ${value.name}`, `${value.prompt} · 使用 ${value.useCount} 次${value.attachmentRequirements ? ` · 附件：${value.attachmentRequirements}` : ''}`);
+    actionButton(item, '使用', async () => { $('workbenchDialog').close(); await applyTemplate(value.id); }, true);
+    actionButton(item, '删除', async () => { if (confirm(`删除模板“${value.name}”？`)) { await api(`/v1/productivity/templates/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    return item;
+  }));
+}
+
+async function addTemplate() {
+  const name = prompt('模板名称'); if (!name) return;
+  const shortcut = prompt('快捷指令，例如 /review', `/${name.toLowerCase().replace(/\s+/g, '-')}`); if (shortcut === null) return;
+  const promptText = prompt('Prompt（变量写成 ${repository}）'); if (!promptText) return;
+  const variablesText = prompt('变量默认值 JSON', '{"repository":"当前仓库","outputFormat":"Markdown"}'); if (variablesText === null) return;
+  const variables = JSON.parse(variablesText || '{}');
+  await api('/v1/productivity/templates', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, shortcut, prompt: promptText, variables, attachmentRequirements: prompt('附件要求（可空）', '') || '', allowedTools: [], modelProfileId: state.modelProfileId || null})});
+  await Promise.all([loadP1Data(), refreshComposerOptions()]);
+}
+
+function renderProfiles(values) {
+  $('profileList').replaceChildren(...values.map(value => {
+    const item = workbenchItem(`${value.defaultProfile ? '★ ' : ''}${value.name}`, `${value.localModel ? '本地模型' : '远程模型'} · ${value.model} · ${value.maxContextTokens.toLocaleString()} ctx · fallback ${value.fallbackModel || '无'}`);
+    actionButton(item, '选用', () => { state.modelProfileId = value.id; localStorage.setItem('paicli_model_profile', value.id); $('modelProfile').value = value.id; scheduleEstimate(); });
+    actionButton(item, '删除', async () => { if (confirm(`删除模型方案“${value.name}”？`)) { await api(`/v1/productivity/model-profiles/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    return item;
+  }));
+  if (!values.length) $('profileList').append(element('div', 'hint', '暂无项目级模型方案；继续使用服务端默认模型'));
+}
+
+async function addProfile() {
+  const name = prompt('方案名称，例如 快速 / 深度 / 本地模型'); if (!name) return;
+  const baseUrl = prompt('OpenAI-compatible Base URL', 'https://api.openai.com/v1'); if (!baseUrl) return;
+  const model = prompt('模型名称'); if (!model) return;
+  const apiKeyEnv = prompt('API Key 环境变量名（本地无密钥可空）', 'PAICLI_MODEL_API_KEY'); if (apiKeyEnv === null) return;
+  const fallbackModel = prompt('Fallback 模型（可空）', '') || '';
+  const localModel = confirm('这是本地模型吗？本地模型只统计耗时，不计算价格。');
+  await api('/v1/productivity/model-profiles', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, baseUrl, apiKeyEnv, model, fallbackModel, maxContextTokens: +(prompt('上下文上限', '128000') || 128000), maxOutputTokens: +(prompt('输出上限', '4096') || 4096), inputPrice: localModel ? 0 : +(prompt('输入价格 USD / 1M Token', '0') || 0), outputPrice: localModel ? 0 : +(prompt('输出价格 USD / 1M Token', '0') || 0), localModel, makeDefault: confirm('设为项目默认模型方案？')})});
+  await Promise.all([loadP1Data(), refreshComposerOptions()]);
+}
+
+function renderQueue(values) {
+  $('queueList').replaceChildren(...values.map(value => {
+    const run = value.run; const remaining = value.remainingBudgetTokens < 0 ? '预算不限' : `项目余量 ${value.remainingBudgetTokens.toLocaleString()} Token`;
+    const item = workbenchItem(`${run.status} · ${value.sessionTitle}`, `${run.id} · step ${run.currentStep} · 优先级 ${run.priority} · ${Math.round(value.elapsedMs / 1000)}s · 已用 ${value.usedTokens.toLocaleString()} Token · ${remaining} · retry ${run.retryCount}`);
+    if (run.status === 'QUEUED') { actionButton(item, '提高优先级', () => setRunPriority(run.id, run.priority + 1)); actionButton(item, '取消', () => batchQueue([run.id], 'CANCEL')); }
+    if (run.status === 'FAILED' || run.status === 'CANCELED') actionButton(item, '重新排队', () => batchQueue([run.id], 'REQUEUE'), true);
+    return item;
+  }));
+  if (!values.length) $('queueList').append(element('div', 'hint', '当前没有排队、运行、待审批或失败任务'));
+}
+async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadP1Data(); }
+async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadP1Data(); }
+
+function renderSchedules(values, templates) {
+  $('scheduleList').replaceChildren(...values.map(value => {
+    const template = templates.find(item => item.id === value.templateId); const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
+    actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } }); return item;
+  }));
+}
+async function addSchedule() {
+  if (!state.templates.length) return showNotice('请先创建任务模板', true);
+  const name = prompt('定时任务名称'); if (!name) return;
+  const templateId = prompt(`模板 ID：\n${state.templates.map(v => `${v.id} · ${v.name}`).join('\n')}`, state.templates[0].id); if (!templateId) return;
+  const scheduleType = (prompt('类型：ONCE / DAILY / WEEKLY / CRON', 'DAILY') || '').toUpperCase(); if (!scheduleType) return;
+  const scheduleValue = scheduleType === 'CRON' ? prompt('Spring Cron（6 段，例如 0 0 9 * * MON-FRI）', '0 0 9 * * *') : '';
+  await api('/v1/productivity/schedules', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, templateId, scheduleType, scheduleValue, variables: {}, enabled: true, nextRunAt: new Date(Date.now() + 60000).toISOString()})}); await loadP1Data();
+}
+
+function renderNotifications(values) {
+  $('notificationList').replaceChildren(...values.map(value => { const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.type} · ${value.events} · 密钥环境变量 ${value.secretEnv || '无'}`); actionButton(item, '删除', async () => { await api(`/v1/productivity/notifications/${value.id}`, {method: 'DELETE'}); await loadP1Data(); }); return item; }));
+}
+async function addNotification() {
+  const type = (prompt('通知类型：BROWSER / WEBHOOK / EMAIL / IM', 'BROWSER') || '').toUpperCase(); if (!type) return;
+  if (type === 'BROWSER') { if ('Notification' in window) await Notification.requestPermission(); }
+  const name = prompt('通知名称', type === 'BROWSER' ? '浏览器通知' : `${type} 通知`); if (!name) return;
+  const endpoint = type === 'BROWSER' ? '' : prompt('Webhook 接收地址（邮件/企业 IM 使用对应网关）', ''); if (endpoint === null) return;
+  const secretEnv = type === 'BROWSER' ? '' : prompt('服务端密钥环境变量名（可空）', '') || '';
+  await api('/v1/productivity/notifications', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), name, type, endpoint, secretEnv, events: ['COMPLETED','FAILED','WAITING_APPROVAL','BUDGET_INSUFFICIENT'], enabled: true})}); await loadP1Data();
+}
+
+async function exportSession(format) {
+  if (!state.sessionId) return showNotice('请先选择对话', true);
+  const response = await fetch(`/v1/sessions/${state.sessionId}/export?format=${format}&redactSecrets=${$('redactExport').checked}`, {headers: headers(false)});
+  if (!response.ok) throw new Error(await response.text()); const url = URL.createObjectURL(await response.blob()); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `paicli-session.${format === 'markdown' ? 'md' : 'json'}`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function importSession(file) {
+  const payload = await file.text(); const session = await api('/v1/sessions/import', {method: 'POST', body: JSON.stringify({projectKey: currentProjectKey(), payload, redactSecrets: $('redactExport').checked})}); await refreshSessions(); await selectSession(session.id); $('workbenchDialog').close();
 }
 
 async function searchAll() {
@@ -1015,7 +1283,10 @@ $('send').onclick = sendMessage;
 $('attach').onclick = () => $('attachmentInput').click();
 $('attachmentInput').onchange = () => uploadAttachments([...$('attachmentInput').files]);
 $('stop').onclick = stopRun;
-$('input').oninput = resizeInput;
+$('input').oninput = () => {
+  resizeInput(); scheduleEstimate();
+  if (state.sessionId) localStorage.setItem(`paicli_draft_${state.sessionId}`, $('input').value);
+};
 $('input').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
@@ -1052,8 +1323,23 @@ $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll();
 $('refreshMemories').onclick = loadManagedMemories;
 $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
+$('refreshP1').onclick = loadP1Data;
+$('refreshQueue').onclick = loadP1Data;
+$('addTemplate').onclick = () => addTemplate().catch(error => showNotice(error.message, true));
+$('addProfile').onclick = () => addProfile().catch(error => showNotice(error.message, true));
+$('addSchedule').onclick = () => addSchedule().catch(error => showNotice(error.message, true));
+$('addNotification').onclick = () => addNotification().catch(error => showNotice(error.message, true));
+$('quickTemplate').onchange = () => applyTemplate($('quickTemplate').value);
+$('modelProfile').onchange = () => {
+  state.modelProfileId = $('modelProfile').value;
+  localStorage.setItem('paicli_model_profile', state.modelProfileId);
+  scheduleEstimate();
+};
+document.querySelectorAll('[data-export]').forEach(button => button.onclick = () => exportSession(button.dataset.export).catch(error => showNotice(`导出失败：${error.message}`, true)));
+$('sessionImport').onchange = () => { const file = $('sessionImport').files[0]; if (file) importSession(file).catch(error => showNotice(`导入失败：${error.message}`, true)); };
 $('closeCapabilities').onclick = () => $('capabilityDialog').close();
 $('importSkill').onclick = importSkill;
+$('addMcp').onclick = () => addMcp().catch(error => showNotice(`MCP 配置失败：${error.message}`, true));
 $('uploadKnowledge').onclick = uploadKnowledge;
 $('close').onclick = () => $('dialog').close();
 $('save').onclick = () => {
@@ -1063,6 +1349,10 @@ $('save').onclick = () => {
 };
 document.addEventListener('click', () => {
   document.querySelectorAll('.session-menu.open').forEach(menu => menu.classList.remove('open'));
+});
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('input').focus(); }
+  if (event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); createSession(); }
 });
 
 $('workspace').classList.toggle('hide-detail', !state.detailOpen);

@@ -25,7 +25,7 @@ public class SkillController {
 
     @GetMapping
     public List<SkillService.SkillDescriptor> list(@RequestParam String projectKey) {
-        return skills.list(projectKey);
+        return skills.lifecycle(projectKey);
     }
 
     @PostMapping("/imports")
@@ -43,4 +43,28 @@ public class SkillController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "skill not found");
         }
     }
+
+    @PostMapping("/imports/inspect")
+    public SkillService.SkillInspection inspect(@Valid @RequestBody ApiDtos.ImportSkillRequest request){return skills.inspectFromGit(request.gitUrl(),request.name(),request.ref());}
+
+    @PostMapping("/{name}/state")
+    public SkillService.SkillDescriptor state(@PathVariable String name,@RequestParam String projectKey,
+                                              @RequestParam(defaultValue="false")boolean global,
+                                              @RequestParam boolean enabled,
+                                              @RequestParam(defaultValue="false")boolean pinned){
+        return skills.setState(projectKey,name,global,enabled,pinned);
+    }
+
+    @GetMapping("/{name}/files")
+    public List<String> files(@PathVariable String name,@RequestParam String projectKey){return skills.fileManifest(projectKey,name);}
+
+    @GetMapping("/{name}/updates")
+    public SkillService.SkillUpdateStatus updates(@PathVariable String name,@RequestParam String projectKey,
+                                                  @RequestParam(defaultValue="false")boolean global){return skills.checkForUpdate(projectKey,name,global);}
+    @PostMapping("/{name}/upgrade")
+    public SkillService.SkillDescriptor upgrade(@PathVariable String name,@RequestParam String projectKey,
+                                                @RequestParam(defaultValue="false")boolean global){return skills.upgrade(projectKey,name,global);}
+    @PostMapping("/{name}/rollback")
+    public SkillService.SkillDescriptor rollback(@PathVariable String name,@RequestParam String projectKey,
+                                                 @RequestParam(defaultValue="false")boolean global){return skills.rollback(projectKey,name,global);}
 }

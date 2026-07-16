@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,6 +19,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.UUID;
+import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.Comparator;
@@ -48,7 +50,8 @@ public class SkillService {
         Map<String, SkillDescriptor> skills = new LinkedHashMap<>();
         loadDirectory(dataRoot.resolve("skills"), "global", skills);
         loadDirectory(projectDirectory(projectKey).resolve("skills"), "project", skills);
-        return skills.values().stream().sorted((a, b) -> a.name().compareTo(b.name())).toList();
+        return skills.values().stream().filter(SkillDescriptor::enabled)
+                .sorted((a, b) -> a.name().compareTo(b.name())).toList();
     }
 
     public SkillContent load(String projectKey, String name) {
@@ -168,8 +171,12 @@ public class SkillService {
             }
             Path source = locateSkillRoot(checkout, name);
             validateImport(source);
+            String commit = runProcess(List.of("git", "-C", checkout.toString(), "rev-parse", "HEAD"),
+                    20, "read skill commit").trim();
             Files.createDirectories(targetRoot);
             copyTree(source, target);
+            writeMetadata(target, gitSource.remoteUrl(), gitSource.ref(), commit, global ? "global" : "project",
+                    true, false, Instant.now().toString());
             return list(projectKey).stream().filter(skill -> skill.name().equals(name)).findFirst()
                     .orElseThrow(() -> new IllegalStateException("imported repository has no valid SKILL.md"));
         } catch (InterruptedException e) {
@@ -184,7 +191,7 @@ public class SkillService {
         }
     }
 
-    private static void runProcess(List<String> command, long timeoutSeconds, String operation) throws Exception {
+    private static String runProcess(List<String> command, long timeoutSeconds, String operation) throws Exception {
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
         CompletableFuture<String> output = CompletableFuture.supplyAsync(() -> drainOutput(process.getInputStream()));
         boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
@@ -197,6 +204,7 @@ public class SkillService {
         }
         String text = output.get(5, TimeUnit.SECONDS).trim();
         if (process.exitValue() != 0) throw new IllegalStateException(operation + " failed: " + text);
+        return text;
     }
 
     private static String drainOutput(InputStream input) {
@@ -221,6 +229,99 @@ public class SkillService {
         if (!target.startsWith(root) || !Files.exists(target)) return false;
         deleteTree(target);
         return !Files.exists(target);
+    }
+
+    public SkillInspection inspectFromGit(String gitUrl,String requestedName,String ref){
+        GitSource source=normalizeGitSource(gitUrl,ref);NetworkPolicy.requirePublicHttpUrl(source.remoteUrl());
+        String name=normalizeSkillName(requestedName,source.remoteUrl());Path checkout=dataRoot.resolve(".skill-imports").resolve(UUID.randomUUID().toString()).normalize();
+        try{Files.createDirectories(checkout.getParent());List<String> command=new ArrayList<>(List.of("git","-c","http.version=HTTP/1.1","clone","--depth","1"));
+            if(source.ref()!=null)command.addAll(List.of("--branch",source.ref()));command.addAll(List.of("--",source.remoteUrl(),checkout.toString()));runProcess(command,180,"inspect skill repository");
+            Path root=locateSkillRoot(checkout,name);validateImport(root);String header=Files.readString(root.resolve("SKILL.md"),StandardCharsets.UTF_8);
+            Map<String,String> fields=frontmatter(header.substring(0,Math.min(header.length(),8_000)));List<String> files;
+            try(var paths=Files.walk(root)){files=paths.filter(Files::isRegularFile).map(root::relativize).map(value->value.toString().replace('\\','/')).sorted().limit(MAX_IMPORT_FILES).toList();}
+            return new SkillInspection(name,source.remoteUrl(),source.ref()==null?"":source.ref(),fields.getOrDefault("permissions","未声明"),files);
+        }catch(Exception e){throw e instanceof RuntimeException runtime?runtime:new IllegalStateException("skill inspection failed",e);}finally{deleteTree(checkout);}
+    }
+
+    public List<SkillDescriptor> lifecycle(String projectKey) {
+        Map<String, SkillDescriptor> skills = new LinkedHashMap<>();
+        loadDirectory(dataRoot.resolve("skills"), "global", skills);
+        loadDirectory(projectDirectory(projectKey).resolve("skills"), "project", skills);
+        return skills.values().stream().sorted(Comparator.comparing(SkillDescriptor::name)).toList();
+    }
+
+    public SkillDescriptor setState(String projectKey, String name, boolean global, boolean enabled, boolean pinned) {
+        SkillDescriptor descriptor = lifecycle(projectKey).stream()
+                .filter(value -> value.name().equals(name) && value.source().equals(global ? "global" : "project"))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("skill not found: " + name));
+        Properties metadata = metadata(descriptor.path().getParent());
+        writeMetadata(descriptor.path().getParent(), metadata.getProperty("repository", ""),
+                metadata.getProperty("ref", ""), metadata.getProperty("commit", ""), descriptor.source(),
+                enabled, pinned, metadata.getProperty("installedAt", Instant.now().toString()));
+        return lifecycle(projectKey).stream().filter(value -> value.name().equals(name)
+                && value.source().equals(descriptor.source())).findFirst().orElseThrow();
+    }
+
+    public List<String> fileManifest(String projectKey, String name) {
+        SkillDescriptor descriptor = lifecycle(projectKey).stream().filter(value -> value.name().equals(name))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("skill not found: " + name));
+        Path root = descriptor.path().getParent();
+        try (var paths = Files.walk(root, 8)) {
+            return paths.filter(Files::isRegularFile).map(root::relativize)
+                    .map(value -> value.toString().replace('\\', '/')).sorted().limit(MAX_IMPORT_FILES).toList();
+        } catch (IOException e) { throw new IllegalStateException("failed to list skill files", e); }
+    }
+
+    public SkillUpdateStatus checkForUpdate(String projectKey,String name,boolean global){
+        SkillDescriptor descriptor=descriptor(projectKey,name,global);if(descriptor.repository().isBlank())
+            return new SkillUpdateStatus(name,descriptor.commit(),"",false,"本地 Skill 没有来源仓库");
+        try{
+            NetworkPolicy.requirePublicHttpUrl(descriptor.repository());
+            String ref=descriptor.ref().isBlank()?"HEAD":descriptor.ref();
+            String output=runProcess(List.of("git","-c","http.version=HTTP/1.1","ls-remote","--",descriptor.repository(),ref),60,"check skill update");
+            String latest=output.isBlank()?"":output.split("\\s+")[0];
+            return new SkillUpdateStatus(name,descriptor.commit(),latest,!latest.isBlank()&&!latest.equals(descriptor.commit()),"");
+        }catch(Exception e){return new SkillUpdateStatus(name,descriptor.commit(),"",false,e.getMessage());}
+    }
+
+    public SkillDescriptor upgrade(String projectKey,String name,boolean global){
+        SkillDescriptor descriptor=descriptor(projectKey,name,global);if(descriptor.pinned())throw new IllegalStateException("skill version is pinned");
+        if(descriptor.repository().isBlank())throw new IllegalStateException("local skill cannot be upgraded from Git");
+        Path target=descriptor.path().getParent();Path backup=rollbackPath(descriptor.source(),name);
+        try{deleteTree(backup);Files.createDirectories(backup.getParent());copyTree(target,backup);deleteTree(target);
+            return importFromGit(projectKey,descriptor.repository(),name,descriptor.ref(),global);
+        }catch(Exception e){if(!Files.exists(target)&&Files.exists(backup)){try{copyTree(backup,target);}catch(Exception ignored){}}
+            throw e instanceof RuntimeException runtime?runtime:new IllegalStateException("skill upgrade failed",e);}
+    }
+
+    public SkillDescriptor rollback(String projectKey,String name,boolean global){
+        SkillDescriptor descriptor=descriptor(projectKey,name,global);Path backup=rollbackPath(descriptor.source(),name);
+        if(!Files.isDirectory(backup))throw new IllegalStateException("no rollback version is available");
+        Path target=descriptor.path().getParent();try{deleteTree(target);copyTree(backup,target);return descriptor(projectKey,name,global);}
+        catch(Exception e){throw new IllegalStateException("skill rollback failed",e);}
+    }
+
+    private SkillDescriptor descriptor(String projectKey,String name,boolean global){return lifecycle(projectKey).stream()
+            .filter(value->value.name().equals(name)&&value.source().equals(global?"global":"project"))
+            .findFirst().orElseThrow(()->new IllegalArgumentException("skill not found: "+name));}
+    private Path rollbackPath(String scope,String name){return dataRoot.resolve(".skill-rollbacks").resolve(scope).resolve(name).normalize();}
+
+    private static void writeMetadata(Path root, String repository, String ref, String commit, String scope,
+                                      boolean enabled, boolean pinned, String installedAt) {
+        Properties values = new Properties(); values.setProperty("repository", repository == null ? "" : repository);
+        values.setProperty("ref", ref == null ? "" : ref); values.setProperty("commit", commit == null ? "" : commit);
+        values.setProperty("scope", scope); values.setProperty("enabled", Boolean.toString(enabled));
+        values.setProperty("pinned", Boolean.toString(pinned)); values.setProperty("installedAt", installedAt);
+        try { Files.createDirectories(root); try (var output = Files.newOutputStream(root.resolve(".paicli-skill.properties"))) {
+            values.store(output, "PaiCLI Skill lifecycle metadata; contains no secrets");
+        }} catch (IOException e) { throw new IllegalStateException("failed to write skill metadata", e); }
+    }
+
+    private static Properties metadata(Path root) {
+        Properties values = new Properties(); Path file = root.resolve(".paicli-skill.properties");
+        if (!Files.isRegularFile(file)) return values;
+        try (var input = Files.newInputStream(file)) { values.load(input); } catch (IOException ignored) { }
+        return values;
     }
 
     private static String normalizeSkillName(String requested, String gitUrl) {
@@ -349,7 +450,12 @@ public class SkillService {
                 if (!NAME.matcher(name).matches()) continue;
                 String description = fields.getOrDefault("description", "").trim();
                 if (description.length() > 500) description = description.substring(0, 500);
-                target.put(name, new SkillDescriptor(name, description, source, file));
+                Properties metadata = metadata(directory);
+                boolean enabled = Boolean.parseBoolean(metadata.getProperty("enabled", "true"));
+                target.put(name, new SkillDescriptor(name, description, source,
+                        metadata.getProperty("repository", ""), metadata.getProperty("ref", ""),
+                        metadata.getProperty("commit", ""), metadata.getProperty("installedAt", ""),
+                        enabled, Boolean.parseBoolean(metadata.getProperty("pinned", "false")), file));
             }
         } catch (Exception e) {
             throw new IllegalStateException("failed to scan skills under " + normalized, e);
@@ -382,10 +488,14 @@ public class SkillService {
         return fields;
     }
 
-    public record SkillDescriptor(String name, String description, String source, @JsonIgnore Path path) { }
+    public record SkillDescriptor(String name, String description, String source, String repository, String ref,
+                                  String commit, String installedAt, boolean enabled, boolean pinned,
+                                  @JsonIgnore Path path) { }
     public record SkillContent(String name, String description, String source, String content,
                                List<String> resources) { }
     public record SkillResource(String skill, String path, String content, int offset, int end,
                                 int totalChars, boolean truncated) { }
+    public record SkillUpdateStatus(String name,String currentCommit,String latestCommit,boolean updateAvailable,String error) { }
+    public record SkillInspection(String name,String repository,String ref,String permissions,List<String> files) { }
     record GitSource(String remoteUrl, String ref) { }
 }

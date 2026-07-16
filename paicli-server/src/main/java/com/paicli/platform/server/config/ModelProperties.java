@@ -69,7 +69,6 @@ public record ModelProperties(
             if (!"http".equalsIgnoreCase(endpoint.getScheme()) && !"https".equalsIgnoreCase(endpoint.getScheme())) {
                 throw new IllegalArgumentException("model baseUrl must use http or https");
             }
-            if (apiKey.isBlank()) throw new IllegalArgumentException("model apiKey is required for openai-compatible");
         }
     }
 

@@ -43,6 +43,8 @@
       <div class="compose">
         <div class="approvals" id="approvals"></div>
         <div class="model-controls">
+          <select id="quickTemplate" title="任务模板"><option value="">快捷指令</option></select>
+          <select id="modelProfile" title="模型配置方案"><option value="">默认模型</option></select>
           <span>深度思考</span>
           <button class="mode-button" data-thinking="disabled">关闭</button>
           <button class="mode-button" data-thinking="enabled">开启</button>
@@ -50,6 +52,7 @@
           <button class="mode-button" data-effort="high">高</button>
           <button class="mode-button" data-effort="max">最高</button>
         </div>
+        <div class="estimate" id="estimate">提交前将估算上下文、输出上限和成本风险</div>
         <div class="attachment-preview" id="attachmentPreview"></div>
         <div class="composer-box" id="composer">
           <button class="attach-button" id="attach" title="添加图片或文档" aria-label="添加图片或文档">＋</button>
@@ -103,10 +106,49 @@
     </div>
     <div class="managed-list" id="knowledgeList"></div>
   </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>MCP Server</h3><button class="secondary" id="addMcp">新增</button></div>
+    <p class="hint">敏感 Header 仅保存环境变量名，例如 <code>env:MCP_TOKEN</code>，不会保存或回显真实值。</p>
+    <div class="managed-list" id="mcpList"></div>
+  </section>
 </dialog>
 <dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
   <div class="dialog-title"><strong>业务工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
   <div class="hint" id="workbenchProject">当前项目：default</div>
+  <section class="capability-section p1-overview">
+    <div class="section-title"><h3>P1 长期使用效率</h3><button class="secondary" id="refreshP1">刷新</button></div>
+    <div class="capability-status" id="usageSummary"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div>
+    <div class="managed-list" id="templateList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>模型配置方案</h3><button class="primary" id="addProfile">新建方案</button></div>
+    <div class="managed-list" id="profileList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>Run 队列</h3><button class="secondary" id="refreshQueue">刷新</button></div>
+    <div class="managed-list" id="queueList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>定时任务</h3><button class="primary" id="addSchedule">新建定时任务</button></div>
+    <div class="managed-list" id="scheduleList"></div>
+  </section>
+  <section class="capability-section">
+    <div class="section-title"><h3>完成通知</h3><button class="primary" id="addNotification">新增通知</button></div>
+    <div class="managed-list" id="notificationList"></div>
+  </section>
+  <section class="capability-section">
+    <h3>Session 导入导出</h3>
+    <div class="portability-actions">
+      <button class="secondary" data-export="markdown">导出 Markdown</button>
+      <button class="secondary" data-export="json">导出 JSON</button>
+      <button class="secondary" data-export="audit">完整审计包</button>
+      <label class="secondary file-action">导入 JSON<input id="sessionImport" type="file" accept="application/json,.json" hidden></label>
+      <label><input id="redactExport" type="checkbox"> 隐私脱敏</label>
+    </div>
+  </section>
   <section class="capability-section">
     <h3>全局检索</h3>
     <div class="workbench-search"><input id="globalSearch" placeholder="搜索对话、消息、Memory、知识和 Artifact"><button class="primary" id="searchAll">搜索</button></div>
@@ -135,6 +177,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260715-p0-workbench"></script>
+<script src="/app.js?v=20260716-p1-productivity"></script>
 </body>
 </html>

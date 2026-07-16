@@ -84,7 +84,7 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
         }
     }
 
@@ -225,6 +225,53 @@ class SqliteRuntimeStoreTest {
         assertThat(events).hasSize(61);
         assertThat(events).extracting("sequence").containsExactlyElementsOf(
                 java.util.stream.LongStream.rangeClosed(1, 61).boxed().toList());
+    }
+
+    @Test
+    void persistsP1TemplatesProfilesBudgetsQueueSchedulesAndNotifications() throws Exception {
+        SqliteRuntimeStore store = store();
+        ProductivityStore productivity = new ProductivityStore(properties());
+        var profile = productivity.saveModelProfile(null, "project-p1", "快速",
+                "http://127.0.0.1:11434/v1", "", "qwen-local", "", 32_000, 2_048,
+                0, 0, true, true);
+        var template = productivity.saveTemplate(null, "project-p1", "代码审查", "/review",
+                "审查 ${repository}", "{\"repository\":\"repo\"}", "代码附件",
+                "read_file,search", profile.id());
+        var budget = productivity.saveBudget("project-p1", 10_000, 100_000, 1, 10, .8, 2);
+        var session = store.createSession("P1", "project-p1");
+        var run = store.createRun(session.id(), "review", "disabled", "", List.of(), profile.id(), 5, 0);
+        store.recordModelUsage(run.id(), "openai-compatible", profile.model(), 100, 90, 10, 20,
+                250, 1, true);
+        var schedule = productivity.saveSchedule(null, "project-p1", "日报", template.id(),
+                "DAILY", "", "{}", true, java.time.Instant.now().minusSeconds(1));
+        var channel = productivity.saveNotification(null, "project-p1", "浏览器", "BROWSER",
+                "", "", "COMPLETED,FAILED", true);
+
+        assertThat(productivity.templates("project-p1")).containsExactly(template);
+        assertThat(productivity.resolveModelProfile("project-p1", null)).contains(profile);
+        assertThat(budget.maxConcurrentRuns()).isEqualTo(2);
+        assertThat(productivity.queue("project-p1")).singleElement()
+                .satisfies(item -> {
+                    assertThat(item.run().priority()).isEqualTo(5);
+                    assertThat(item.usedTokens()).isEqualTo(100);
+                    assertThat(item.remainingBudgetTokens()).isEqualTo(99_900);
+                });
+        assertThat(productivity.usage("project-p1", 30)).satisfies(value -> {
+            assertThat(value.calls()).isEqualTo(1);
+            assertThat(value.inputTokens()).isEqualTo(90);
+            assertThat(value.cachedTokens()).isEqualTo(20);
+            assertThat(value.averageDurationMs()).isEqualTo(250);
+            assertThat(value.estimatedCost()).isZero();
+            assertThat(value.breakdown()).singleElement().satisfies(row -> {
+                assertThat(row.sessionId()).isEqualTo(session.id());
+                assertThat(row.model()).isEqualTo("qwen-local");
+                assertThat(row.localModel()).isTrue();
+            });
+        });
+        assertThat(productivity.dueSchedules()).contains(schedule);
+        assertThat(productivity.claimSchedule(schedule.id())).isTrue();
+        productivity.completeSchedule(schedule.id(), run.id(), java.time.Instant.now().plusSeconds(60));
+        assertThat(productivity.notificationChannels("project-p1")).containsExactly(channel);
     }
 
     @Test
