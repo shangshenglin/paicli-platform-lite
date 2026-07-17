@@ -865,7 +865,8 @@ async function retryRun(branch) {
 
 async function openWorkbench() {
   $('workbenchProject').textContent = `当前项目：${currentProjectKey()}`;
-  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification', 'addEvaluationSuite'].map($);
+  const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification',
+    'installEvaluationStarterPack', 'addEvaluationSuite'].map($);
   creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
   try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data(), loadEvaluations()]); }
@@ -904,6 +905,7 @@ async function loadEvaluations() {
         const child = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`,
           `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} Token` : ''}`);
         child.classList.add('evaluation-case-item');
+        actionButton(child, value.enabled ? '停用' : '启用', () => setEvaluationCaseEnabled(value, !value.enabled));
         actionButton(child, '删除', async () => {
           if (!confirm(`删除评测用例“${value.name}”？`)) return;
           try { await api(`/v1/evaluations/cases/${value.id}`, {method: 'DELETE'}); await loadEvaluations(); }
@@ -917,6 +919,25 @@ async function loadEvaluations() {
     if (!nodes.length) $('evaluationSuiteList').append(element('div', 'hint', '尚未创建评测套件。先建立一组关键任务和确定性规则。'));
     if (currentEvaluationExecution) await loadEvaluationReport(currentEvaluationExecution, false);
   } catch (error) { showNotice(`评测中心加载失败：${error.message}`, true); }
+}
+
+async function installEvaluationStarterPack() {
+  if (!confirm('安装官方入门评测集？已存在的同名套件和用例会保留，不会覆盖你的修改。')) return;
+  const button = $('installEvaluationStarterPack'); button.disabled = true;
+  try {
+    const result = await api(`/v1/evaluations/starter-pack?projectKey=${encodeURIComponent(currentProjectKey())}`,
+      {method: 'POST', body: '{}'});
+    await loadEvaluations();
+    showNotice(`官方评测集 ${result.version}：新增 ${result.installedSuites} 个套件、${result.installedCases} 个用例，跳过 ${result.skippedCases} 个已有用例`);
+  } catch (error) { showNotice(`官方评测集安装失败：${error.message}`, true); }
+  finally { button.disabled = false; }
+}
+
+async function setEvaluationCaseEnabled(value, enabled) {
+  try {
+    await api(`/v1/evaluations/cases/${value.id}`, {method: 'PUT', body: JSON.stringify({...value, enabled})});
+    await loadEvaluations(); showNotice(`评测用例已${enabled ? '启用' : '停用'}`);
+  } catch (error) { showNotice(`评测用例状态更新失败：${error.message}`, true); }
 }
 
 function openEvaluationSuiteDialog() {
@@ -1757,6 +1778,7 @@ $('refreshP1').onclick = loadP1Data;
 $('refreshQueue').onclick = loadP1Data;
 $('refreshEvaluations').onclick = loadEvaluations;
 $('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
+$('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
 $('addTemplate').onclick = openTemplateDialog;
 $('addProfile').onclick = openProfileDialog;
 $('addSchedule').onclick = openScheduleDialog;

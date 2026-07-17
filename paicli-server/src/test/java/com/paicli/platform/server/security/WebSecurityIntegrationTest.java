@@ -69,6 +69,10 @@ class WebSecurityIntegrationTest {
                         "id=\"memoryMergeForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"memoryRevisionForm\"")));
+        mvc.perform(get("/index.html"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"installEvaluationStarterPack\"")));
         mvc.perform(get("/app.js"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

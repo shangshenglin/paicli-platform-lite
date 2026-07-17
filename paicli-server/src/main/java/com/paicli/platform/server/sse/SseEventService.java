@@ -57,7 +57,7 @@ public class SseEventService {
         long lastHeartbeat = System.currentTimeMillis();
         try {
             while (!closed.get()) {
-                List<RunEventRecord> events = store.events(runId, cursor);
+                List<RunEventRecord> events = store.events(runId, cursor, 200);
                 for (RunEventRecord event : events) {
                     emitter.send(SseEmitter.event()
                             .id(Long.toString(event.id()))

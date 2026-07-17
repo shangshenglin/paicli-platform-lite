@@ -23,7 +23,10 @@ import com.paicli.platform.server.productivity.CompletionNotificationService;
 import com.paicli.platform.server.tool.ToolRouter;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.slf4j.MDC;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -77,8 +80,19 @@ public class RunProcessor {
     }
 
     public void process(RunRecord claimedRun) {
+        MDC.put("runId", claimedRun.id());
+        try {
+            processInternal(claimedRun);
+        } finally {
+            MDC.remove("runId");
+            MDC.remove("toolCallId");
+        }
+    }
+
+    private void processInternal(RunRecord claimedRun) {
         long processStarted = System.nanoTime();
         RunRecord run = store.findRun(claimedRun.id()).orElseThrow();
+        String budgetReservationKey = null;
         if (run.status() == RunStatus.CANCELED) return;
         try {
             var resumableTool = store.findResumableToolCall(run.id());
@@ -87,18 +101,35 @@ public class RunProcessor {
                 return;
             }
             if (modelProperties != null && (run.currentStep() >= modelProperties.maxRunSteps()
-                    || store.modelTokensForRun(run.id()) >= modelProperties.maxRunTokens())) {
-                throw new IllegalStateException("run model budget exceeded");
+                    || store.modelTokensForRun(run.id()) >= modelProperties.maxRunTokens()
+                    || store.countToolCallsForRun(run.id()) >= modelProperties.maxToolCallsPerRun()
+                    || Duration.between(run.createdAt(), Instant.now()).getSeconds()
+                    >= modelProperties.maxRunDurationSeconds())) {
+                throw new IllegalStateException("run execution budget exceeded");
             }
             store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
-            if (metrics != null) metrics.modelCall();
+            if (metrics != null) metrics.modelCall(modelClient.name(), run.modelProfileId());
             store.appendEvent(run.id(), "model.started", json(Map.of("provider", modelClient.name())));
-            ContextManager.PreparedContext context = contextManager.prepare(run.sessionId(), run.id());
+            var session = store.findSession(run.sessionId()).orElseThrow();
             var profile = productivity == null ? java.util.Optional.<ProductivityStore.ModelProfile>empty()
-                    : store.findSession(run.sessionId()).flatMap(session ->
-                    productivity.resolveModelProfile(session.projectKey(), run.modelProfileId()));
+                    : productivity.resolveModelProfile(session.projectKey(), run.modelProfileId());
+            ContextManager.PreparedContext context = profile
+                    .map(value -> contextManager.prepare(run.sessionId(), run.id(),
+                            value.maxContextTokens(), value.maxOutputTokens()))
+                    .orElseGet(() -> contextManager.prepare(run.sessionId(), run.id()));
             var request = profile.map(value -> context.request().withRoute(productivity.route(value)))
                     .orElse(context.request());
+            if (productivity != null) {
+                budgetReservationKey = run.id() + ":" + run.currentStep();
+                long reservedTokens = (long) context.estimatedInputTokens() + request.maxOutputTokens();
+                double reservedCost = profile.map(value -> value.localModel() ? 0d
+                        : context.estimatedInputTokens() / 1_000_000d * value.inputPrice()
+                        + request.maxOutputTokens() / 1_000_000d * value.outputPrice()).orElse(0d);
+                if (!productivity.reserveModelBudget(session.projectKey(), budgetReservationKey,
+                        reservedTokens, reservedCost)) {
+                    throw new IllegalStateException("project model budget exceeded including active reservations");
+                }
+            }
             ModelResponse response;
             long modelStarted = System.nanoTime();
             try (ModelDeltaEventBuffer deltas = new ModelDeltaEventBuffer(store, mapper, run.id())) {
@@ -108,20 +139,23 @@ public class RunProcessor {
             String modelName = profile.map(ProductivityStore.ModelProfile::model).orElse(modelClient.name());
             store.recordModelUsage(run.id(), modelClient.name(), modelName, context.estimatedInputTokens(),
                     response.usage().inputTokens(), response.usage().outputTokens(),
-                    response.usage().cachedInputTokens(), durationMs, run.retryCount(),
-                    profile.map(ProductivityStore.ModelProfile::localModel).orElse(false));
+                    response.usage().cachedInputTokens(), durationMs, store.modelRetriesForRun(run.id()),
+                    profile.map(ProductivityStore.ModelProfile::localModel).orElse(false), budgetReservationKey);
+            budgetReservationKey = null;
             if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) return;
 
             if (!response.hasToolCalls()) {
-                store.appendAssistantMessage(run.sessionId(), run.id(), response.content(),
-                        response.reasoningContent());
-                store.appendEvent(run.id(), "model.completed", json(Map.of(
+                boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(),
+                        response.content(), response.reasoningContent(), json(Map.of(
                         "content", response.content(),
                         "estimatedInputTokens", context.estimatedInputTokens(),
                         "inputTokens", response.usage().inputTokens(),
                         "outputTokens", response.usage().outputTokens(),
                         "cachedInputTokens", response.usage().cachedInputTokens())));
-                store.completeRun(run.id());
+                if (!completed) {
+                    toolRouter.release(run.id());
+                    return;
+                }
                 notify(run, "COMPLETED", "任务已完成");
                 if (memoryService != null) {
                     try { memoryService.enqueue(run.id()); }
@@ -133,6 +167,12 @@ public class RunProcessor {
                 return;
             }
 
+            if (modelProperties != null && (response.toolCalls().size() > modelProperties.maxToolCallsPerTurn()
+                    || store.countToolCallsForRun(run.id()) + response.toolCalls().size()
+                    > modelProperties.maxToolCallsPerRun())) {
+                throw new IllegalStateException("tool call budget exceeded");
+            }
+
             List<SqliteRuntimeStore.ToolCallDraft> drafts = new ArrayList<>();
             for (int index = 0; index < response.toolCalls().size(); index++) {
                 ModelResponse.ToolPlan plan = response.toolCalls().get(index);
@@ -140,14 +180,22 @@ public class RunProcessor {
                 String idempotencyKey = run.id() + ":" + run.currentStep() + ":" + index
                         + ":" + plan.name() + ":" + argumentsJson;
                 drafts.add(new SqliteRuntimeStore.ToolCallDraft(
-                        plan.callId(), plan.name(), argumentsJson, idempotencyKey));
+                        plan.callId(), plan.name(), argumentsJson, idempotencyKey,
+                        toolRouter.effect(plan.name())));
             }
             List<ToolCallRecord> calls = store.appendAssistantAndCreateToolCalls(
                     run.sessionId(), run.id(), response.content(), response.reasoningContent(),
                     json(response.toolCalls()), drafts);
+            if (calls.isEmpty()) {
+                toolRouter.release(run.id());
+                return;
+            }
             store.appendEvent(run.id(), "model.tool_calls", json(Map.of("count", calls.size())));
             handleTool(run, calls.get(0));
         } catch (Exception e) {
+            if (productivity != null && budgetReservationKey != null) {
+                try { productivity.releaseModelBudget(budgetReservationKey); } catch (Exception ignored) { }
+            }
             if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED)
                     == RunStatus.CANCELED) {
                 toolRouter.release(run.id());
@@ -192,11 +240,13 @@ public class RunProcessor {
     }
 
     private void executeTool(RunRecord run, ToolCallRecord call) throws Exception {
-        if (metrics != null) metrics.toolCall();
-        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+        MDC.put("toolCallId", call.id());
+        if (metrics != null) metrics.toolCall(call.toolName(), toolRouter.executionTarget(call.toolName()));
+        if (!store.markRunStatus(run.id(), RunStatus.WAITING_TOOL)) return;
         Map<String, Object> arguments = mapper.readValue(call.arguments(), MAP_TYPE);
         store.appendEvent(run.id(), "tool.requested", json(Map.of(
-                "toolCallId", call.id(), "name", call.toolName(), "arguments", arguments)));
+                "toolCallId", call.id(), "name", call.toolName(),
+                "argumentBytes", call.arguments().length())));
         store.markToolRunning(call.id());
         store.appendEvent(run.id(), "tool.started", json(Map.of("toolCallId", call.id())));
         auditService.record("tool.started", run.id(), call.id(), Map.of(
@@ -213,35 +263,31 @@ public class RunProcessor {
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
-            store.completeTool(call.id(), materialized.modelContent());
-            store.appendToolResult(run.sessionId(), run.id(), call.providerCallId(), materialized.modelContent());
-            store.appendEvent(run.id(), "tool.completed", json(Map.of(
+            boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
+                    materialized.modelContent(), null, json(Map.of(
                     "toolCallId", call.id(), "durationMs", result.durationMs(),
                     "externalized", materialized.artifact() != null,
                     "artifactId", materialized.artifact() == null ? "" : materialized.artifact().id(),
-                    "content", materialized.modelContent())));
+                    "content", materialized.modelContent())), run.currentStep());
+            if (!committed) return;
             auditService.record("tool.completed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "result", result.content()));
-            int nextStep = store.findResumableToolCall(run.id()).isPresent()
-                    ? run.currentStep() : run.currentStep() + 1;
-            store.requeueRun(run.id(), nextStep);
         } else {
-            if (metrics != null) metrics.toolFailure();
-            store.failTool(call.id(), result.error());
+            if (metrics != null) metrics.toolFailure(call.toolName(), toolRouter.executionTarget(call.toolName()));
             String observation = json(Map.of(
                     "ok", false,
                     "tool", call.toolName(),
                     "error", result.error(),
                     "guidance", "Treat this as a tool observation. Do not retry unchanged arguments; use available context or choose a valid alternative."));
-            store.appendToolResult(run.sessionId(), run.id(), call.providerCallId(), observation);
-            store.appendEvent(run.id(), "tool.failed", json(Map.of(
-                    "toolCallId", call.id(), "durationMs", result.durationMs(), "error", result.error())));
+            boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, false,
+                    observation, result.error(), json(Map.of(
+                    "toolCallId", call.id(), "durationMs", result.durationMs(), "error", result.error())),
+                    run.currentStep());
+            if (!committed) return;
             auditService.record("tool.failed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
-            int nextStep = store.findResumableToolCall(run.id()).isPresent()
-                    ? run.currentStep() : run.currentStep() + 1;
-            store.requeueRun(run.id(), nextStep);
         }
+        MDC.remove("toolCallId");
     }
 
     private String json(Object value) {

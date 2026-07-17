@@ -1,6 +1,8 @@
 package com.paicli.platform.server.store;
 
 import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.common.ToolCallStatus;
+import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.server.config.PlatformProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -84,7 +86,47 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
+        }
+    }
+
+    @Test
+    void reconcilesLegacyDuplicateActiveRunsBeforeCreatingUniqueIndex() throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, " +
+                    "project_key TEXT NOT NULL DEFAULT 'default', group_id TEXT, status TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+            statement.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, " +
+                    "status TEXT NOT NULL, input TEXT NOT NULL, current_step INTEGER NOT NULL DEFAULT 0, " +
+                    "error TEXT, thinking_mode TEXT NOT NULL DEFAULT 'auto', reasoning_effort TEXT NOT NULL DEFAULT '', " +
+                    "created_at TEXT NOT NULL, queued_at TEXT, started_at TEXT, finished_at TEXT, " +
+                    "version INTEGER NOT NULL DEFAULT 0)");
+            statement.execute("INSERT INTO sessions VALUES " +
+                    "('session','legacy','default',NULL,'ACTIVE','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')");
+            statement.execute("INSERT INTO runs VALUES " +
+                    "('run-1','session','QUEUED','first',0,NULL,'auto','','2026-01-01T00:00:00Z',NULL,NULL,NULL,0)");
+            statement.execute("INSERT INTO runs VALUES " +
+                    "('run-2','session','RUNNING','second',0,NULL,'auto','','2026-01-01T00:00:01Z',NULL,NULL,NULL,0)");
+        }
+
+        new SqliteRuntimeStore(properties()).initialize();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement();
+             var result = statement.executeQuery("SELECT id,status,error FROM runs ORDER BY id")) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("id")).isEqualTo("run-1");
+            assertThat(result.getString("status")).isEqualTo("QUEUED");
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("id")).isEqualTo("run-2");
+            assertThat(result.getString("status")).isEqualTo("FAILED");
+            assertThat(result.getString("error")).contains("duplicate active run");
+        }
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            assertThatThrownBy(() -> statement.execute("INSERT INTO runs " +
+                    "(id,session_id,status,input,created_at) VALUES " +
+                    "('run-3','session','QUEUED','third','2026-01-01T00:00:02Z')"))
+                    .hasMessageContaining("UNIQUE constraint failed");
         }
     }
 
@@ -325,6 +367,68 @@ class SqliteRuntimeStoreTest {
         var feedback = store.createKnowledgeFeedback("project-a", "guide.md", 2, true, "useful");
         assertThat(store.knowledgeFeedback("project-a")).containsExactly(feedback);
         assertThat(store.deleteArtifact(artifact.id())).isTrue();
+    }
+
+    @Test
+    void terminalRunCannotBeCompletedOrRequeuedAfterCancellation() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("cancel-race");
+        var run = store.createRun(session.id(), "work");
+        store.claimNextRun().orElseThrow();
+        store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
+
+        assertThat(store.cancelRun(run.id())).isTrue();
+        assertThat(store.completeRun(run.id())).isFalse();
+        assertThat(store.requeueRun(run.id(), 1)).isFalse();
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.CANCELED);
+        assertThat(store.events(run.id(), 0)).extracting("type")
+                .contains("run.canceled").doesNotContain("run.completed");
+    }
+
+    @Test
+    void interruptedNonIdempotentToolBecomesUnknownAndIsNotReplayed() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("unknown-tool");
+        var run = first.createRun(session.id(), "charge card");
+        var call = first.createToolCall(run.id(), "provider-charge", "execute_command", "{}",
+                "charge-once", ToolEffect.NON_IDEMPOTENT_WRITE);
+        first.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+        first.markToolRunning(call.id());
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        assertThat(recovered.findToolCall(call.id()).orElseThrow().status()).isEqualTo(ToolCallStatus.UNKNOWN);
+        assertThat(recovered.findResumableToolCall(run.id())).isEmpty();
+        assertThat(recovered.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.FAILED);
+    }
+
+    @Test
+    void pagesEventsAndPersistsModelAttemptsBudgetReservationsAndNotificationOutbox() throws Exception {
+        SqliteRuntimeStore store = store();
+        ProductivityStore productivity = new ProductivityStore(properties());
+        var session = store.createSession("ops", "ops-project");
+        var run = store.createRun(session.id(), "observe");
+        for (int index = 0; index < 5; index++) store.appendEvent(run.id(), "event." + index, "{}");
+        assertThat(store.events(run.id(), 0, 2)).hasSize(2);
+
+        String attempt = store.startModelAttempt(run.id(), "provider", "model", 1);
+        store.finishModelAttempt(attempt, "RETRY", 429, "limited");
+        assertThat(store.modelRetriesForRun(run.id())).isEqualTo(1);
+
+        productivity.saveBudget("ops-project", 100, 0, 0, 0, .8, 2);
+        assertThat(productivity.reserveModelBudget("ops-project", "r1", 60, 0)).isTrue();
+        assertThat(productivity.reserveModelBudget("ops-project", "r2", 50, 0)).isFalse();
+        productivity.releaseModelBudget("r1");
+        assertThat(productivity.reserveModelBudget("ops-project", "r2", 50, 0)).isTrue();
+
+        var channel = productivity.saveNotification(null, "ops-project", "webhook", "WEBHOOK",
+                "https://example.com/hook", "", "COMPLETED", true);
+        productivity.enqueueNotification(channel, "COMPLETED", run.id(), "done");
+        var delivery = productivity.claimNotification().orElseThrow();
+        assertThat(delivery.channel()).isEqualTo(channel);
+        productivity.finishNotification(delivery.id(), true, delivery.attempts(), null);
+        assertThat(productivity.claimNotification()).isEmpty();
     }
 
     private SqliteRuntimeStore store() throws Exception {

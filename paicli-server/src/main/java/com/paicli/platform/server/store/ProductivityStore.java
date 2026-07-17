@@ -170,6 +170,54 @@ public class ProductivityStore {
         }catch(SQLException e){throw failure("read budget",e);}
     }
 
+    public boolean reserveModelBudget(String projectKey, String reservationKey,
+                                      long requestedTokens, double requestedCost) {
+        BudgetPolicy policy = budget(projectKey);
+        if (policy.dailyTokens() <= 0 && policy.monthlyTokens() <= 0
+                && policy.dailyCost() <= 0 && policy.monthlyCost() <= 0) return true;
+        String key = project(projectKey);
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                try (PreparedStatement insert = c.prepareStatement(
+                        "INSERT OR IGNORE INTO budget_reservations(" +
+                                "reservation_key,project_key,reserved_tokens,reserved_cost,created_at) VALUES(?,?,?,?,?)")) {
+                    insert.setString(1, reservationKey); insert.setString(2, key);
+                    insert.setLong(3, Math.max(0, requestedTokens));
+                    insert.setDouble(4, Math.max(0, requestedCost));
+                    insert.setString(5, Instant.now().toString()); insert.executeUpdate();
+                }
+                long reservedTokens; double reservedCost;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT COALESCE(SUM(reserved_tokens),0),COALESCE(SUM(reserved_cost),0) " +
+                                "FROM budget_reservations WHERE project_key=?")) {
+                    ps.setString(1, key);
+                    try (ResultSet rs = ps.executeQuery()) { rs.next(); reservedTokens = rs.getLong(1); reservedCost = rs.getDouble(2); }
+                }
+                UsageSummary daily = usage(key, 1); UsageSummary monthly = usage(key, 31);
+                boolean exceeded = (policy.dailyTokens() > 0
+                        && daily.inputTokens() + daily.outputTokens() + reservedTokens > policy.dailyTokens())
+                        || (policy.monthlyTokens() > 0
+                        && monthly.inputTokens() + monthly.outputTokens() + reservedTokens > policy.monthlyTokens())
+                        || (policy.dailyCost() > 0 && daily.estimatedCost() + reservedCost > policy.dailyCost())
+                        || (policy.monthlyCost() > 0 && monthly.estimatedCost() + reservedCost > policy.monthlyCost());
+                if (exceeded) { c.rollback(); return false; }
+                c.commit(); return true;
+            } catch (Exception e) {
+                try { c.rollback(); } catch (Exception ignored) { }
+                throw e;
+            }
+        } catch (SQLException e) { throw failure("reserve model budget", e); }
+    }
+
+    public void releaseModelBudget(String reservationKey) {
+        if (reservationKey == null || reservationKey.isBlank()) return;
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM budget_reservations WHERE reservation_key=?")) {
+            ps.setString(1, reservationKey); ps.executeUpdate();
+        } catch (SQLException e) { throw failure("release model budget", e); }
+    }
+
     public UsageSummary usage(String projectKey, int days) {
         String key=project(projectKey); Instant since=Instant.now().minus(Math.max(1,Math.min(days,366)), ChronoUnit.DAYS);
         String sql="SELECT COUNT(u.id) calls,COUNT(DISTINCT r.id) runs,"+
@@ -325,6 +373,47 @@ public class ProductivityStore {
     }
     public boolean deleteNotification(String id){return delete("notification_channels",id);}
 
+    public void enqueueNotification(NotificationChannel channel,String event,String runId,String message){
+        String now=Instant.now().toString();try(Connection c=open();PreparedStatement ps=c.prepareStatement(
+                "INSERT INTO notification_outbox(id,channel_id,project_key,event_type,run_id,message,status,"+
+                        "attempts,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'PENDING',0,?,?,?)")){
+            ps.setString(1,id("outbox"));ps.setString(2,channel.id());ps.setString(3,channel.projectKey());
+            ps.setString(4,event);ps.setString(5,runId);ps.setString(6,message==null?"":message);
+            ps.setString(7,now);ps.setString(8,now);ps.setString(9,now);ps.executeUpdate();
+        }catch(SQLException e){throw failure("enqueue notification",e);}
+    }
+
+    public Optional<NotificationDelivery> claimNotification(){
+        try(Connection c=open()){c.setAutoCommit(false);try{
+            NotificationDelivery selected=null;try(PreparedStatement ps=c.prepareStatement(
+                    "SELECT o.*,c.name channel_name,c.type channel_type,c.endpoint,c.secret_env,c.events,c.enabled,"+
+                            "c.created_at channel_created_at,c.updated_at channel_updated_at FROM notification_outbox o "+
+                            "JOIN notification_channels c ON c.id=o.channel_id WHERE o.status='PENDING' "+
+                            "AND o.next_attempt_at<=? ORDER BY o.next_attempt_at LIMIT 1")){
+                ps.setString(1,Instant.now().toString());try(ResultSet r=ps.executeQuery()){if(r.next())selected=delivery(r);}
+            }
+            if(selected==null){c.commit();return Optional.empty();}
+            try(PreparedStatement ps=c.prepareStatement("UPDATE notification_outbox SET status='SENDING',"+
+                    "attempts=attempts+1,updated_at=? WHERE id=? AND status='PENDING'")){
+                ps.setString(1,Instant.now().toString());ps.setString(2,selected.id());
+                if(ps.executeUpdate()==0){c.rollback();return Optional.empty();}
+            }
+            c.commit();return Optional.of(new NotificationDelivery(selected.id(),selected.channel(),selected.event(),
+                    selected.runId(),selected.message(),selected.attempts()+1));
+        }catch(Exception e){try{c.rollback();}catch(Exception ignored){}throw e;}}
+        catch(SQLException e){throw failure("claim notification",e);}
+    }
+
+    public void finishNotification(String id,boolean success,int attempts,String error){
+        String status=success?"SENT":attempts>=5?"DEAD":"PENDING";
+        Instant next=success?Instant.now():Instant.now().plus(Math.min(300,1L<<Math.min(attempts,8)),ChronoUnit.SECONDS);
+        try(Connection c=open();PreparedStatement ps=c.prepareStatement(
+                "UPDATE notification_outbox SET status=?,next_attempt_at=?,error=?,updated_at=? WHERE id=?")){
+            ps.setString(1,status);ps.setString(2,next.toString());ps.setString(3,error==null?null:value(error,2000));
+            ps.setString(4,Instant.now().toString());ps.setString(5,id);ps.executeUpdate();
+        }catch(SQLException e){throw failure("finish notification",e);}
+    }
+
     private boolean delete(String table,String id){
         if(!List.of("task_templates","model_profiles","scheduled_tasks","notification_channels").contains(table))throw new IllegalArgumentException("unsupported table");
         try(Connection c=open();PreparedStatement ps=c.prepareStatement("DELETE FROM "+table+" WHERE id=?")){ps.setString(1,id);return ps.executeUpdate()>0;}
@@ -335,6 +424,14 @@ public class ProductivityStore {
     private static ModelProfile profile(ResultSet r)throws SQLException{return new ModelProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("base_url"),r.getString("api_key_env"),r.getString("model"),r.getString("fallback_model"),r.getInt("max_context_tokens"),r.getInt("max_output_tokens"),r.getDouble("input_price"),r.getDouble("output_price"),r.getInt("local_model")!=0,r.getInt("is_default")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static ScheduledTask schedule(ResultSet r)throws SQLException{return new ScheduledTask(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("template_id"),r.getString("schedule_type"),r.getString("schedule_value"),r.getString("variables_json"),r.getInt("enabled")!=0,instant(r.getString("next_run_at")),instant(r.getString("last_run_at")),r.getString("last_run_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationChannel channel(ResultSet r)throws SQLException{return new NotificationChannel(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("type"),r.getString("endpoint"),r.getString("secret_env"),r.getString("events"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
+    private static NotificationDelivery delivery(ResultSet r)throws SQLException{
+        NotificationChannel channel=new NotificationChannel(r.getString("channel_id"),r.getString("project_key"),
+                r.getString("channel_name"),r.getString("channel_type"),r.getString("endpoint"),
+                r.getString("secret_env"),r.getString("events"),r.getInt("enabled")!=0,
+                instant(r.getString("channel_created_at")),instant(r.getString("channel_updated_at")));
+        return new NotificationDelivery(r.getString("id"),channel,r.getString("event_type"),r.getString("run_id"),
+                r.getString("message"),r.getInt("attempts"));
+    }
     private static RunRecord run(ResultSet r)throws SQLException{return new RunRecord(r.getString("id"),r.getString("session_id"),RunStatus.valueOf(r.getString("status")),r.getString("input"),r.getInt("current_step"),r.getString("error"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getInt("priority"),r.getString("model_profile_id"),r.getInt("retry_count"),instant(r.getString("created_at")),instant(r.getString("started_at")),instant(r.getString("finished_at")),r.getLong("version"));}
     private static String project(String v){String x=blank(v)?"default":v.trim();if(!x.matches("[a-zA-Z0-9_.-]{1,80}"))throw new IllegalArgumentException("invalid projectKey");return x;}
     private static String text(String v,String n,int max){if(blank(v))throw new IllegalArgumentException(n+" must not be blank");return value(v,max);}
@@ -367,4 +464,6 @@ public class ProductivityStore {
                                 Instant lastRunAt,String lastRunId,Instant createdAt,Instant updatedAt){}
     public record NotificationChannel(String id,String projectKey,String name,String type,String endpoint,String secretEnv,
                                       String events,boolean enabled,Instant createdAt,Instant updatedAt){}
+    public record NotificationDelivery(String id,NotificationChannel channel,String event,String runId,
+                                       String message,int attempts){}
 }

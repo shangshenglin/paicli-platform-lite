@@ -1,4 +1,5 @@
 server:
+  address: ${PAICLI_SERVER_ADDRESS:127.0.0.1}
   port: 8080
 
 spring:
@@ -19,7 +20,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
 
 paicli:
   data-dir: data
@@ -50,6 +51,12 @@ paicli:
     fallback-model: ${PAICLI_MODEL_FALLBACK_NAME:}
     max-run-steps: ${PAICLI_MODEL_MAX_RUN_STEPS:30}
     max-run-tokens: ${PAICLI_MODEL_MAX_RUN_TOKENS:200000}
+    stream-idle-timeout-seconds: ${PAICLI_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:45}
+    circuit-failure-threshold: ${PAICLI_MODEL_CIRCUIT_FAILURE_THRESHOLD:5}
+    circuit-open-seconds: ${PAICLI_MODEL_CIRCUIT_OPEN_SECONDS:30}
+    max-run-duration-seconds: ${PAICLI_MODEL_MAX_RUN_DURATION_SECONDS:1800}
+    max-tool-calls-per-turn: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_TURN:16}
+    max-tool-calls-per-run: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_RUN:100}
   docker:
     executable: docker
     image: paicli-sandbox-agent:0.6.0
@@ -86,11 +93,11 @@ paicli:
     worker-delay-ms: ${PAICLI_MEMORY_WORKER_DELAY_MS:1000}
   maintenance:
     interval-millis: ${PAICLI_MAINTENANCE_INTERVAL_MILLIS:3600000}
-    event-retention-days: ${PAICLI_EVENT_RETENTION_DAYS:0}
-    audit-retention-days: ${PAICLI_AUDIT_RETENTION_DAYS:0}
+    event-retention-days: ${PAICLI_EVENT_RETENTION_DAYS:30}
+    audit-retention-days: ${PAICLI_AUDIT_RETENTION_DAYS:90}
     orphan-file-grace-hours: ${PAICLI_ORPHAN_FILE_GRACE_HOURS:24}
     vacuum-enabled: ${PAICLI_SQLITE_VACUUM_ENABLED:false}
 
 logging:
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [run=%X{runId:-}] [tool=%X{toolCallId:-}] %logger{36} - %msg%n"

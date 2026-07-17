@@ -24,7 +24,13 @@ public record ModelProperties(
         int requestsPerMinute,
         String fallbackModel,
         int maxRunSteps,
-        int maxRunTokens
+        int maxRunTokens,
+        long streamIdleTimeoutSeconds,
+        int circuitFailureThreshold,
+        long circuitOpenSeconds,
+        long maxRunDurationSeconds,
+        int maxToolCallsPerTurn,
+        int maxToolCallsPerRun
 ) {
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
                            int maxContextTokens, int maxOutputTokens, double summaryTriggerRatio,
@@ -32,7 +38,19 @@ public record ModelProperties(
                            String thinkingMode, String reasoningEffort) {
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
-                3, 500, 60, "", 30, 200_000);
+                3, 500, 60, "", 30, 200_000, 45, 5, 30, 1_800, 16, 100);
+    }
+
+    public ModelProperties(String provider, String baseUrl, String apiKey, String model,
+                           int maxContextTokens, int maxOutputTokens, double summaryTriggerRatio,
+                           int retainedMessages, int toolResultInlineChars, long requestTimeoutSeconds,
+                           String thinkingMode, String reasoningEffort, int maxAttempts,
+                           long retryBaseMillis, int requestsPerMinute, String fallbackModel,
+                           int maxRunSteps, int maxRunTokens) {
+        this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
+                retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
+                maxAttempts, retryBaseMillis, requestsPerMinute, fallbackModel, maxRunSteps, maxRunTokens,
+                45, 5, 30, 1_800, 16, 100);
     }
 
     @ConstructorBinding
@@ -64,6 +82,12 @@ public record ModelProperties(
         fallbackModel = fallbackModel == null ? "" : fallbackModel.trim();
         maxRunSteps = maxRunSteps <= 0 ? 30 : Math.min(maxRunSteps, 200);
         maxRunTokens = maxRunTokens <= 0 ? 200_000 : maxRunTokens;
+        streamIdleTimeoutSeconds = streamIdleTimeoutSeconds <= 0 ? 45 : Math.min(streamIdleTimeoutSeconds, 600);
+        circuitFailureThreshold = circuitFailureThreshold <= 0 ? 5 : Math.min(circuitFailureThreshold, 100);
+        circuitOpenSeconds = circuitOpenSeconds <= 0 ? 30 : Math.min(circuitOpenSeconds, 3_600);
+        maxRunDurationSeconds = maxRunDurationSeconds <= 0 ? 1_800 : Math.min(maxRunDurationSeconds, 86_400);
+        maxToolCallsPerTurn = maxToolCallsPerTurn <= 0 ? 16 : Math.min(maxToolCallsPerTurn, 100);
+        maxToolCallsPerRun = maxToolCallsPerRun <= 0 ? 100 : Math.min(maxToolCallsPerRun, 10_000);
         if (provider.equals("openai-compatible")) {
             URI endpoint = URI.create(baseUrl);
             if (!"http".equalsIgnoreCase(endpoint.getScheme()) && !"https".equalsIgnoreCase(endpoint.getScheme())) {

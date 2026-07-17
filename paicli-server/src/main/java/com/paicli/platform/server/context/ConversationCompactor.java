@@ -25,11 +25,16 @@ public class ConversationCompactor {
     }
 
     public CompactionResult compactIfNeeded(String sessionId, String runId, int fixedPromptTokens) {
+        return compactIfNeeded(sessionId, runId, fixedPromptTokens, properties.maxContextTokens());
+    }
+
+    public CompactionResult compactIfNeeded(String sessionId, String runId, int fixedPromptTokens,
+                                            int maxContextTokens) {
         List<MessageRecord> active = store.activeMessages(sessionId);
         int currentTokens = fixedPromptTokens + active.stream()
                 .mapToInt(message -> TokenEstimator.estimateText(message.content()) + 8)
                 .sum();
-        int trigger = (int) (properties.maxContextTokens() * properties.summaryTriggerRatio());
+        int trigger = (int) (maxContextTokens * properties.summaryTriggerRatio());
         if (currentTokens < trigger || active.size() <= properties.retainedMessages() + 1) {
             return new CompactionResult(false, currentTokens, currentTokens, 0);
         }
@@ -39,7 +44,7 @@ public class ConversationCompactor {
         if (cutoff <= 0) return new CompactionResult(false, currentTokens, currentTokens, 0);
 
         List<MessageRecord> archived = active.subList(0, cutoff);
-        int summaryMaxChars = Math.min(12_000, Math.max(2_000, properties.maxContextTokens() / 8 * 4));
+        int summaryMaxChars = Math.min(12_000, Math.max(2_000, maxContextTokens / 8 * 4));
         String summary = summarizer.summarize(archived, summaryMaxChars);
         store.archiveAndAddSummary(sessionId, runId,
                 archived.stream().map(MessageRecord::id).toList(), summary);

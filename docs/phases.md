@@ -99,8 +99,20 @@
 - [x] 多 Trial 全通过的 `pass^k` 稳定性聚合及可刷新异步执行报告
 - [x] 人工确认基线、关键工具保留检查和 Token/耗时 150% 退化判断
 - [x] 内部评测 Run 排除自动 Memory 提取，避免评测输入污染长期记忆
+- [x] 版本化官方 Starter Pack：4 个套件、17 个用例、幂等安装和 Console 用例启停
 - [x] Schema 迁移 12、评测 Console、Store/评分回归测试和中文文档
-- [x] 64 项自动化测试覆盖 Common、Server 与 Sandbox Agent，并通过真实 REST 多 Trial/基线冒烟
+- [x] 65 项自动化测试覆盖 Common、Server 与 Sandbox Agent，并通过真实 REST 多 Trial/基线冒烟
+
+## 阶段 13：生产化 P0/P1 加固
+
+- [x] Run 终态单向状态机、状态与 Event 原子提交、每 Session 单活跃 Run 数据库约束
+- [x] 同轮 ToolCall 原子持久化和顺序执行；工具 Effect 分类，安全恢复与非幂等 `UNKNOWN` 人工对账
+- [x] 模型流空闲超时、带抖动退避、`Retry-After`、持久化 ModelAttempt 和熔断半开探测
+- [x] Run 步骤、Token、总时长、单轮/全程工具配额，以及项目预算事务预留与结算
+- [x] Worker 有界背压和拒绝回队；通知 Outbox 有界投递、重试与死信状态
+- [x] SSE/Event 分页上限、嵌套审计脱敏、MDC 关联、Prometheus 和 Worker/模型/工具指标
+- [x] 默认回环监听，非回环监听强制 API Key；Schema 迁移 13 与 Store/安全回归测试
+- [x] 72 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
 ## 明确不做
 

@@ -3,6 +3,7 @@ package com.paicli.platform.server.api;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.evaluation.EvaluationService;
+import com.paicli.platform.server.evaluation.EvaluationStarterPackService;
 import com.paicli.platform.server.store.EvaluationStore;
 import jakarta.validation.Valid;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -28,10 +29,21 @@ public class EvaluationController {
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private final EvaluationStore store;
     private final EvaluationService service;
+    private final EvaluationStarterPackService starterPack;
     private final ObjectMapper mapper;
 
-    public EvaluationController(EvaluationStore store, EvaluationService service, ObjectMapper mapper) {
-        this.store = store; this.service = service; this.mapper = mapper;
+    public EvaluationController(EvaluationStore store, EvaluationService service,
+                                EvaluationStarterPackService starterPack, ObjectMapper mapper) {
+        this.store = store;
+        this.service = service;
+        this.starterPack = starterPack;
+        this.mapper = mapper;
+    }
+
+    @PostMapping("/starter-pack")
+    public EvaluationStarterPackService.InstallResult installStarterPack(
+            @RequestParam(defaultValue = "default") String projectKey) {
+        return starterPack.install(projectKey);
     }
 
     @GetMapping("/suites")
