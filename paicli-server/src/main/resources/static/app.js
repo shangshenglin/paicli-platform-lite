@@ -925,7 +925,7 @@ async function loadEvaluations() {
         cases.forEach(value => {
           const ruleCount = value.requiredTools.length + value.forbiddenTools.length + value.requiredResponse.length + value.forbiddenResponse.length;
           const child = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`,
-            `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} Token` : ''}`);
+            `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} 输出 Token` : ''}`);
           child.classList.add('evaluation-case-item');
           actionButton(child, value.enabled ? '停用' : '启用', () => setEvaluationCaseEnabled(value, !value.enabled));
           actionButton(child, '删除', async () => {
@@ -1039,7 +1039,7 @@ async function loadEvaluationReport(executionId, notify = true) {
       const item = element('div', `evaluation-trial ${trial.score == null ? '' : trial.passed ? 'pass' : 'fail'}`);
       item.append(element('strong', '', `${value.caseName} · Trial ${trial.ordinal} · ${status}`));
       if (details.toolCalls != null) item.append(element('div', 'evaluation-checks',
-        `${details.toolCalls} 次工具调用 · ${details.tokens || 0} Token · ${details.durationMs || 0} ms · Run ${trial.runId}`));
+        `${details.toolCalls} 次工具调用 · ${details.outputTokens ?? details.tokens ?? 0} 输出 Token · ${details.totalTokens ?? details.tokens ?? 0} 总 Token · ${details.durationMs || 0} ms · Run ${trial.runId}`));
       const failures = (details.checks || []).filter(check => !check.passed);
       if (failures.length) item.append(element('div', 'evaluation-checks', failures.map(check => `${check.rule}：${check.evidence}（-${check.deduction}）`).join('\n')));
       (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
@@ -1050,7 +1050,7 @@ async function loadEvaluationReport(executionId, notify = true) {
         deny.onclick = () => resolveEvaluationApproval(approval.id, 'DENIED', executionId);
         approvalText.append(allow, deny); item.append(approvalText);
       });
-      if (details.runStatus === 'COMPLETED') {
+      if (details.runStatus === 'COMPLETED' && trial.passed) {
         const baseline = element('button', 'secondary', value.hasBaseline ? '更新基线' : '设为基线');
         baseline.onclick = async () => {
           await api(`/v1/evaluations/trials/${trial.id}/baseline`, {method: 'POST'});

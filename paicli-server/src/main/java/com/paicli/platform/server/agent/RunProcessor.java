@@ -28,8 +28,10 @@ import org.slf4j.MDC;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 @Component
 public class RunProcessor {
@@ -176,13 +178,14 @@ public class RunProcessor {
             List<SqliteRuntimeStore.ToolCallDraft> drafts = new ArrayList<>();
             for (int index = 0; index < response.toolCalls().size(); index++) {
                 ModelResponse.ToolPlan plan = response.toolCalls().get(index);
-                String argumentsJson = json(plan.arguments());
+                String argumentsJson = canonicalArguments(plan.arguments());
                 String idempotencyKey = run.id() + ":" + run.currentStep() + ":" + index
                         + ":" + plan.name() + ":" + argumentsJson;
                 drafts.add(new SqliteRuntimeStore.ToolCallDraft(
                         plan.callId(), plan.name(), argumentsJson, idempotencyKey,
                         toolRouter.effect(plan.name())));
             }
+            enforceToolCallLoopBudget(run.id(), drafts);
             List<ToolCallRecord> calls = store.appendAssistantAndCreateToolCalls(
                     run.sessionId(), run.id(), response.content(), response.reasoningContent(),
                     json(response.toolCalls()), drafts);
@@ -296,5 +299,44 @@ public class RunProcessor {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to encode event", e);
         }
+    }
+
+    private void enforceToolCallLoopBudget(String runId, List<SqliteRuntimeStore.ToolCallDraft> drafts) {
+        if (modelProperties == null) return;
+        int limit = modelProperties.maxIdenticalToolCallsPerRun();
+        Map<String, Integer> counts = new HashMap<>();
+        for (ToolCallRecord call : store.toolCallsForRun(runId)) {
+            counts.merge(toolSignature(call.toolName(), call.arguments()), 1, Integer::sum);
+        }
+        for (SqliteRuntimeStore.ToolCallDraft draft : drafts) {
+            String signature = toolSignature(draft.toolName(), draft.arguments());
+            int count = counts.merge(signature, 1, Integer::sum);
+            if (count > limit) {
+                throw new IllegalStateException("repeated tool call loop detected: " + draft.toolName()
+                        + " with unchanged arguments repeated " + count + " times (limit " + limit + ")");
+            }
+        }
+    }
+
+    private static String toolSignature(String toolName, String arguments) {
+        return toolName + "\n" + arguments;
+    }
+
+    private String canonicalArguments(Map<String, Object> arguments) {
+        try {
+            return mapper.writeValueAsString(canonicalValue(arguments));
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to encode tool arguments", e);
+        }
+    }
+
+    private static Object canonicalValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> sorted = new TreeMap<>();
+            map.forEach((key, item) -> sorted.put(String.valueOf(key), canonicalValue(item)));
+            return sorted;
+        }
+        if (value instanceof List<?> list) return list.stream().map(RunProcessor::canonicalValue).toList();
+        return value;
     }
 }

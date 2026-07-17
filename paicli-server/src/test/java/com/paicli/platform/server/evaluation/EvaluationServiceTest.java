@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class EvaluationServiceTest {
     @TempDir
@@ -61,6 +62,8 @@ class EvaluationServiceTest {
         assertThat(baseline.caseId()).isEqualTo(evaluationCase.id());
         assertThat(baseline.response()).isEqualTo("done");
         assertThat(baseline.toolNamesJson()).contains("list_dir");
+        assertThat(baseline.tokens()).isEqualTo(5);
+        assertThat(baseline.tokenMetric()).isEqualTo("OUTPUT");
         assertThat(service.report(execution.id()).trials()).allSatisfy(
                 result -> assertThat(result.hasBaseline()).isTrue());
     }
@@ -90,7 +93,39 @@ class EvaluationServiceTest {
         assertThat(report.execution().passed()).isFalse();
         assertThat(report.trials().get(0).trial().score()).isZero();
         assertThat(report.trials().get(0).details().get("checks").toString())
-                .contains("forbidden_tool", "required_response", "forbidden_response", "max_tokens");
+                .contains("forbidden_tool", "required_response", "forbidden_response", "max_output_tokens");
+    }
+
+    @Test
+    void evaluatesOutputTokensAndTreatsResourceLimitsAsHardGates() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        EvaluationStore evaluations = new EvaluationStore(properties);
+        EvaluationService service = new EvaluationService(evaluations, runtime, new ObjectMapper());
+        var suite = evaluations.saveSuite(null, "default", "Output budget", "", 1, 90);
+        evaluations.saveCase(null, suite.id(), "short answer", "answer", "[]", "[]",
+                "[]", "[]", 0, 5, 0, true);
+
+        var execution = service.start(suite.id(), null, 1, 90);
+        var trial = evaluations.trials(execution.id()).get(0);
+        var run = runtime.findRun(trial.runId()).orElseThrow();
+        runtime.claimNextRun().orElseThrow();
+        runtime.appendAssistantMessage(run.sessionId(), run.id(), "six output tokens", "");
+        runtime.recordModelUsage(run.id(), "demo", "demo", 2_000, 2_000, 6, 0, 10, 0, true);
+        runtime.completeRun(run.id());
+
+        var result = service.report(execution.id()).trials().get(0);
+        assertThat(result.trial().score()).isEqualTo(90);
+        assertThat(result.trial().passed()).isFalse();
+        assertThat(result.details()).containsEntry("tokens", 6)
+                .containsEntry("inputTokens", 2_000)
+                .containsEntry("outputTokens", 6)
+                .containsEntry("totalTokens", 2_006)
+                .containsEntry("tokenMetric", "OUTPUT");
+        assertThatThrownBy(() -> service.promoteBaseline(trial.id()))
+                .hasMessageContaining("passed trial");
     }
 
     @Test

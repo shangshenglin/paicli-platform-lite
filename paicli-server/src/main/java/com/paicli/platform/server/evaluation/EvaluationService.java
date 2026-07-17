@@ -85,7 +85,7 @@ public class EvaluationService {
         runtime.findRun(trial.runId()).ifPresent(run -> {
             details.put("runStatus", run.status().name());
             details.put("toolCalls", runtime.toolCallsForRun(run.id()).size());
-            details.put("tokens", runtime.modelTokensForRun(run.id()));
+            addTokenDetails(details, runtime.modelTokenUsageForRun(run.id()));
             details.put("durationMs", duration(run));
             details.put("approvals", runtime.approvalsForRun(run.id()).stream().map(approval -> Map.of(
                     "id", approval.id(), "status", approval.status().name(), "reason", approval.reason()
@@ -102,9 +102,13 @@ public class EvaluationService {
         if (run.status() != RunStatus.COMPLETED) {
             throw new IllegalStateException("only a completed trial can become a baseline");
         }
+        if (!Boolean.TRUE.equals(trial.passed())) {
+            throw new IllegalStateException("only a passed trial can become a baseline");
+        }
         var tools = runtime.toolCallsForRun(run.id()).stream().map(ToolCallRecord::toolName).toList();
+        var usage = runtime.modelTokenUsageForRun(run.id());
         return evaluations.saveBaseline(trial.caseId(), run.id(), finalResponse(run), write(tools),
-                runtime.modelTokensForRun(run.id()), duration(run));
+                usage.outputTokens(), "OUTPUT", duration(run));
     }
 
     private void synchronize(String executionId) {
@@ -136,10 +140,12 @@ public class EvaluationService {
         var tools = runtime.toolCallsForRun(run.id());
         List<String> toolNames = tools.stream().map(ToolCallRecord::toolName).toList();
         String response = finalResponse(run);
-        int tokens = runtime.modelTokensForRun(run.id());
+        var usage = runtime.modelTokenUsageForRun(run.id());
+        int outputTokens = usage.outputTokens();
         long duration = duration(run);
         List<Map<String, Object>> checks = new ArrayList<>();
         int score = 100;
+        boolean resourceLimitsPassed = true;
 
         if (run.status() != RunStatus.COMPLETED) {
             score = deduct(score, 100, checks, "run_completed", false,
@@ -163,16 +169,19 @@ public class EvaluationService {
         }
         if (evaluationCase.maxToolCalls() > 0) {
             boolean ok = tools.size() <= evaluationCase.maxToolCalls();
+            resourceLimitsPassed &= ok;
             score = deduct(score, ok ? 0 : 10, checks, "max_tool_calls", ok,
                     tools.size() + " / " + evaluationCase.maxToolCalls());
         }
         if (evaluationCase.maxTokens() > 0) {
-            boolean ok = tokens <= evaluationCase.maxTokens();
-            score = deduct(score, ok ? 0 : 10, checks, "max_tokens", ok,
-                    tokens + " / " + evaluationCase.maxTokens());
+            boolean ok = outputTokens <= evaluationCase.maxTokens();
+            resourceLimitsPassed &= ok;
+            score = deduct(score, ok ? 0 : 10, checks, "max_output_tokens", ok,
+                    outputTokens + " / " + evaluationCase.maxTokens());
         }
         if (evaluationCase.maxDurationMs() > 0) {
             boolean ok = duration <= evaluationCase.maxDurationMs();
+            resourceLimitsPassed &= ok;
             score = deduct(score, ok ? 0 : 10, checks, "max_duration_ms", ok,
                     duration + " / " + evaluationCase.maxDurationMs());
         }
@@ -184,9 +193,11 @@ public class EvaluationService {
             score = deduct(score, missing.isEmpty() ? 0 : Math.min(15, missing.size() * 5), checks,
                     "baseline_tools", missing.isEmpty(), missing.isEmpty() ? "all retained" : "missing " + missing);
             if (baseline.tokens() > 0) {
-                boolean ok = tokens <= Math.ceil(baseline.tokens() * 1.5);
+                int comparableTokens = "OUTPUT".equals(baseline.tokenMetric())
+                        ? outputTokens : usage.totalTokens();
+                boolean ok = comparableTokens <= Math.ceil(baseline.tokens() * 1.5);
                 score = deduct(score, ok ? 0 : 5, checks, "baseline_tokens", ok,
-                        tokens + " / " + baseline.tokens());
+                        comparableTokens + " / " + baseline.tokens() + " (" + baseline.tokenMetric() + ")");
             }
             if (baseline.durationMs() > 0) {
                 boolean ok = duration <= Math.ceil(baseline.durationMs() * 1.5);
@@ -194,11 +205,11 @@ public class EvaluationService {
                         duration + " / " + baseline.durationMs());
             }
         }
-        boolean passed = score >= execution.passThreshold();
+        boolean passed = score >= execution.passThreshold() && resourceLimitsPassed;
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("summary", passed ? "passed" : "failed");
         details.put("runStatus", run.status().name()); details.put("toolNames", toolNames);
-        details.put("toolCalls", tools.size()); details.put("tokens", tokens); details.put("durationMs", duration);
+        details.put("toolCalls", tools.size()); addTokenDetails(details, usage); details.put("durationMs", duration);
         details.put("response", response); details.put("checks", checks);
         evaluations.completeTrial(trial.id(), run.status().name(), score, passed, write(details));
     }
@@ -207,6 +218,15 @@ public class EvaluationService {
                               String rule, boolean passed, String evidence) {
         checks.add(Map.of("rule", rule, "passed", passed, "deduction", points, "evidence", evidence));
         return Math.max(0, score - points);
+    }
+
+    private static void addTokenDetails(Map<String, Object> details,
+                                        SqliteRuntimeStore.ModelTokenUsage usage) {
+        details.put("tokens", usage.outputTokens());
+        details.put("inputTokens", usage.inputTokens());
+        details.put("outputTokens", usage.outputTokens());
+        details.put("totalTokens", usage.totalTokens());
+        details.put("tokenMetric", "OUTPUT");
     }
 
     private String finalResponse(RunRecord run) {

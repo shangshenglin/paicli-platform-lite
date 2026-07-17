@@ -30,7 +30,8 @@ public record ModelProperties(
         long circuitOpenSeconds,
         long maxRunDurationSeconds,
         int maxToolCallsPerTurn,
-        int maxToolCallsPerRun
+        int maxToolCallsPerRun,
+        int maxIdenticalToolCallsPerRun
 ) {
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
                            int maxContextTokens, int maxOutputTokens, double summaryTriggerRatio,
@@ -38,7 +39,7 @@ public record ModelProperties(
                            String thinkingMode, String reasoningEffort) {
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
-                3, 500, 60, "", 30, 200_000, 45, 5, 30, 1_800, 16, 100);
+                3, 500, 60, "", 30, 200_000, 45, 5, 30, 1_800, 16, 100, 3);
     }
 
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
@@ -50,7 +51,22 @@ public record ModelProperties(
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
                 maxAttempts, retryBaseMillis, requestsPerMinute, fallbackModel, maxRunSteps, maxRunTokens,
-                45, 5, 30, 1_800, 16, 100);
+                45, 5, 30, 1_800, 16, 100, 3);
+    }
+
+    public ModelProperties(String provider, String baseUrl, String apiKey, String model,
+                           int maxContextTokens, int maxOutputTokens, double summaryTriggerRatio,
+                           int retainedMessages, int toolResultInlineChars, long requestTimeoutSeconds,
+                           String thinkingMode, String reasoningEffort, int maxAttempts,
+                           long retryBaseMillis, int requestsPerMinute, String fallbackModel,
+                           int maxRunSteps, int maxRunTokens, long streamIdleTimeoutSeconds,
+                           int circuitFailureThreshold, long circuitOpenSeconds, long maxRunDurationSeconds,
+                           int maxToolCallsPerTurn, int maxToolCallsPerRun) {
+        this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
+                retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
+                maxAttempts, retryBaseMillis, requestsPerMinute, fallbackModel, maxRunSteps, maxRunTokens,
+                streamIdleTimeoutSeconds, circuitFailureThreshold, circuitOpenSeconds, maxRunDurationSeconds,
+                maxToolCallsPerTurn, maxToolCallsPerRun, 3);
     }
 
     @ConstructorBinding
@@ -88,6 +104,8 @@ public record ModelProperties(
         maxRunDurationSeconds = maxRunDurationSeconds <= 0 ? 1_800 : Math.min(maxRunDurationSeconds, 86_400);
         maxToolCallsPerTurn = maxToolCallsPerTurn <= 0 ? 16 : Math.min(maxToolCallsPerTurn, 100);
         maxToolCallsPerRun = maxToolCallsPerRun <= 0 ? 100 : Math.min(maxToolCallsPerRun, 10_000);
+        maxIdenticalToolCallsPerRun = maxIdenticalToolCallsPerRun <= 0
+                ? 3 : Math.min(maxIdenticalToolCallsPerRun, 100);
         if (provider.equals("openai-compatible")) {
             URI endpoint = URI.create(baseUrl);
             if (!"http".equalsIgnoreCase(endpoint.getScheme()) && !"https".equalsIgnoreCase(endpoint.getScheme())) {

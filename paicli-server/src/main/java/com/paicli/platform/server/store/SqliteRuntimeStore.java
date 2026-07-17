@@ -53,6 +53,7 @@ public class SqliteRuntimeStore {
     @PostConstruct
     public void initialize() throws Exception {
         Files.createDirectories(databasePath.getParent());
+        connections.initialize();
         try (Connection connection = open(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE IF NOT EXISTS schema_migrations (" +
                     "version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at TEXT NOT NULL)");
@@ -281,9 +282,12 @@ public class SqliteRuntimeStore {
                     "ON evaluation_trials(execution_id,case_id,ordinal)");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_baselines (" +
                     "case_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, response TEXT NOT NULL, " +
-                    "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, duration_ms INTEGER NOT NULL, " +
+                    "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, " +
+                    "token_metric TEXT NOT NULL DEFAULT 'TOTAL', duration_ms INTEGER NOT NULL, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
                     "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id) ON DELETE CASCADE)");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_baselines", "token_metric",
+                    "TEXT NOT NULL DEFAULT 'TOTAL'");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
             statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
@@ -1824,11 +1828,19 @@ public class SqliteRuntimeStore {
     }
 
     public int modelTokensForRun(String runId) {
+        return modelTokenUsageForRun(runId).totalTokens();
+    }
+
+    public ModelTokenUsage modelTokenUsageForRun(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "SELECT COALESCE(SUM((CASE WHEN input_tokens>0 THEN input_tokens " +
-                        "ELSE estimated_input_tokens END)+output_tokens),0) FROM model_usage WHERE run_id=?")) {
+                "SELECT COALESCE(SUM(CASE WHEN input_tokens>0 THEN input_tokens " +
+                        "ELSE estimated_input_tokens END),0),COALESCE(SUM(output_tokens),0) " +
+                        "FROM model_usage WHERE run_id=?")) {
             ps.setString(1, runId);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return new ModelTokenUsage(0, 0);
+                return new ModelTokenUsage(rs.getInt(1), rs.getInt(2));
+            }
         } catch (SQLException e) {
             throw failure("read model usage", e);
         }
@@ -2655,6 +2667,10 @@ public class SqliteRuntimeStore {
 
     public record ToolCallDraft(String providerCallId, String toolName,
                                 String arguments, String idempotencyKey, ToolEffect effect) { }
+
+    public record ModelTokenUsage(int inputTokens, int outputTokens) {
+        public int totalTokens() { return inputTokens + outputTokens; }
+    }
 
     public record MemoryUnit(String id, String projectKey, String memoryKey, String content, String tags,
                              String layer, String memoryType, double confidence, String origin,

@@ -86,7 +86,7 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
         }
     }
 
@@ -138,6 +138,11 @@ class SqliteRuntimeStoreTest {
         store.recordModelUsage(run.id(), "demo", 100, 90, 10, 5);
         store.recordModelUsage(run.id(), "demo", 80, 0, 20, 0);
         assertThat(store.modelTokensForRun(run.id())).isEqualTo(200);
+        assertThat(store.modelTokenUsageForRun(run.id())).satisfies(usage -> {
+            assertThat(usage.inputTokens()).isEqualTo(170);
+            assertThat(usage.outputTokens()).isEqualTo(30);
+            assertThat(usage.totalTokens()).isEqualTo(200);
+        });
 
         store.upsertAutomaticMemory("project-a", "language", "Java", "preference",
                 "L3", "PREFERENCE", 0.9, session.id(), run.id(), null);
@@ -267,6 +272,53 @@ class SqliteRuntimeStoreTest {
         assertThat(events).hasSize(61);
         assertThat(events).extracting("sequence").containsExactlyElementsOf(
                 java.util.stream.LongStream.rangeClosed(1, 61).boxed().toList());
+    }
+
+    @Test
+    void migratesLegacyEvaluationBaselineTokenMetricAsTotal() throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE evaluation_baselines (" +
+                    "case_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, response TEXT NOT NULL, " +
+                    "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, duration_ms INTEGER NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+            statement.execute("INSERT INTO evaluation_baselines VALUES " +
+                    "('case-1','run-1','ok','[]',1234,50,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')");
+        }
+
+        new SqliteRuntimeStore(properties()).initialize();
+        var baseline = new EvaluationStore(properties()).baseline("case-1").orElseThrow();
+
+        assertThat(baseline.tokens()).isEqualTo(1234);
+        assertThat(baseline.tokenMetric()).isEqualTo("TOTAL");
+    }
+
+    @Test
+    void configuresWalOnceAndWaitsForConcurrentWriters() throws Exception {
+        SqliteRuntimeStore store = store();
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            try (var result = statement.executeQuery("PRAGMA journal_mode")) {
+                assertThat(result.next()).isTrue();
+                assertThat(result.getString(1)).isEqualToIgnoringCase("wal");
+            }
+        }
+        var executor = Executors.newFixedThreadPool(8);
+        try {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < 24; i++) {
+                int ordinal = i;
+                futures.add(executor.submit(() -> {
+                    var session = store.createSession("concurrent-" + ordinal);
+                    var run = store.createRun(session.id(), "work-" + ordinal);
+                    store.appendEvent(run.id(), "concurrent.write", "{}");
+                }));
+            }
+            for (var future : futures) future.get();
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(store.sessions()).hasSize(24);
     }
 
     @Test

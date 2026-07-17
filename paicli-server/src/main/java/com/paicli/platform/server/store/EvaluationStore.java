@@ -221,16 +221,19 @@ public class EvaluationStore {
     }
 
     public EvaluationBaseline saveBaseline(String caseId, String sourceRunId, String response,
-                                           String toolNamesJson, int tokens, long durationMs) {
+                                           String toolNamesJson, int tokens, String tokenMetric,
+                                           long durationMs) {
         Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO evaluation_baselines(case_id,source_run_id,response,tool_names_json,tokens,duration_ms,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET source_run_id=excluded.source_run_id," +
+                "INSERT INTO evaluation_baselines(case_id,source_run_id,response,tool_names_json,tokens,token_metric,duration_ms,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET source_run_id=excluded.source_run_id," +
                         "response=excluded.response,tool_names_json=excluded.tool_names_json,tokens=excluded.tokens," +
-                        "duration_ms=excluded.duration_ms,updated_at=excluded.updated_at")) {
+                        "token_metric=excluded.token_metric,duration_ms=excluded.duration_ms,updated_at=excluded.updated_at")) {
             ps.setString(1, caseId); ps.setString(2, sourceRunId); ps.setString(3, response == null ? "" : response);
-            ps.setString(4, toolNamesJson); ps.setInt(5, Math.max(0, tokens)); ps.setLong(6, Math.max(0, durationMs));
-            ps.setString(7, now.toString()); ps.setString(8, now.toString()); ps.executeUpdate();
+            ps.setString(4, toolNamesJson); ps.setInt(5, Math.max(0, tokens));
+            ps.setString(6, "OUTPUT".equalsIgnoreCase(tokenMetric) ? "OUTPUT" : "TOTAL");
+            ps.setLong(7, Math.max(0, durationMs)); ps.setString(8, now.toString());
+            ps.setString(9, now.toString()); ps.executeUpdate();
             return baseline(caseId).orElseThrow();
         } catch (SQLException e) { throw failure("save evaluation baseline", e); }
     }
@@ -293,7 +296,8 @@ public class EvaluationStore {
     private static EvaluationBaseline baseline(ResultSet rs) throws SQLException {
         return new EvaluationBaseline(rs.getString("case_id"), rs.getString("source_run_id"),
                 rs.getString("response"), rs.getString("tool_names_json"), rs.getInt("tokens"),
-                rs.getLong("duration_ms"), instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
+                rs.getString("token_metric"), rs.getLong("duration_ms"),
+                instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
     }
 
     public record EvaluationSuite(String id, String projectKey, String name, String description,
@@ -310,6 +314,6 @@ public class EvaluationStore {
                                   String sessionId, String runId, String status, Integer score,
                                   Boolean passed, String detailsJson, Instant createdAt, Instant completedAt) { }
     public record EvaluationBaseline(String caseId, String sourceRunId, String response,
-                                     String toolNamesJson, int tokens, long durationMs,
+                                     String toolNamesJson, int tokens, String tokenMetric, long durationMs,
                                      Instant createdAt, Instant updatedAt) { }
 }

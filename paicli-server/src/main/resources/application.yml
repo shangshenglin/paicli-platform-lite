@@ -57,6 +57,7 @@ paicli:
     max-run-duration-seconds: ${PAICLI_MODEL_MAX_RUN_DURATION_SECONDS:1800}
     max-tool-calls-per-turn: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_TURN:16}
     max-tool-calls-per-run: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_RUN:100}
+    max-identical-tool-calls-per-run: ${PAICLI_MODEL_MAX_IDENTICAL_TOOL_CALLS_PER_RUN:3}
   docker:
     executable: docker
     image: paicli-sandbox-agent:0.6.0

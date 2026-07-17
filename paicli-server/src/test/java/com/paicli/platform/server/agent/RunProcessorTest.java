@@ -27,6 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -154,6 +155,55 @@ class RunProcessorTest {
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.COMPLETED);
         assertThat(store.messages(session.id())).extracting("role")
                 .containsExactly("user", "assistant", "tool", "assistant");
+    }
+
+    @Test
+    void stopsRepeatedToolCallsWithUnchangedArguments() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient loopingModel = new ModelClient() {
+            private final AtomicInteger calls = new AtomicInteger();
+
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                int ordinal = calls.incrementAndGet();
+                Map<String, Object> arguments = new LinkedHashMap<>();
+                if (ordinal % 2 == 0) {
+                    arguments.put("unused", true); arguments.put("path", ".");
+                } else {
+                    arguments.put("path", "."); arguments.put("unused", true);
+                }
+                return ModelResponse.tool("loop-" + ordinal, "list_dir", arguments);
+            }
+
+            @Override public String name() { return "loop-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, loopingModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), null, modelProperties,
+                null, null, null);
+        var session = store.createSession("loop guard");
+        var run = store.createRun(session.id(), "keep listing forever");
+
+        for (int i = 0; i < 4; i++) {
+            processor.process(store.claimNextRun().orElseThrow());
+        }
+
+        assertThat(store.findRun(run.id()).orElseThrow()).satisfies(failed -> {
+            assertThat(failed.status()).isEqualTo(RunStatus.FAILED);
+            assertThat(failed.error()).contains("repeated tool call loop detected", "limit 3");
+        });
+        assertThat(store.toolCallsForRun(run.id())).hasSize(3);
     }
 
     private static ModelProperties modelProperties() {

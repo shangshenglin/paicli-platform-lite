@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–13，包含 72 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–13，包含 76 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -385,10 +385,10 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 - **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
 - **工具与审批**：写文件、执行命令、破坏性命令拒绝和写后读取；危险工具会真实等待 Approval。
 - **上下文与受管能力**：Knowledge、Session Search、Skill、Web 和 Multi-Agent；依赖项目数据或外部配置，默认停用，可在 Console 按需启用。
-- **稳定性与预算**：默认 3 Trial，检查固定指令、随机工具调用、Token 和耗时预算。
+- **稳定性与预算**：默认 3 Trial，检查固定指令、随机工具调用、输出 Token 和耗时预算。
 
 1. Suite 保存项目、默认 Trial 次数和通过阈值。
-2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、Token 和耗时上限。
+2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；报告同时展示输入、输出和总 Token。
 3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。
 4. 危险工具仍停在持久化审批；报告只允许用户单次批准原 ToolCall 或拒绝，不会为了自动评测绕过安全边界。
 5. 单个 Trial 达到阈值才通过，Execution 要求全部 Trial 通过，形成 `pass^k` 稳定性门禁。
@@ -398,10 +398,10 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 - Run 未正常完成扣 100 分。
 - 缺少必需工具每项扣 20 分；出现禁止工具每项扣 50 分。
 - 缺少必需回答片段每项扣 15 分；出现禁止片段每项扣 50 分。
-- 工具调用数、Token 或耗时超限各扣 10 分。
-- 人工确认 Baseline 检查关键工具是否保留；Token 或耗时超过基线 150% 时扣分。
+- 工具调用数、输出 Token 或耗时超限各扣 10 分，并作为硬门禁；即使扣分后的分数等于阈值也不能通过。
+- 人工确认 Baseline 检查关键工具是否保留；输出 Token 或耗时超过基线 150% 时扣分。迁移前的旧基线仍按原总 Token 口径比较，避免升级时静默改变历史含义。
 
-Baseline 只能从已完成 Trial 创建，保存来源 Run、最终回答、工具序列、Token 和耗时。当前版本没有把 LLM-as-Judge 当作硬门禁，也不严格比较原始 reasoning；开放式语义 Rubric 留作后续扩展。
+Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。当前版本没有把 LLM-as-Judge 当作硬门禁，也不严格比较原始 reasoning；开放式语义 Rubric 留作后续扩展。
 
 ## 数据目录
 
@@ -422,7 +422,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–13：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测，以及生产级 Run 状态机、工具恢复、模型尝试、预算预留和通知 Outbox。
+SQLite `schema_migrations` 当前记录版本 1–14：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机，以及评测 Token 口径与 SQLite 并发加固。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -548,7 +548,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 | 配置族 | 用途 |
 |---|---|
 | `PAICLI_SERVER_ADDRESS`、`PAICLI_API_KEY`、`PAICLI_SECURITY_*` | 回环监听默认值、REST、Actuator、OpenAPI 认证和生产启动门禁 |
-| `PAICLI_MODEL_*` | Provider、端点、模型、Key、上下文/输出、思考、重试、流空闲超时、熔断、限流、Fallback 和 Run/工具预算 |
+| `PAICLI_MODEL_*` | Provider、端点、模型、Key、上下文/输出、思考、重试、流空闲超时、熔断、限流、Fallback、Run/工具预算和相同工具参数循环上限 |
 | `PAICLI_WEB_*` | 可选 SearXNG 搜索和 Server 侧 Web 工具 |
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
@@ -564,15 +564,15 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 .\scripts\start-local.ps1
 ```
 
-当前自动化测试总数为 65，覆盖：
+当前自动化测试总数为 76，覆盖：
 
 - Common、Server、Sandbox Agent 模块边界。
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
 - ContextManager、摘要、Memory、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–12、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–14、WAL 并发写入、Artifact 原子写入、维护和备份安全相关行为。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- Agent 评测多 Trial、确定性扣分、Baseline、内部 Session 隐藏、审批不旁路，以及 Starter Pack 完整性和幂等安装。
+- Agent 评测多 Trial、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 Starter Pack 完整性和幂等安装。
 
 此外已完成：
 
@@ -589,6 +589,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 - 默认不依赖外部向量数据库；未配置真实 Embedding 时使用明确的本地降级。
 - 图片型 PDF 支持受限 OCR/视觉路径；尚不支持音频和视频理解。
 - 评测第一版是确定性安全、工具、关键文本和预算门禁，不等同于开放式语义质量评价或无偏 LLM Judge。
+- 单机 SQLite 通过一次性 WAL 初始化、30 秒写锁等待和短事务承载并发；它降低锁冲突但不等同于多节点数据库，高写入规模仍应迁移 PostgreSQL。
 
 ## 文档与产品站点
 

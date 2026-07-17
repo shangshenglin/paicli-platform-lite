@@ -114,7 +114,10 @@
 - [x] Worker 有界背压和拒绝回队；通知 Outbox 有界投递、重试与死信状态
 - [x] SSE/Event 分页上限、嵌套审计脱敏、MDC 关联、Prometheus 和 Worker/模型/工具指标
 - [x] 默认回环监听，非回环监听强制 API Key；Schema 迁移 13 与 Store/安全回归测试
-- [x] 72 项自动化测试覆盖 Common、Server 与 Sandbox Agent
+- [x] 76 项自动化测试覆盖 Common、Server 与 Sandbox Agent
+- [x] 评测输出 Token/总 Token 分离、资源硬门禁和仅通过 Trial 可晋升 Baseline
+- [x] WAL 一次性初始化、30 秒 SQLite 写锁等待和并发写入回归
+- [x] 相同工具与参数默认最多重复 3 次，超限立即终止失控 Run；Schema 迁移 14
 
 ## 明确不做
 

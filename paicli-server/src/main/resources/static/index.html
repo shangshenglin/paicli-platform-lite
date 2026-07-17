@@ -182,7 +182,7 @@
   <div class="evaluation-toolbar">
     <div>
       <strong>质量回归工作区</strong>
-      <p class="hint">复用正式 Run 检查工具、响应、Token、耗时和人工基线；用例默认收起，按需查看。</p>
+      <p class="hint">复用正式 Run 检查工具、响应、输出 Token、总 Token、耗时和人工基线；用例默认收起，按需查看。</p>
     </div>
     <div class="managed-actions"><button class="secondary" id="refreshEvaluations">刷新</button><button class="secondary" id="installEvaluationStarterPack">安装官方评测集</button><button class="primary" id="addEvaluationSuite">新建套件</button></div>
   </div>
@@ -222,7 +222,7 @@
       <label class="form-field"><span>回答必须包含</span><textarea id="evaluationRequiredResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
       <label class="form-field"><span>回答禁止包含</span><textarea id="evaluationForbiddenResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
       <label class="form-field"><span>最多工具调用</span><input id="evaluationMaxTools" type="number" min="0" value="0"><small>0 表示不限制</small></label>
-      <label class="form-field"><span>最多 Token</span><input id="evaluationMaxTokens" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>最多输出 Token</span><input id="evaluationMaxTokens" type="number" min="0" value="0"><small>0 表示不限制，并作为通过硬门禁</small></label>
       <label class="form-field"><span>最长耗时（毫秒）</span><input id="evaluationMaxDuration" type="number" min="0" value="0"><small>0 表示不限制</small></label>
       <label class="form-field"><span>状态</span><span class="checkbox-row"><label><input id="evaluationCaseEnabled" type="checkbox" checked> 启用</label></span></label>
     </div>
