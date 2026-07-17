@@ -5,6 +5,7 @@ public enum ToolCallStatus {
     RUNNING,
     COMPLETED,
     FAILED,
+    UNKNOWN,
     CANCELED
 }
 

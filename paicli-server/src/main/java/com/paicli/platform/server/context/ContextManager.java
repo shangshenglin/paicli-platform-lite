@@ -73,10 +73,19 @@ public class ContextManager {
     }
 
     public PreparedContext prepare(String sessionId, String runId) {
+        return prepare(sessionId, runId, modelProperties.maxContextTokens(), modelProperties.maxOutputTokens());
+    }
+
+    public PreparedContext prepare(String sessionId, String runId, int requestedContextTokens,
+                                   int requestedOutputTokens) {
+        int contextLimit = requestedContextTokens <= 0
+                ? modelProperties.maxContextTokens() : requestedContextTokens;
+        int outputLimit = requestedOutputTokens <= 0
+                ? modelProperties.maxOutputTokens() : Math.min(requestedOutputTokens, contextLimit - 1);
         String system = prompts.systemPrompt();
         String runtime = prompts.runtimeContext(platformProperties.workspaceRoot().resolve(runId));
         int fixedTokens = TokenEstimator.estimateText(system) + TokenEstimator.estimateText(runtime);
-        var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens);
+        var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
 
         List<MessageRecord> active = store.activeMessages(sessionId);
         List<ModelMessage> messages = new ArrayList<>();
@@ -101,14 +110,14 @@ public class ContextManager {
                 .map(message -> toModelMessage(message, runId)).forEach(messages::add);
 
         int estimated = TokenEstimator.estimateMessages(messages);
-        int hardInputLimit = modelProperties.maxContextTokens() - modelProperties.maxOutputTokens();
+        int hardInputLimit = contextLimit - outputLimit;
         if (estimated > hardInputLimit) {
             throw new IllegalStateException("Context exceeds model budget after compaction: "
                     + estimated + " > " + hardInputLimit);
         }
         var run = store.findRun(runId).orElseThrow();
         return new PreparedContext(new ModelRequest(messages, toolCatalog.definitions(),
-                modelProperties.maxOutputTokens(), run.thinkingMode(), run.reasoningEffort()),
+                outputLimit, run.thinkingMode(), run.reasoningEffort()),
                 estimated, compaction);
     }
 

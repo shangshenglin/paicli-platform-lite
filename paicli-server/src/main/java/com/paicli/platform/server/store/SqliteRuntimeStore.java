@@ -2,6 +2,7 @@ package com.paicli.platform.server.store;
 
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.ToolCallStatus;
+import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.common.ApprovalStatus;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.ApprovalRecord;
@@ -52,6 +53,7 @@ public class SqliteRuntimeStore {
     @PostConstruct
     public void initialize() throws Exception {
         Files.createDirectories(databasePath.getParent());
+        connections.initialize();
         try (Connection connection = open(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE IF NOT EXISTS schema_migrations (" +
                     "version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at TEXT NOT NULL)");
@@ -85,6 +87,9 @@ public class SqliteRuntimeStore {
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_queue_priority " +
                     "ON runs(status, priority DESC, queued_at, created_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at)");
+            reconcileDuplicateActiveRuns(connection);
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runs_one_active_session ON runs(session_id) " +
+                    "WHERE status NOT IN ('COMPLETED','FAILED','CANCELED')");
             statement.execute("CREATE TABLE IF NOT EXISTS messages (" +
                     "id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, role TEXT NOT NULL, " +
                     "content TEXT NOT NULL, reasoning_content TEXT, tool_call_id TEXT, tool_calls_json TEXT, " +
@@ -106,6 +111,8 @@ public class SqliteRuntimeStore {
                     "arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, " +
                     "idempotency_key TEXT NOT NULL UNIQUE, retry_count INTEGER NOT NULL DEFAULT 0, " +
                     "created_at TEXT NOT NULL, finished_at TEXT, FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "effect",
+                    "TEXT NOT NULL DEFAULT 'NON_IDEMPOTENT_WRITE'");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS approvals (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL UNIQUE, " +
@@ -163,6 +170,12 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "duration_ms", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "retry_count", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "local_model", "INTEGER NOT NULL DEFAULT 0");
+            statement.execute("CREATE TABLE IF NOT EXISTS model_attempts (" +
+                    "id TEXT PRIMARY KEY,run_id TEXT NOT NULL,provider TEXT NOT NULL,model_name TEXT NOT NULL," +
+                    "attempt_ordinal INTEGER NOT NULL,status TEXT NOT NULL,http_status INTEGER,error TEXT," +
+                    "started_at TEXT NOT NULL,finished_at TEXT)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_model_attempts_run " +
+                    "ON model_attempts(run_id,started_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS approval_policies (" +
                     "id TEXT PRIMARY KEY, scope TEXT NOT NULL, session_id TEXT, project_key TEXT NOT NULL, " +
                     "tool_name TEXT NOT NULL, arguments_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, " +
@@ -211,6 +224,11 @@ public class SqliteRuntimeStore {
                     "max_concurrent_runs INTEGER NOT NULL DEFAULT 4, updated_at TEXT NOT NULL)");
             SqliteSchemaMigrator.ensureColumn(connection, "budget_policies", "max_concurrent_runs",
                     "INTEGER NOT NULL DEFAULT 4");
+            statement.execute("CREATE TABLE IF NOT EXISTS budget_reservations (" +
+                    "reservation_key TEXT PRIMARY KEY,project_key TEXT NOT NULL,reserved_tokens INTEGER NOT NULL," +
+                    "reserved_cost REAL NOT NULL,created_at TEXT NOT NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_budget_reservations_project " +
+                    "ON budget_reservations(project_key,created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS scheduled_tasks (" +
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, template_id TEXT NOT NULL, " +
                     "schedule_type TEXT NOT NULL, schedule_value TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', " +
@@ -221,8 +239,65 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, endpoint TEXT NOT NULL DEFAULT '', " +
                     "secret_env TEXT NOT NULL DEFAULT '', events TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE TABLE IF NOT EXISTS notification_outbox (" +
+                    "id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,project_key TEXT NOT NULL,event_type TEXT NOT NULL," +
+                    "run_id TEXT NOT NULL,message TEXT NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0," +
+                    "next_attempt_at TEXT NOT NULL,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "FOREIGN KEY(channel_id) REFERENCES notification_channels(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_due " +
+                    "ON notification_outbox(status,next_attempt_at)");
+            statement.execute("UPDATE notification_outbox SET status='PENDING',next_attempt_at='"+
+                    Instant.now()+"' WHERE status='SENDING'");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_suites (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', " +
+                    "default_trials INTEGER NOT NULL DEFAULT 1, pass_threshold INTEGER NOT NULL DEFAULT 80, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_suites_project " +
+                    "ON evaluation_suites(project_key,updated_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_cases (" +
+                    "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, " +
+                    "required_tools_json TEXT NOT NULL DEFAULT '[]', forbidden_tools_json TEXT NOT NULL DEFAULT '[]', " +
+                    "required_response_json TEXT NOT NULL DEFAULT '[]', forbidden_response_json TEXT NOT NULL DEFAULT '[]', " +
+                    "max_tool_calls INTEGER NOT NULL DEFAULT 0, max_tokens INTEGER NOT NULL DEFAULT 0, " +
+                    "max_duration_ms INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(suite_id,name), " +
+                    "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_cases_suite " +
+                    "ON evaluation_cases(suite_id,enabled,name)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_executions (" +
+                    "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, project_key TEXT NOT NULL, status TEXT NOT NULL, " +
+                    "model_profile_id TEXT, trial_count INTEGER NOT NULL, pass_threshold INTEGER NOT NULL, " +
+                    "average_score REAL, passed INTEGER, created_at TEXT NOT NULL, completed_at TEXT, " +
+                    "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_executions_suite " +
+                    "ON evaluation_executions(suite_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_trials (" +
+                    "id TEXT PRIMARY KEY, execution_id TEXT NOT NULL, case_id TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
+                    "session_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, score INTEGER, " +
+                    "passed INTEGER, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, completed_at TEXT, " +
+                    "UNIQUE(execution_id,case_id,ordinal), " +
+                    "FOREIGN KEY(execution_id) REFERENCES evaluation_executions(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_trials_execution " +
+                    "ON evaluation_trials(execution_id,case_id,ordinal)");
+            statement.execute("CREATE TABLE IF NOT EXISTS evaluation_baselines (" +
+                    "case_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, response TEXT NOT NULL, " +
+                    "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, " +
+                    "token_metric TEXT NOT NULL DEFAULT 'TOTAL', duration_ms INTEGER NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id) ON DELETE CASCADE)");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_baselines", "token_metric",
+                    "TEXT NOT NULL DEFAULT 'TOTAL'");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
-                    "WHERE status='RUNNING'");
+                    "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
+            statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
+                    "error='Tool outcome is unknown after runtime interruption; reconcile before retry', " +
+                    "finished_at='" + Instant.now() + "' WHERE status='RUNNING'");
+            statement.execute("UPDATE runs SET status='FAILED', " +
+                    "error='A non-idempotent tool outcome is unknown; manual reconciliation is required', " +
+                    "finished_at='" + Instant.now() + "',version=version+1 WHERE id IN " +
+                    "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
+                    "('COMPLETED','FAILED','CANCELED')");
             SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE memory_extractions SET status='PENDING', updated_at='" +
                     Instant.now() + "' WHERE status='RUNNING'");
@@ -239,21 +314,46 @@ public class SqliteRuntimeStore {
     }
 
     public SessionRecord createSession(String title, String projectKey, String groupId) {
+        return createSession(title, projectKey, groupId, false);
+    }
+
+    private void reconcileDuplicateActiveRuns(Connection connection) throws SQLException {
+        String now = Instant.now().toString();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE runs SET status='FAILED', " +
+                        "error=COALESCE(error,'duplicate active run reconciled during schema upgrade'), " +
+                        "finished_at=COALESCE(finished_at,?), version=version+1 " +
+                        "WHERE status NOT IN ('COMPLETED','FAILED','CANCELED') AND EXISTS (" +
+                        "SELECT 1 FROM runs earlier WHERE earlier.session_id=runs.session_id " +
+                        "AND earlier.status NOT IN ('COMPLETED','FAILED','CANCELED') AND (" +
+                        "earlier.created_at < runs.created_at OR " +
+                        "(earlier.created_at = runs.created_at AND earlier.id < runs.id)))")) {
+            statement.setString(1, now);
+            statement.executeUpdate();
+        }
+    }
+
+    public SessionRecord createInternalSession(String title, String projectKey) {
+        return createSession(title, projectKey, null, true);
+    }
+
+    private SessionRecord createSession(String title, String projectKey, String groupId, boolean internal) {
         String id = id("session");
         Instant now = Instant.now();
         String resolvedTitle = title == null || title.isBlank() ? "New session" : title.trim();
         String resolvedProject = normalizeProjectKey(projectKey);
         String resolvedGroup = normalizeGroupId(groupId);
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO sessions(id,title,project_key,group_id,status,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?)")) {
+                "INSERT INTO sessions(id,title,project_key,group_id,status,is_internal,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id);
             ps.setString(2, resolvedTitle);
             ps.setString(3, resolvedProject);
             ps.setString(4, resolvedGroup);
             ps.setString(5, "ACTIVE");
-            ps.setString(6, now.toString());
+            ps.setInt(6, internal ? 1 : 0);
             ps.setString(7, now.toString());
+            ps.setString(8, now.toString());
             ps.executeUpdate();
             return new SessionRecord(id, resolvedTitle, resolvedProject, resolvedGroup, "ACTIVE", now, now);
         } catch (SQLException e) {
@@ -779,6 +879,40 @@ public class SqliteRuntimeStore {
         return messages(sessionId, false);
     }
 
+    public boolean releaseClaim(String runId, String reason) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE runs SET status=?,queued_at=?,error=?,version=version+1 WHERE id=? AND status=?")) {
+                ps.setString(1, RunStatus.QUEUED.name());
+                ps.setString(2, Instant.now().toString());
+                ps.setString(3, reason);
+                ps.setString(4, runId);
+                ps.setString(5, RunStatus.RUNNING.name());
+                boolean changed = ps.executeUpdate() > 0;
+                if (changed) insertEvent(connection, runId, "run.dispatch_rejected",
+                        "{\"reason\":\"" + escape(reason) + "\"}");
+                connection.commit();
+                return changed;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("release claimed run", e);
+        }
+    }
+
+    public boolean isInternalRun(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT s.is_internal FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() && rs.getInt(1) != 0; }
+        } catch (SQLException e) {
+            throw failure("read internal run flag", e);
+        }
+    }
+
     public SessionRecord createBranchSession(String sourceRunId) {
         RunRecord sourceRun = findRun(sourceRunId)
                 .orElseThrow(() -> new IllegalArgumentException("run not found: " + sourceRunId));
@@ -924,6 +1058,10 @@ public class SqliteRuntimeStore {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
+                if (!runHasStatus(connection, runId, RunStatus.WAITING_MODEL)) {
+                    connection.rollback();
+                    return List.of();
+                }
                 insertMessage(connection, sessionId, runId, "assistant", content == null ? "" : content,
                         reasoningContent, null, toolCallsJson, false);
                 List<ToolCallRecord> records = new ArrayList<>();
@@ -940,7 +1078,7 @@ public class SqliteRuntimeStore {
                     Instant createdAt = batchTime.plusNanos(index);
                     try (PreparedStatement ps = connection.prepareStatement(
                             "INSERT INTO tool_calls(id,run_id,provider_call_id,tool_name,arguments,status," +
-                                    "idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?)")) {
+                                    "idempotency_key,created_at,effect) VALUES(?,?,?,?,?,?,?,?,?)")) {
                         ps.setString(1, id);
                         ps.setString(2, runId);
                         ps.setString(3, draft.providerCallId());
@@ -949,6 +1087,7 @@ public class SqliteRuntimeStore {
                         ps.setString(6, ToolCallStatus.REQUESTED.name());
                         ps.setString(7, draft.idempotencyKey());
                         ps.setString(8, createdAt.toString());
+                        ps.setString(9, draft.effect().name());
                         ps.executeUpdate();
                     }
                     records.add(new ToolCallRecord(id, runId, draft.providerCallId(), draft.toolName(),
@@ -1014,11 +1153,16 @@ public class SqliteRuntimeStore {
     }
 
     public List<RunEventRecord> events(String runId, long afterId) {
+        return events(runId, afterId, 1_000);
+    }
+
+    public List<RunEventRecord> events(String runId, long afterId, int requestedLimit) {
         List<RunEventRecord> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "SELECT * FROM run_events WHERE run_id=? AND id>? ORDER BY id")) {
+                "SELECT * FROM run_events WHERE run_id=? AND id>? ORDER BY id LIMIT ?")) {
             ps.setString(1, runId);
             ps.setLong(2, Math.max(0, afterId));
+            ps.setInt(3, Math.max(1, Math.min(requestedLimit, 1_000)));
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) values.add(mapEvent(rs));
             }
@@ -1030,13 +1174,19 @@ public class SqliteRuntimeStore {
 
     public ToolCallRecord createToolCall(String runId, String providerCallId, String toolName,
                                          String arguments, String idempotencyKey) {
+        return createToolCall(runId, providerCallId, toolName, arguments, idempotencyKey,
+                ToolEffect.READ_ONLY);
+    }
+
+    public ToolCallRecord createToolCall(String runId, String providerCallId, String toolName,
+                                         String arguments, String idempotencyKey, ToolEffect effect) {
         Optional<ToolCallRecord> existing = findToolCallByIdempotencyKey(idempotencyKey);
         if (existing.isPresent()) return existing.get();
         String id = id("tool");
         Instant now = Instant.now();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO tool_calls(id,run_id,provider_call_id,tool_name,arguments,status,idempotency_key,created_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO tool_calls(id,run_id,provider_call_id,tool_name,arguments,status,idempotency_key,created_at,effect) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id);
             ps.setString(2, runId);
             ps.setString(3, providerCallId);
@@ -1045,6 +1195,7 @@ public class SqliteRuntimeStore {
             ps.setString(6, ToolCallStatus.REQUESTED.name());
             ps.setString(7, idempotencyKey);
             ps.setString(8, now.toString());
+            ps.setString(9, effect.name());
             ps.executeUpdate();
             return new ToolCallRecord(id, runId, providerCallId, toolName, arguments,
                     ToolCallStatus.REQUESTED, null, null, idempotencyKey, 0, now, null);
@@ -1468,6 +1619,105 @@ public class SqliteRuntimeStore {
         }
     }
 
+    public long countToolCallsForRun(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM tool_calls WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
+        } catch (SQLException e) {
+            throw failure("count tool calls", e);
+        }
+    }
+
+    public boolean commitFinalAssistantAndComplete(String sessionId, String runId, String content,
+                                                    String reasoningContent, String completedEventJson) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,error=NULL,finished_at=?,version=version+1 " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, RunStatus.COMPLETED.name());
+                    ps.setString(2, Instant.now().toString());
+                    ps.setString(3, runId);
+                    ps.setString(4, RunStatus.WAITING_MODEL.name());
+                    if (ps.executeUpdate() == 0) {
+                        connection.rollback();
+                        return false;
+                    }
+                }
+                insertMessage(connection, sessionId, runId, "assistant", content == null ? "" : content,
+                        reasoningContent, null, null, false);
+                insertEvent(connection, runId, "model.completed",
+                        completedEventJson == null ? "{}" : completedEventJson);
+                insertEvent(connection, runId, "run.completed", "{\"status\":\"COMPLETED\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("commit final model response", e);
+        }
+    }
+
+    public boolean commitToolOutcome(String sessionId, String runId, ToolCallRecord call,
+                                     boolean success, String modelContent, String error,
+                                     String eventJson, int currentStep) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                if (!runHasStatus(connection, runId, RunStatus.WAITING_TOOL)) {
+                    connection.rollback();
+                    return false;
+                }
+                ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, toolStatus.name());
+                    ps.setString(2, success ? modelContent : null);
+                    ps.setString(3, success ? null : error);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, call.id());
+                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
+                }
+                insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
+                        null, call.providerCallId(), null, false);
+                insertEvent(connection, runId, success ? "tool.completed" : "tool.failed",
+                        eventJson == null ? "{}" : eventJson);
+                boolean hasMore;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT 1 FROM tool_calls WHERE run_id=? AND status=? LIMIT 1")) {
+                    ps.setString(1, runId);
+                    ps.setString(2, ToolCallStatus.REQUESTED.name());
+                    try (ResultSet rs = ps.executeQuery()) { hasMore = rs.next(); }
+                }
+                int nextStep = hasMore ? currentStep : currentStep + 1;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,current_step=?,error=NULL,queued_at=?,version=version+1 " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, RunStatus.QUEUED.name());
+                    ps.setInt(2, nextStep);
+                    ps.setString(3, Instant.now().toString());
+                    ps.setString(4, runId);
+                    ps.setString(5, RunStatus.WAITING_TOOL.name());
+                    if (ps.executeUpdate() == 0) throw new IllegalStateException("run is no longer waiting for tool");
+                }
+                insertEvent(connection, runId, "run.queued", "{\"status\":\"QUEUED\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("commit tool outcome", e);
+        }
+    }
+
     public List<ToolCallRecord> toolCallsForRun(String runId) {
         List<ToolCallRecord> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
@@ -1519,16 +1769,16 @@ public class SqliteRuntimeStore {
         updateTool(id, ToolCallStatus.FAILED, null, error, true);
     }
 
-    public void requeueRun(String runId, int nextStep) {
-        updateRun(runId, RunStatus.QUEUED, nextStep, null, false);
+    public boolean requeueRun(String runId, int nextStep) {
+        return updateRun(runId, RunStatus.QUEUED, nextStep, null, false);
     }
 
-    public void markRunStatus(String runId, RunStatus status) {
-        updateRun(runId, status, null, null, false);
+    public boolean markRunStatus(String runId, RunStatus status) {
+        return updateRun(runId, status, null, null, false);
     }
 
-    public void completeRun(String runId) {
-        updateRun(runId, RunStatus.COMPLETED, null, null, true);
+    public boolean completeRun(String runId) {
+        return updateRun(runId, RunStatus.COMPLETED, null, null, true);
     }
 
     public void recordModelUsage(String runId, String provider, int estimatedInputTokens,
@@ -1540,10 +1790,18 @@ public class SqliteRuntimeStore {
     public void recordModelUsage(String runId, String provider, String modelName, int estimatedInputTokens,
                                  int inputTokens, int outputTokens, int cachedInputTokens,
                                  long durationMs, int retryCount, boolean localModel) {
+        recordModelUsage(runId, provider, modelName, estimatedInputTokens, inputTokens, outputTokens,
+                cachedInputTokens, durationMs, retryCount, localModel, null);
+    }
+
+    public void recordModelUsage(String runId, String provider, String modelName, int estimatedInputTokens,
+                                 int inputTokens, int outputTokens, int cachedInputTokens,
+                                 long durationMs, int retryCount, boolean localModel, String reservationKey) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "INSERT INTO model_usage(run_id,provider,estimated_input_tokens,input_tokens," +
                         "output_tokens,cached_input_tokens,model_name,duration_ms,retry_count,local_model,created_at) " +
                         "VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
+            connection.setAutoCommit(false);
             ps.setString(1, runId);
             ps.setString(2, provider == null ? "unknown" : provider);
             ps.setInt(3, Math.max(0, estimatedInputTokens));
@@ -1556,30 +1814,47 @@ public class SqliteRuntimeStore {
             ps.setInt(10, localModel ? 1 : 0);
             ps.setString(11, Instant.now().toString());
             ps.executeUpdate();
+            if (reservationKey != null && !reservationKey.isBlank()) {
+                try (PreparedStatement release = connection.prepareStatement(
+                        "DELETE FROM budget_reservations WHERE reservation_key=?")) {
+                    release.setString(1, reservationKey);
+                    release.executeUpdate();
+                }
+            }
+            connection.commit();
         } catch (SQLException e) {
             throw failure("record model usage", e);
         }
     }
 
     public int modelTokensForRun(String runId) {
+        return modelTokenUsageForRun(runId).totalTokens();
+    }
+
+    public ModelTokenUsage modelTokenUsageForRun(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "SELECT COALESCE(SUM((CASE WHEN input_tokens>0 THEN input_tokens " +
-                        "ELSE estimated_input_tokens END)+output_tokens),0) FROM model_usage WHERE run_id=?")) {
+                "SELECT COALESCE(SUM(CASE WHEN input_tokens>0 THEN input_tokens " +
+                        "ELSE estimated_input_tokens END),0),COALESCE(SUM(output_tokens),0) " +
+                        "FROM model_usage WHERE run_id=?")) {
             ps.setString(1, runId);
-            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return new ModelTokenUsage(0, 0);
+                return new ModelTokenUsage(rs.getInt(1), rs.getInt(2));
+            }
         } catch (SQLException e) {
             throw failure("read model usage", e);
         }
     }
 
-    public void failRun(String runId, String error) {
-        updateRun(runId, RunStatus.FAILED, null, error, true);
+    public boolean failRun(String runId, String error) {
+        return updateRun(runId, RunStatus.FAILED, null, error, true);
     }
 
     public boolean cancelRun(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "UPDATE runs SET status=?, finished_at=?, version=version+1 " +
                         "WHERE id=? AND status NOT IN (?,?,?)")) {
+            connection.setAutoCommit(false);
             ps.setString(1, RunStatus.CANCELED.name());
             ps.setString(2, Instant.now().toString());
             ps.setString(3, runId);
@@ -1587,7 +1862,8 @@ public class SqliteRuntimeStore {
             ps.setString(5, RunStatus.FAILED.name());
             ps.setString(6, RunStatus.CANCELED.name());
             boolean changed = ps.executeUpdate() > 0;
-            if (changed) appendEvent(runId, "run.canceled", "{}");
+            if (changed) insertEvent(connection, runId, "run.canceled", "{}");
+            connection.commit();
             return changed;
         } catch (SQLException e) {
             throw failure("cancel run", e);
@@ -1624,6 +1900,50 @@ public class SqliteRuntimeStore {
 
     public Path databasePath() {
         return databasePath;
+    }
+
+    public String startModelAttempt(String runId, String provider, String modelName, int ordinal) {
+        String attemptId = id("model_attempt");
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO model_attempts(id,run_id,provider,model_name,attempt_ordinal,status,started_at) " +
+                        "VALUES(?,?,?,?,?,'RUNNING',?)")) {
+            ps.setString(1, attemptId);
+            ps.setString(2, runId == null ? "" : runId);
+            ps.setString(3, provider == null ? "unknown" : provider);
+            ps.setString(4, modelName == null ? "" : modelName);
+            ps.setInt(5, Math.max(1, ordinal));
+            ps.setString(6, Instant.now().toString());
+            ps.executeUpdate();
+            return attemptId;
+        } catch (SQLException e) {
+            throw failure("start model attempt", e);
+        }
+    }
+
+    public void finishModelAttempt(String attemptId, String status, Integer httpStatus, String error) {
+        if (attemptId == null || attemptId.isBlank()) return;
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE model_attempts SET status=?,http_status=?,error=?,finished_at=? WHERE id=?")) {
+            ps.setString(1, status);
+            if (httpStatus == null) ps.setNull(2, java.sql.Types.INTEGER); else ps.setInt(2, httpStatus);
+            ps.setString(3, error == null ? null : error.substring(0, Math.min(error.length(), 4_000)));
+            ps.setString(4, Instant.now().toString());
+            ps.setString(5, attemptId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("finish model attempt", e);
+        }
+    }
+
+    public int modelRetriesForRun(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM model_attempts WHERE run_id=? AND status='RETRY'")) {
+            connection.setAutoCommit(false);
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
+        } catch (SQLException e) {
+            throw failure("count model retries", e);
+        }
     }
 
     public List<MemoryUnit> managedMemoryUnits(String projectKey, int limit) {
@@ -2143,11 +2463,13 @@ public class SqliteRuntimeStore {
         }
     }
 
-    private void updateRun(String runId, RunStatus status, Integer currentStep, String error, boolean terminal) {
+    private boolean updateRun(String runId, RunStatus status, Integer currentStep, String error, boolean terminal) {
         String sql = "UPDATE runs SET status=?, current_step=COALESCE(?,current_step), error=?, " +
                 "queued_at=" + (status == RunStatus.QUEUED ? "?" : "queued_at") + ", " +
-                "finished_at=" + (terminal ? "?" : "finished_at") + ", version=version+1 WHERE id=?";
+                "finished_at=" + (terminal ? "?" : "finished_at") + ", version=version+1 WHERE id=? " +
+                "AND status NOT IN ('COMPLETED','FAILED','CANCELED')";
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(sql)) {
+            connection.setAutoCommit(false);
             int index = 1;
             ps.setString(index++, status.name());
             if (currentStep == null) ps.setNull(index++, java.sql.Types.INTEGER); else ps.setInt(index++, currentStep);
@@ -2155,14 +2477,20 @@ public class SqliteRuntimeStore {
             if (status == RunStatus.QUEUED) ps.setString(index++, Instant.now().toString());
             if (terminal) ps.setString(index++, Instant.now().toString());
             ps.setString(index, runId);
-            ps.executeUpdate();
+            boolean changed = ps.executeUpdate() > 0;
+            if (!changed) {
+                connection.rollback();
+                return false;
+            }
             String eventType = terminal
                     ? "run." + status.name().toLowerCase()
                     : status == RunStatus.QUEUED ? "run.queued" : "run.status_changed";
             String eventData = error == null
                     ? "{\"status\":\"" + status.name() + "\"}"
                     : "{\"status\":\"" + status.name() + "\",\"error\":\"" + escape(error) + "\"}";
-            appendEvent(runId, eventType, eventData);
+            insertEvent(connection, runId, eventType, eventData);
+            connection.commit();
+            return true;
         } catch (SQLException e) {
             throw failure("update run", e);
         }
@@ -2276,6 +2604,14 @@ public class SqliteRuntimeStore {
         return connections.open();
     }
 
+    private static boolean runHasStatus(Connection connection, String runId, RunStatus status) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT 1 FROM runs WHERE id=? AND status=?")) {
+            ps.setString(1, runId);
+            ps.setString(2, status.name());
+            try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
+        }
+    }
+
     private static SessionRecord mapSession(ResultSet rs) throws SQLException {
         return new SessionRecord(rs.getString("id"), rs.getString("title"), rs.getString("project_key"),
                 rs.getString("group_id"), rs.getString("status"),
@@ -2330,7 +2666,11 @@ public class SqliteRuntimeStore {
     }
 
     public record ToolCallDraft(String providerCallId, String toolName,
-                                String arguments, String idempotencyKey) { }
+                                String arguments, String idempotencyKey, ToolEffect effect) { }
+
+    public record ModelTokenUsage(int inputTokens, int outputTokens) {
+        public int totalTokens() { return inputTokens + outputTokens; }
+    }
 
     public record MemoryUnit(String id, String projectKey, String memoryKey, String content, String tags,
                              String layer, String memoryType, double confidence, String origin,

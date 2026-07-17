@@ -99,10 +99,19 @@ function scrollBottom() {
 function renderEmpty() {
   const empty = element('div', 'empty');
   const content = element('div');
+  const actions = element('div', 'home-actions');
+  const productivity = element('button', 'secondary home-action');
+  productivity.append(element('strong', '', '效率工作台'), element('small', '', '用量、模板、队列与自动化'));
+  productivity.onclick = openWorkbench;
+  const evaluations = element('button', 'primary home-action');
+  evaluations.append(element('strong', '', 'Agent 评测中心'), element('small', '', '套件、运行报告与质量基线'));
+  evaluations.onclick = openEvaluationCenter;
+  actions.append(productivity, evaluations);
   content.append(
     element('div', 'logo', 'π'),
     element('h1', '', '今天想完成什么？'),
-    element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。')
+    element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。'),
+    actions
   );
   empty.append(content);
   $('stack').replaceChildren(empty);
@@ -868,8 +877,204 @@ async function openWorkbench() {
   const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification'].map($);
   creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
-  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadP1Data()]); }
+  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadProductivityData()]); }
   finally { creationButtons.forEach(button => { button.disabled = false; }); }
+}
+
+let evaluationSuites = [];
+let currentEvaluationExecution = '';
+
+async function openEvaluationCenter() {
+  $('evaluationProject').textContent = `当前项目：${currentProjectKey()}`;
+  const creationButtons = ['installEvaluationStarterPack', 'addEvaluationSuite'].map($);
+  creationButtons.forEach(button => { button.disabled = true; });
+  $('evaluationDialog').showModal();
+  try { await loadEvaluations(); }
+  finally { creationButtons.forEach(button => { button.disabled = false; }); }
+}
+
+async function loadEvaluations() {
+  const project = encodeURIComponent(currentProjectKey());
+  try {
+    evaluationSuites = await api(`/v1/evaluations/suites?projectKey=${project}`);
+    const groups = await Promise.all(evaluationSuites.map(async suite => ({
+      suite,
+      cases: await api(`/v1/evaluations/suites/${suite.id}/cases`),
+      executions: await api(`/v1/evaluations/suites/${suite.id}/executions?limit=5`)
+    })));
+    const enabledCases = groups.reduce((total, group) => total + group.cases.filter(value => value.enabled).length, 0);
+    $('evaluationSuiteCount').textContent = `${groups.length} 个套件 · ${enabledCases} 个启用用例`;
+    const nodes = [];
+    groups.forEach(({suite, cases, executions}) => {
+      const block = element('div', 'evaluation-suite-block');
+      const latest = executions[0];
+      const summary = `${cases.filter(value => value.enabled).length}/${cases.length} 个启用用例 · 默认 ${suite.defaultTrials} Trial · ${suite.passThreshold} 分通过${latest ? ` · 最近 ${latest.status}${latest.averageScore == null ? '' : ` ${latest.averageScore.toFixed(1)} 分`}` : ''}`;
+      const item = workbenchItem(suite.name, `${suite.description || '未填写说明'} · ${summary}`);
+      actionButton(item, '新建用例', () => openEvaluationCaseDialog(suite), true);
+      actionButton(item, '运行', () => startEvaluation(suite));
+      if (latest) actionButton(item, '查看报告', () => loadEvaluationReport(latest.id));
+      actionButton(item, '删除', async () => {
+        if (!confirm(`删除评测套件“${suite.name}”？`)) return;
+        try { await api(`/v1/evaluations/suites/${suite.id}`, {method: 'DELETE'}); await loadEvaluations(); }
+        catch (error) { showNotice(`套件删除失败：${error.message}`, true); }
+      });
+      block.append(item);
+      if (cases.length) {
+        const caseList = element('details', 'evaluation-case-list');
+        caseList.append(element('summary', '', `查看 ${cases.length} 个用例`));
+        cases.forEach(value => {
+          const ruleCount = value.requiredTools.length + value.forbiddenTools.length + value.requiredResponse.length + value.forbiddenResponse.length;
+          const child = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`,
+            `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} 输出 Token` : ''}`);
+          child.classList.add('evaluation-case-item');
+          actionButton(child, value.enabled ? '停用' : '启用', () => setEvaluationCaseEnabled(value, !value.enabled));
+          actionButton(child, '删除', async () => {
+            if (!confirm(`删除评测用例“${value.name}”？`)) return;
+            try { await api(`/v1/evaluations/cases/${value.id}`, {method: 'DELETE'}); await loadEvaluations(); }
+            catch (error) { showNotice(`用例删除失败：${error.message}`, true); }
+          });
+          caseList.append(child);
+        });
+        block.append(caseList);
+      }
+      nodes.push(block);
+    });
+    $('evaluationSuiteList').replaceChildren(...nodes);
+    if (!nodes.length) $('evaluationSuiteList').append(element('div', 'hint', '尚未创建评测套件。先建立一组关键任务和确定性规则。'));
+    if (currentEvaluationExecution) await loadEvaluationReport(currentEvaluationExecution, false);
+  } catch (error) { showNotice(`评测中心加载失败：${error.message}`, true); }
+}
+
+async function installEvaluationStarterPack() {
+  if (!confirm('安装官方入门评测集？已存在的同名套件和用例会保留，不会覆盖你的修改。')) return;
+  const button = $('installEvaluationStarterPack'); button.disabled = true;
+  try {
+    const result = await api(`/v1/evaluations/starter-pack?projectKey=${encodeURIComponent(currentProjectKey())}`,
+      {method: 'POST', body: '{}'});
+    await loadEvaluations();
+    showNotice(`官方评测集 ${result.version}：新增 ${result.installedSuites} 个套件、${result.installedCases} 个用例，跳过 ${result.skippedCases} 个已有用例`);
+  } catch (error) { showNotice(`官方评测集安装失败：${error.message}`, true); }
+  finally { button.disabled = false; }
+}
+
+async function setEvaluationCaseEnabled(value, enabled) {
+  try {
+    await api(`/v1/evaluations/cases/${value.id}`, {method: 'PUT', body: JSON.stringify({...value, enabled})});
+    await loadEvaluations(); showNotice(`评测用例已${enabled ? '启用' : '停用'}`);
+  } catch (error) { showNotice(`评测用例状态更新失败：${error.message}`, true); }
+}
+
+function openEvaluationSuiteDialog() {
+  $('evaluationSuiteForm').reset();
+  $('evaluationSuiteTrials').value = '1'; $('evaluationSuiteThreshold').value = '80';
+  setFormError('evaluationSuiteError'); $('evaluationSuiteDialog').showModal(); $('evaluationSuiteName').focus();
+}
+
+async function submitEvaluationSuite(event) {
+  event.preventDefault(); setFormError('evaluationSuiteError'); $('saveEvaluationSuite').disabled = true;
+  try {
+    await api('/v1/evaluations/suites', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), name: $('evaluationSuiteName').value.trim(),
+      description: $('evaluationSuiteDescription').value.trim(),
+      defaultTrials: +$('evaluationSuiteTrials').value, passThreshold: +$('evaluationSuiteThreshold').value
+    })});
+    $('evaluationSuiteDialog').close(); await loadEvaluations(); showNotice('评测套件已创建');
+  } catch (error) { setFormError('evaluationSuiteError', error.message); }
+  finally { $('saveEvaluationSuite').disabled = false; }
+}
+
+function openEvaluationCaseDialog(suite) {
+  $('evaluationCaseForm').reset(); $('evaluationCaseForm').dataset.suiteId = suite.id;
+  $('evaluationCaseSuite').textContent = `所属套件：${suite.name}`; $('evaluationCaseEnabled').checked = true;
+  ['evaluationMaxTools', 'evaluationMaxTokens', 'evaluationMaxDuration'].forEach(id => { $(id).value = '0'; });
+  setFormError('evaluationCaseError'); $('evaluationCaseDialog').showModal(); $('evaluationCaseName').focus();
+}
+
+function evaluationRuleList(id) {
+  return $(id).value.split(/[\n,，]+/).map(value => value.trim()).filter(Boolean);
+}
+
+async function submitEvaluationCase(event) {
+  event.preventDefault(); setFormError('evaluationCaseError'); $('saveEvaluationCase').disabled = true;
+  try {
+    const suiteId = $('evaluationCaseForm').dataset.suiteId;
+    await api(`/v1/evaluations/suites/${suiteId}/cases`, {method: 'POST', body: JSON.stringify({
+      name: $('evaluationCaseName').value.trim(), prompt: $('evaluationCasePrompt').value.trim(),
+      requiredTools: evaluationRuleList('evaluationRequiredTools'), forbiddenTools: evaluationRuleList('evaluationForbiddenTools'),
+      requiredResponse: evaluationRuleList('evaluationRequiredResponse'), forbiddenResponse: evaluationRuleList('evaluationForbiddenResponse'),
+      maxToolCalls: +$('evaluationMaxTools').value, maxTokens: +$('evaluationMaxTokens').value,
+      maxDurationMs: +$('evaluationMaxDuration').value, enabled: $('evaluationCaseEnabled').checked
+    })});
+    $('evaluationCaseDialog').close(); await loadEvaluations(); showNotice('评测用例已创建');
+  } catch (error) { setFormError('evaluationCaseError', error.message); }
+  finally { $('saveEvaluationCase').disabled = false; }
+}
+
+async function startEvaluation(suite) {
+  if (!confirm(`运行“${suite.name}”？每个启用用例将执行 ${suite.defaultTrials} 次。`)) return;
+  try {
+    const body = state.modelProfileId ? {modelProfileId: state.modelProfileId} : {};
+    const execution = await api(`/v1/evaluations/suites/${suite.id}/executions`, {method: 'POST', body: JSON.stringify(body)});
+    currentEvaluationExecution = execution.id; showNotice('评测已排队，将复用内部 Run 执行');
+    await Promise.all([loadEvaluations(), loadEvaluationReport(execution.id)]);
+  } catch (error) { showNotice(`评测启动失败：${error.message}`, true); }
+}
+
+async function loadEvaluationReport(executionId, notify = true) {
+  try {
+    currentEvaluationExecution = executionId;
+    $('evaluationReportState').textContent = '正在加载报告…';
+    const report = await api(`/v1/evaluations/executions/${executionId}`);
+    const execution = report.execution;
+    $('evaluationReportState').textContent = `${execution.status} · ${execution.trialCount} Trial/用例`;
+    const header = element('div', 'evaluation-report-header');
+    const score = execution.averageScore == null ? '执行中' : `${execution.averageScore.toFixed(1)} 分`;
+    header.append(element('strong', '', `${report.suite.name} · ${score}`),
+      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过`));
+    const refresh = element('button', 'secondary', '刷新报告'); refresh.onclick = () => loadEvaluationReport(executionId); header.append(refresh);
+    const nodes = [header];
+    report.trials.forEach(value => {
+      const trial = value.trial; const details = value.details || {};
+      const status = trial.score == null ? '运行中' : `${trial.score} 分 · ${trial.passed ? '通过' : '未通过'}`;
+      const item = element('div', `evaluation-trial ${trial.score == null ? '' : trial.passed ? 'pass' : 'fail'}`);
+      item.append(element('strong', '', `${value.caseName} · Trial ${trial.ordinal} · ${status}`));
+      if (details.toolCalls != null) item.append(element('div', 'evaluation-checks',
+        `${details.toolCalls} 次工具调用 · ${details.outputTokens ?? details.tokens ?? 0} 输出 Token · ${details.totalTokens ?? details.tokens ?? 0} 总 Token · ${details.durationMs || 0} ms · Run ${trial.runId}`));
+      const failures = (details.checks || []).filter(check => !check.passed);
+      if (failures.length) item.append(element('div', 'evaluation-checks', failures.map(check => `${check.rule}：${check.evidence}（-${check.deduction}）`).join('\n')));
+      (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
+        const approvalText = element('div', 'evaluation-checks', `等待审批：${approval.reason}`);
+        const allow = element('button', 'primary', '仅本次允许');
+        const deny = element('button', 'secondary', '拒绝');
+        allow.onclick = () => resolveEvaluationApproval(approval.id, 'APPROVED', executionId);
+        deny.onclick = () => resolveEvaluationApproval(approval.id, 'DENIED', executionId);
+        approvalText.append(allow, deny); item.append(approvalText);
+      });
+      if (details.runStatus === 'COMPLETED' && trial.passed) {
+        const baseline = element('button', 'secondary', value.hasBaseline ? '更新基线' : '设为基线');
+        baseline.onclick = async () => {
+          await api(`/v1/evaluations/trials/${trial.id}/baseline`, {method: 'POST'});
+          showNotice('人工确认基线已保存'); await loadEvaluationReport(executionId, false);
+        };
+        item.append(baseline);
+      }
+      nodes.push(item);
+    });
+    $('evaluationReport').replaceChildren(...nodes);
+    if (notify) showNotice(execution.status === 'RUNNING' ? '评测仍在执行，可稍后刷新报告' : `评测${execution.passed ? '通过' : '未通过'}`,
+      execution.status !== 'RUNNING' && !execution.passed);
+  } catch (error) {
+    $('evaluationReportState').textContent = '报告加载失败';
+    showNotice(`评测报告加载失败：${error.message}`, true);
+  }
+}
+
+async function resolveEvaluationApproval(id, decision, executionId) {
+  try {
+    await api(`/v1/approvals/${id}`, {method: 'POST', body: JSON.stringify({decision, rememberScope: null})});
+    showNotice(decision === 'APPROVED' ? '评测工具已允许，将继续执行' : '评测工具已拒绝');
+    await loadEvaluationReport(executionId, false);
+  } catch (error) { showNotice(`评测审批失败：${error.message}`, true); }
 }
 
 async function refreshComposerOptions() {
@@ -896,7 +1101,7 @@ async function refreshComposerOptions() {
     if (state.modelProfiles.some(value => value.id === state.modelProfileId)) profile.value = state.modelProfileId;
     else state.modelProfileId = '';
     scheduleEstimate();
-  } catch (error) { showNotice(`P1 配置加载失败：${error.message}`, true); }
+  } catch (error) { showNotice(`效率配置加载失败：${error.message}`, true); }
 }
 
 let estimateTimer = 0;
@@ -931,7 +1136,7 @@ async function applyTemplate(id) {
   } catch (error) { showNotice(`模板解析失败：${error.message}`, true); }
 }
 
-async function loadP1Data() {
+async function loadProductivityData() {
   const project = encodeURIComponent(currentProjectKey());
   try {
     const [usage, templates, profiles, queue, schedules, notifications] = await Promise.all([
@@ -945,7 +1150,7 @@ async function loadP1Data() {
     renderUsage(usage); renderTemplates(templates); renderProfiles(profiles); renderQueue(queue);
     renderSchedules(schedules, templates); renderNotifications(notifications);
     state.templates = templates; state.modelProfiles = profiles;
-  } catch (error) { showNotice(`P1 工作台加载失败：${error.message}`, true); }
+  } catch (error) { showNotice(`效率工作台加载失败：${error.message}`, true); }
 }
 
 function renderUsage(value) {
@@ -966,16 +1171,18 @@ function renderUsage(value) {
   $('usageSummary').replaceChildren(...labels.map(([name, text]) => {
     const item = element('div', 'capability-status-item'); item.append(element('strong', '', name), element('small', '', text)); return item;
   }));
-  const configure = element('button', 'secondary', '配置预算与并发');
-  configure.onclick = () => configureBudget(budget);
-  $('usageSummary').append(configure);
-  (value.breakdown || []).slice(0, 8).forEach(row => {
-    const item = element('div', 'capability-status-item');
-    const tokens = row.inputTokens + row.outputTokens;
-    item.append(element('strong', '', `${row.date} · ${row.model}`),
-      element('small', '', `${row.sessionTitle} · ${row.calls} 次 · ${tokens.toLocaleString()} Token · ${row.localModel ? `${Math.round(row.averageDurationMs)} ms` : `$${row.estimatedCost.toFixed(4)}`}`));
-    $('usageSummary').append(item);
+  $('configureUsageBudget').onclick = () => configureBudget(budget);
+  const breakdown = (value.breakdown || []).slice(0, 12);
+  $('usageHistorySummary').textContent = breakdown.length ? `最近 ${breakdown.length} 条 · 点击展开` : '暂无记录';
+  const rows = breakdown.map(row => {
+    const item = element('div', 'usage-row');
+    const rowTokens = row.inputTokens + row.outputTokens;
+    item.append(element('strong', '', row.date), element('span', '', `${row.model} · ${row.sessionTitle}`),
+      element('small', '', `${row.calls} 次 · ${rowTokens.toLocaleString()} Token · ${row.localModel ? `${Math.round(row.averageDurationMs)} ms` : `$${row.estimatedCost.toFixed(4)}`}`));
+    return item;
   });
+  $('usageBreakdown').replaceChildren(...rows);
+  if (!rows.length) $('usageBreakdown').append(element('div', 'evaluation-empty', '近 30 天暂无模型调用记录。'));
 }
 
 async function configureBudget(current) {
@@ -985,14 +1192,14 @@ async function configureBudget(current) {
   const monthlyCost = prompt('每月成本预算 USD（0 表示不限）', current.monthlyCost || 0); if (monthlyCost === null) return;
   const maxConcurrentRuns = prompt('项目最大并发 Run', current.maxConcurrentRuns || 4); if (maxConcurrentRuns === null) return;
   await api(`/v1/productivity/budget?projectKey=${encodeURIComponent(currentProjectKey())}`, {method: 'PUT', body: JSON.stringify({dailyTokens:+dailyTokens, monthlyTokens:+monthlyTokens, dailyCost:+dailyCost, monthlyCost:+monthlyCost, warnRatio:.8, maxConcurrentRuns:+maxConcurrentRuns})});
-  await loadP1Data();
+  await loadProductivityData();
 }
 
 function renderTemplates(values) {
   $('templateList').replaceChildren(...values.map(value => {
     const item = workbenchItem(`${value.shortcut || '模板'} · ${value.name}`, `${value.prompt} · 使用 ${value.useCount} 次${value.attachmentRequirements ? ` · 附件：${value.attachmentRequirements}` : ''}`);
     actionButton(item, '使用', async () => { $('workbenchDialog').close(); await applyTemplate(value.id); }, true);
-    actionButton(item, '删除', async () => { if (confirm(`删除模板“${value.name}”？`)) { await api(`/v1/productivity/templates/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    actionButton(item, '删除', async () => { if (confirm(`删除模板“${value.name}”？`)) { await api(`/v1/productivity/templates/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } });
     return item;
   }));
 }
@@ -1040,7 +1247,7 @@ async function submitTemplate(event) {
       modelProfileId: $('templateProfile').value || null
     })});
     $('templateDialog').close();
-    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    await Promise.all([loadProductivityData(), refreshComposerOptions()]);
     showNotice('任务模板已创建');
   } catch (error) { setFormError('templateFormError', error.message); }
   finally { button.disabled = false; }
@@ -1050,7 +1257,7 @@ function renderProfiles(values) {
   $('profileList').replaceChildren(...values.map(value => {
     const item = workbenchItem(`${value.defaultProfile ? '★ ' : ''}${value.name}`, `${value.localModel ? '本地模型' : '远程模型'} · ${value.model} · ${value.maxContextTokens.toLocaleString()} ctx · fallback ${value.fallbackModel || '无'}`);
     actionButton(item, '选用', () => { state.modelProfileId = value.id; localStorage.setItem('paicli_model_profile', value.id); $('modelProfile').value = value.id; scheduleEstimate(); });
-    actionButton(item, '删除', async () => { if (confirm(`删除模型方案“${value.name}”？`)) { await api(`/v1/productivity/model-profiles/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } });
+    actionButton(item, '删除', async () => { if (confirm(`删除模型方案“${value.name}”？`)) { await api(`/v1/productivity/model-profiles/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } });
     return item;
   }));
   if (!values.length) $('profileList').append(element('div', 'hint', '暂无项目级模型方案；继续使用服务端默认模型'));
@@ -1088,7 +1295,7 @@ async function submitProfile(event) {
       localModel, makeDefault: $('profileDefault').checked
     })});
     $('profileDialog').close();
-    await Promise.all([loadP1Data(), refreshComposerOptions()]);
+    await Promise.all([loadProductivityData(), refreshComposerOptions()]);
     showNotice('模型配置方案已创建');
   } catch (error) { setFormError('profileFormError', error.message); }
   finally { button.disabled = false; }
@@ -1104,13 +1311,13 @@ function renderQueue(values) {
   }));
   if (!values.length) $('queueList').append(element('div', 'hint', '当前没有排队、运行、待审批或失败任务'));
 }
-async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadP1Data(); }
-async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadP1Data(); }
+async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadProductivityData(); }
+async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadProductivityData(); }
 
 function renderSchedules(values, templates) {
   $('scheduleList').replaceChildren(...values.map(value => {
     const template = templates.find(item => item.id === value.templateId); const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
-    actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadP1Data(); } }); return item;
+    actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } }); return item;
   }));
 }
 function localDateTimeValue(date) {
@@ -1186,14 +1393,14 @@ async function submitSchedule(event) {
       variables, enabled: $('scheduleEnabled').checked, nextRunAt
     })});
     $('scheduleDialog').close();
-    await loadP1Data();
+    await loadProductivityData();
     showNotice('定时任务已创建');
   } catch (error) { setFormError('scheduleFormError', error.message); }
   finally { button.disabled = false; }
 }
 
 function renderNotifications(values) {
-  $('notificationList').replaceChildren(...values.map(value => { const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.type} · ${value.events} · 密钥环境变量 ${value.secretEnv || '无'}`); actionButton(item, '删除', async () => { await api(`/v1/productivity/notifications/${value.id}`, {method: 'DELETE'}); await loadP1Data(); }); return item; }));
+  $('notificationList').replaceChildren(...values.map(value => { const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.type} · ${value.events} · 密钥环境变量 ${value.secretEnv || '无'}`); actionButton(item, '删除', async () => { await api(`/v1/productivity/notifications/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); }); return item; }));
 }
 const notificationNames = {BROWSER: '浏览器通知', WEBHOOK: 'Webhook 通知', EMAIL: '邮件通知', IM: '企业 IM 通知'};
 
@@ -1233,7 +1440,7 @@ async function submitNotification(event) {
       events, enabled: $('notificationEnabled').checked
     })});
     $('notificationDialog').close();
-    await loadP1Data();
+    await loadProductivityData();
     showNotice('完成通知已创建');
   } catch (error) { setFormError('notificationFormError', error.message); }
   finally { button.disabled = false; }
@@ -1592,14 +1799,19 @@ $('menu').onclick = () => $('sidebar').classList.toggle('open');
 $('settings').onclick = () => openConnectionSettings();
 $('capabilities').onclick = openCapabilities;
 $('workbench').onclick = openWorkbench;
+$('evaluationCenter').onclick = openEvaluationCenter;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
+$('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
 $('refreshMemories').onclick = loadManagedMemories;
 $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPolicies').onclick = loadApprovalPolicies;
-$('refreshP1').onclick = loadP1Data;
-$('refreshQueue').onclick = loadP1Data;
+$('refreshProductivity').onclick = loadProductivityData;
+$('refreshQueue').onclick = loadProductivityData;
+$('refreshEvaluations').onclick = loadEvaluations;
+$('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
+$('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
 $('addTemplate').onclick = openTemplateDialog;
 $('addProfile').onclick = openProfileDialog;
 $('addSchedule').onclick = openScheduleDialog;
@@ -1608,10 +1820,14 @@ $('cancelTemplate').onclick = () => $('templateDialog').close();
 $('cancelProfile').onclick = () => $('profileDialog').close();
 $('cancelSchedule').onclick = () => $('scheduleDialog').close();
 $('cancelNotification').onclick = () => $('notificationDialog').close();
+$('cancelEvaluationSuite').onclick = () => $('evaluationSuiteDialog').close();
+$('cancelEvaluationCase').onclick = () => $('evaluationCaseDialog').close();
 $('templateForm').onsubmit = submitTemplate;
 $('profileForm').onsubmit = submitProfile;
 $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
+$('evaluationSuiteForm').onsubmit = submitEvaluationSuite;
+$('evaluationCaseForm').onsubmit = submitEvaluationCase;
 $('profileLocal').onchange = updateProfilePriceFields;
 $('scheduleType').onchange = updateScheduleFields;
 $('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };

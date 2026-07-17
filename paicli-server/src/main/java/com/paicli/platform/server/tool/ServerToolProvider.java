@@ -2,6 +2,7 @@ package com.paicli.platform.server.tool;
 
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
+import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.server.model.ModelToolDefinition;
 
 import java.util.List;
@@ -22,5 +23,9 @@ public interface ServerToolProvider {
 
     default boolean requiresApproval(String toolName) {
         return false;
+    }
+
+    default ToolEffect effect(String toolName) {
+        return ToolEffect.NON_IDEMPOTENT_WRITE;
     }
 }

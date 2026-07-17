@@ -3,6 +3,7 @@ package com.paicli.platform.server.tool;
 import com.paicli.platform.common.SandboxDriver;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
+import com.paicli.platform.common.ToolEffect;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.paicli.platform.server.artifact.LocalArtifactStore;
@@ -18,6 +19,10 @@ public class ToolRouter {
     private final LocalArtifactStore artifactStore;
     private final List<ServerToolProvider> providers;
     private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("write_file", "execute_command");
+    private static final Set<String> READ_ONLY_TOOLS = Set.of(
+            "list_dir", "read_file", "read_artifact", "load_skill", "read_skill_resource",
+            "search_knowledge", "web_search", "web_fetch", "session_search",
+            "get_agent_result", "list_agents");
 
     @Autowired
     public ToolRouter(SandboxDriver sandboxDriver, LocalArtifactStore artifactStore,
@@ -83,6 +88,15 @@ public class ToolRouter {
     public String executionTarget(String toolName) {
         return providers.stream().filter(provider -> provider.supports(toolName))
                 .findFirst().map(provider -> "server:" + provider.id()).orElse(mode());
+    }
+
+    public ToolEffect effect(String toolName) {
+        if (READ_ONLY_TOOLS.contains(toolName)) return ToolEffect.READ_ONLY;
+        if ("write_file".equals(toolName)) return ToolEffect.IDEMPOTENT_WRITE;
+        for (ServerToolProvider provider : providers) {
+            if (provider.supports(toolName)) return provider.effect(toolName);
+        }
+        return ToolEffect.NON_IDEMPOTENT_WRITE;
     }
 
     public String mode() {

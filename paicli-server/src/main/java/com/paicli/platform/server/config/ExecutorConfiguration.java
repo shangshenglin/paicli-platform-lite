@@ -8,7 +8,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 @Configuration
 public class ExecutorConfiguration {
     @Bean("runTaskExecutor")
-    TaskExecutor runTaskExecutor(PlatformProperties properties) {
+    ThreadPoolTaskExecutor runTaskExecutor(PlatformProperties properties) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(properties.workerCount());
         executor.setMaxPoolSize(properties.workerCount());

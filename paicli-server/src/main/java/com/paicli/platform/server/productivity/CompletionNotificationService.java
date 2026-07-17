@@ -6,6 +6,8 @@ import com.paicli.platform.server.web.NetworkPolicy;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.stereotype.Service;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.core.task.TaskRejectedException;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -25,10 +27,22 @@ public class CompletionNotificationService {
     public void publish(String projectKey,String event,String runId,String message){
         for(var channel:store.notificationChannels(projectKey)){
             if(!channel.enabled()||channel.type().equals("BROWSER")||!contains(channel.events(),event)||channel.endpoint().isBlank())continue;
-            executor.execute(()->deliver(channel,event,runId,message));
+            store.enqueueNotification(channel,event,runId,message);
         }
     }
-    private void deliver(ProductivityStore.NotificationChannel channel,String event,String runId,String message){
+
+    @Scheduled(fixedDelayString="${paicli.productivity.notification-delay-ms:1000}")
+    public void dispatch(){
+        for(int index=0;index<4;index++){
+            var delivery=store.claimNotification();if(delivery.isEmpty())return;
+            var value=delivery.get();
+            try{executor.execute(()->deliver(value));}
+            catch(TaskRejectedException e){store.finishNotification(value.id(),false,value.attempts(),e.getMessage());return;}
+        }
+    }
+
+    private void deliver(ProductivityStore.NotificationDelivery delivery){
+        var channel=delivery.channel();String event=delivery.event(),runId=delivery.runId(),message=delivery.message();
         try{
             NetworkPolicy.requirePublicHttpUrl(channel.endpoint());
             byte[] body=mapper.writeValueAsBytes(Map.of("event",event,"projectKey",channel.projectKey(),"runId",runId,
@@ -38,8 +52,11 @@ public class CompletionNotificationService {
             if(!channel.secretEnv().isBlank()){
                 String secret=System.getenv(channel.secretEnv());if(secret!=null&&!secret.isBlank())builder.header("Authorization","Bearer "+secret);
             }
-            client.send(builder.build(),HttpResponse.BodyHandlers.discarding());
-        }catch(Exception ignored){ }
+            var response=client.send(builder.build(),HttpResponse.BodyHandlers.discarding());
+            if(response.statusCode()<200||response.statusCode()>=300)throw new IllegalStateException("notification HTTP "+response.statusCode());
+            store.finishNotification(delivery.id(),true,delivery.attempts(),null);
+        }catch(Exception error){store.finishNotification(delivery.id(),false,delivery.attempts(),
+                error.getMessage()==null?error.getClass().getSimpleName():error.getMessage());}
     }
     private static boolean contains(String events,String event){for(String value:events.split(","))if(value.trim().equalsIgnoreCase(event))return true;return false;}
 }

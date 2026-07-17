@@ -50,7 +50,9 @@ public class LayeredMemoryService {
     }
 
     public void enqueue(String runId) {
-        if (properties.autoExtract() && !"demo".equals(modelClient.name())) store.enqueueMemoryExtraction(runId);
+        if (properties.autoExtract() && !"demo".equals(modelClient.name()) && !store.isInternalRun(runId)) {
+            store.enqueueMemoryExtraction(runId);
+        }
     }
 
     @Scheduled(fixedDelayString = "${paicli.memory.worker-delay-ms:1000}")

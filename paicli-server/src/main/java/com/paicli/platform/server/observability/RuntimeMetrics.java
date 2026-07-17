@@ -20,9 +20,11 @@ public class RuntimeMetrics {
     private final Counter toolFailures;
     private final Counter modelRetries;
     private final Timer runDuration;
+    private final MeterRegistry registry;
     private final AtomicInteger activeSse = new AtomicInteger();
 
     public RuntimeMetrics(MeterRegistry registry, SqliteRuntimeStore store) {
+        this.registry = registry;
         completed = registry.counter("paicli.runs.completed");
         failed = registry.counter("paicli.runs.failed");
         modelCalls = registry.counter("paicli.model.calls");
@@ -38,11 +40,25 @@ public class RuntimeMetrics {
     }
 
     public void modelCall() { modelCalls.increment(); }
+    public void modelCall(String provider, String model) {
+        modelCall();
+        registry.counter("paicli.model.calls.tagged", "provider", safe(provider), "model", safe(model)).increment();
+    }
     public void toolCall() { toolCalls.increment(); }
+    public void toolCall(String tool, String target) {
+        toolCall();
+        registry.counter("paicli.tools.calls.tagged", "tool", safe(tool), "target", safe(target)).increment();
+    }
     public void toolFailure() { toolFailures.increment(); }
+    public void toolFailure(String tool, String target) {
+        toolFailure();
+        registry.counter("paicli.tools.failures.tagged", "tool", safe(tool), "target", safe(target)).increment();
+    }
     public void modelRetry() { modelRetries.increment(); }
     public void sseOpened() { activeSse.incrementAndGet(); }
     public void sseClosed() { activeSse.updateAndGet(value -> Math.max(0, value - 1)); }
     public void completed(long nanos) { completed.increment(); runDuration.record(Duration.ofNanos(nanos)); }
     public void failed(long nanos) { failed.increment(); runDuration.record(Duration.ofNanos(nanos)); }
+
+    private static String safe(String value) { return value == null || value.isBlank() ? "unknown" : value; }
 }

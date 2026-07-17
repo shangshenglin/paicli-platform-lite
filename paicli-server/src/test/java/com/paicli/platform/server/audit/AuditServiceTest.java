@@ -23,6 +23,8 @@ class AuditServiceTest {
 
         audit.record("tool.started", "run_1", "tool_1", Map.of(
                 "apiKey", "secret-value",
+                "arguments", Map.of("password", "nested-password", "options",
+                        java.util.List.of(Map.of("accessToken", "nested-token"))),
                 "command", "curl -H 'Authorization: Bearer real-token' example.com"));
 
         Path file;
@@ -30,7 +32,7 @@ class AuditServiceTest {
             file = files.findFirst().orElseThrow();
         }
         String content = Files.readString(file);
-        assertThat(content).doesNotContain("secret-value", "real-token");
+        assertThat(content).doesNotContain("secret-value", "real-token", "nested-password", "nested-token");
         assertThat(content).contains("***");
     }
 }

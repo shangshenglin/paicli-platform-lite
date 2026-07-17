@@ -102,9 +102,10 @@ public class RunController {
 
     @GetMapping("/runs/{runId}/timeline")
     public List<RunEventRecord> timeline(@PathVariable String runId,
-                                         @RequestParam(defaultValue = "0") long after) {
+                                         @RequestParam(defaultValue = "0") long after,
+                                         @RequestParam(defaultValue = "500") int limit) {
         requireRun(runId);
-        return store.events(runId, after);
+        return store.events(runId, after, limit);
     }
 
     @GetMapping(value = "/runs/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

@@ -13,6 +13,8 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
+import java.lang.reflect.Array;
 
 @Service
 public class AuditService {
@@ -58,17 +60,40 @@ public class AuditService {
         if (source == null) return sanitized;
         source.forEach((key, value) -> {
             String normalizedKey = key == null ? "" : key;
-            if (normalizedKey.matches("(?i).*(token|secret|password|authorization|api.?key).*")) {
-                sanitized.put(normalizedKey, "***");
-                return;
-            }
-            String text = value == null ? null : String.valueOf(value)
-                    .replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***");
-            if (text != null && text.length() > MAX_VALUE_CHARS) {
-                text = text.substring(0, MAX_VALUE_CHARS) + "...[truncated]";
-            }
-            sanitized.put(normalizedKey, text);
+            sanitized.put(normalizedKey, sanitizeValue(normalizedKey, value));
         });
         return sanitized;
+    }
+
+    private static Object sanitizeValue(String key, Object value) {
+        if (key != null && key.matches("(?i).*(token|secret|password|authorization|api.?key|credential).*")) {
+            return "***";
+        }
+        if (value == null || value instanceof Number || value instanceof Boolean) return value;
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> nested = new LinkedHashMap<>();
+            map.forEach((nestedKey, nestedValue) -> {
+                String name = String.valueOf(nestedKey);
+                nested.put(name, sanitizeValue(name, nestedValue));
+            });
+            return nested;
+        }
+        if (value instanceof Iterable<?> iterable) {
+            java.util.ArrayList<Object> values = new java.util.ArrayList<>();
+            iterable.forEach(item -> values.add(sanitizeValue("", item)));
+            return List.copyOf(values);
+        }
+        if (value.getClass().isArray()) {
+            java.util.ArrayList<Object> values = new java.util.ArrayList<>();
+            for (int index = 0; index < Array.getLength(value); index++) {
+                values.add(sanitizeValue("", Array.get(value, index)));
+            }
+            return List.copyOf(values);
+        }
+        String text = String.valueOf(value)
+                .replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***")
+                .replaceAll("(?i)(password|token|secret|api[_-]?key)(\\s*[=:]\\s*)[^,;\\s}\"]+", "$1$2***");
+        return text.length() <= MAX_VALUE_CHARS
+                ? text : text.substring(0, MAX_VALUE_CHARS) + "...[truncated]";
     }
 }

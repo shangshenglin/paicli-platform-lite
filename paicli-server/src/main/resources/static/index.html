@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260716-memory-forms">
+  <link rel="stylesheet" href="/app.css?v=20260717-home-layout">
 </head>
 <body>
 <div class="app">
@@ -20,7 +20,8 @@
     </div>
     <div class="sessions" id="sessions"></div>
     <div class="side-foot">
-      <button class="secondary" id="workbench">业务工作台</button>
+      <button class="secondary" id="workbench">效率工作台</button>
+      <button class="secondary" id="evaluationCenter">Agent 评测</button>
       <button class="secondary" id="capabilities">能力管理</button>
       <button class="secondary" id="settings">连接设置</button>
       <a class="secondary" href="/docs">API 文档</a>
@@ -113,11 +114,18 @@
   </section>
 </dialog>
 <dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
-  <div class="dialog-title"><strong>业务工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
+  <div class="dialog-title"><strong>效率工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
   <div class="hint" id="workbenchProject">当前项目：default</div>
-  <section class="capability-section p1-overview">
-    <div class="section-title"><h3>P1 长期使用效率</h3><button class="secondary" id="refreshP1">刷新</button></div>
-    <div class="capability-status" id="usageSummary"></div>
+  <section class="capability-section productivity-overview">
+    <div class="section-title">
+      <div><h3>长期使用效率</h3><p class="hint">集中查看近 30 天用量、性能与预算风险。</p></div>
+      <div class="managed-actions"><button class="secondary" id="configureUsageBudget">预算与并发</button><button class="secondary" id="refreshProductivity">刷新</button></div>
+    </div>
+    <div class="capability-status usage-metrics" id="usageSummary"></div>
+    <details class="usage-history">
+      <summary><span>最近用量</span><small id="usageHistorySummary">暂无记录</small></summary>
+      <div class="usage-breakdown" id="usageBreakdown"></div>
+    </details>
   </section>
   <section class="capability-section">
     <div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div>
@@ -167,6 +175,60 @@
     <p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p>
     <div class="managed-list" id="policyList"></div>
   </section>
+</dialog>
+<dialog id="evaluationDialog" class="wide-dialog evaluation-dialog">
+  <div class="dialog-title"><strong>Agent 评测中心</strong><button class="secondary" id="closeEvaluationCenter">关闭</button></div>
+  <div class="hint" id="evaluationProject">当前项目：default</div>
+  <div class="evaluation-toolbar">
+    <div>
+      <strong>质量回归工作区</strong>
+      <p class="hint">复用正式 Run 检查工具、响应、输出 Token、总 Token、耗时和人工基线；用例默认收起，按需查看。</p>
+    </div>
+    <div class="managed-actions"><button class="secondary" id="refreshEvaluations">刷新</button><button class="secondary" id="installEvaluationStarterPack">安装官方评测集</button><button class="primary" id="addEvaluationSuite">新建套件</button></div>
+  </div>
+  <div class="evaluation-layout">
+    <section class="evaluation-pane evaluation-suites-pane">
+      <div class="pane-title"><h3>评测套件</h3><span id="evaluationSuiteCount">0 个套件</span></div>
+      <div class="managed-list evaluation-suite-list" id="evaluationSuiteList"></div>
+    </section>
+    <section class="evaluation-pane evaluation-report-pane">
+      <div class="pane-title"><h3>执行报告</h3><span id="evaluationReportState">选择最近执行记录查看</span></div>
+      <div class="evaluation-report" id="evaluationReport"><div class="evaluation-empty">运行套件或打开最近报告后，结果会显示在这里。</div></div>
+    </section>
+  </div>
+</dialog>
+<dialog id="evaluationSuiteDialog" class="form-dialog">
+  <form id="evaluationSuiteForm" class="entity-form">
+    <div class="dialog-title"><strong>新建评测套件</strong><button type="button" class="secondary" id="cancelEvaluationSuite">取消</button></div>
+    <div class="form-grid">
+      <label class="form-field"><span>套件名称 *</span><input id="evaluationSuiteName" maxlength="120" required placeholder="例如：Runtime 安全回归"></label>
+      <label class="form-field"><span>默认 Trial 次数</span><input id="evaluationSuiteTrials" type="number" min="1" max="10" value="1"></label>
+      <label class="form-field"><span>通过分数</span><input id="evaluationSuiteThreshold" type="number" min="1" max="100" value="80"></label>
+      <label class="form-field full"><span>说明</span><textarea id="evaluationSuiteDescription" rows="3" maxlength="1000" placeholder="说明评测目标和发布门禁"></textarea></label>
+    </div>
+    <div class="form-error" id="evaluationSuiteError"></div>
+    <div class="dialog-actions"><button class="primary" type="submit" id="saveEvaluationSuite">保存套件</button></div>
+  </form>
+</dialog>
+<dialog id="evaluationCaseDialog" class="form-dialog">
+  <form id="evaluationCaseForm" class="entity-form">
+    <div class="dialog-title"><strong>新建评测用例</strong><button type="button" class="secondary" id="cancelEvaluationCase">取消</button></div>
+    <p class="hint" id="evaluationCaseSuite"></p>
+    <div class="form-grid">
+      <label class="form-field"><span>用例名称 *</span><input id="evaluationCaseName" maxlength="120" required placeholder="例如：危险工具必须审批"></label>
+      <label class="form-field full"><span>输入 Prompt *</span><textarea id="evaluationCasePrompt" rows="4" required></textarea></label>
+      <label class="form-field"><span>必须调用的工具</span><textarea id="evaluationRequiredTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>禁止调用的工具</span><textarea id="evaluationForbiddenTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>回答必须包含</span><textarea id="evaluationRequiredResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>回答禁止包含</span><textarea id="evaluationForbiddenResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
+      <label class="form-field"><span>最多工具调用</span><input id="evaluationMaxTools" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>最多输出 Token</span><input id="evaluationMaxTokens" type="number" min="0" value="0"><small>0 表示不限制，并作为通过硬门禁</small></label>
+      <label class="form-field"><span>最长耗时（毫秒）</span><input id="evaluationMaxDuration" type="number" min="0" value="0"><small>0 表示不限制</small></label>
+      <label class="form-field"><span>状态</span><span class="checkbox-row"><label><input id="evaluationCaseEnabled" type="checkbox" checked> 启用</label></span></label>
+    </div>
+    <div class="form-error" id="evaluationCaseError"></div>
+    <div class="dialog-actions"><button class="primary" type="submit" id="saveEvaluationCase">保存用例</button></div>
+  </form>
 </dialog>
 <dialog id="templateDialog" class="form-dialog">
   <form id="templateForm" class="entity-form">
