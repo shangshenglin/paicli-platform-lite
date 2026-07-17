@@ -3,6 +3,7 @@
   --bg: #0f1115;
   --side: #151820;
   --panel: #191d25;
+  --panel-2: #151a22;
   --line: #2d3440;
   --text: #edf1f7;
   --muted: #919baa;
@@ -122,7 +123,7 @@ button, input, textarea, select { color: inherit; font: inherit; }
 }
 .delete-session:hover { background: #482c33; }
 .side-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
-.side-foot a { text-align: center; text-decoration: none; }
+.side-foot a { grid-column: 1 / -1; text-align: center; text-decoration: none; }
 .workspace {
   height: 100%;
   min-width: 0;
@@ -151,6 +152,9 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .empty { padding-top: 20vh; color: var(--muted); text-align: center; }
 .empty .logo { width: 52px; height: 52px; margin: 0 auto 14px; font-size: 29px; }
 .empty h1 { margin: 0 0 6px; color: var(--text); font-size: 23px; }
+.home-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 180px)); justify-content: center; gap: 9px; margin-top: 22px; }
+.home-action { display: grid; gap: 2px; padding: 12px 14px; text-align: left; }
+.home-action small { color: var(--muted); font-size: 11px; font-weight: 400; }
 .message { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; margin-bottom: 23px; }
 .avatar { width: 31px; height: 31px; background: #262c35; font-weight: 700; }
 .assistant .avatar { color: var(--green); font-family: Georgia; }
@@ -268,12 +272,34 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .portability-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .portability-actions label { color: var(--muted); font-size: 12px; }
 .portability-actions .file-action { color: var(--text); cursor: pointer; }
-.p1-overview { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
-.evaluation-section { border-color: color-mix(in srgb, #6c8cff 45%, var(--line)); }
-.evaluation-suite-block { display: grid; gap: 6px; }
-.evaluation-case-item { margin-left: 18px; background: #141922; }
-.evaluation-report { display: grid; gap: 8px; margin-top: 12px; }
-.evaluation-report:empty { display: none; }
+.productivity-overview { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.usage-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.usage-history { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: #14181f; }
+.usage-history summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; cursor: pointer; font-weight: 650; list-style-position: inside; }
+.usage-history summary small { color: var(--muted); font-weight: 400; }
+.usage-breakdown { display: grid; max-height: 250px; overflow-y: auto; border-top: 1px solid var(--line); }
+.usage-row { display: grid; grid-template-columns: minmax(95px, .65fr) minmax(180px, 1.7fr) minmax(145px, 1fr); gap: 10px; align-items: center; padding: 9px 12px; border-bottom: 1px solid #252b35; }
+.usage-row:last-child { border-bottom: 0; }
+.usage-row strong, .usage-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-row small { color: var(--muted); text-align: right; }
+.evaluation-dialog { width: min(1180px, calc(100% - 28px)); height: min(790px, calc(100vh - 32px)); max-height: calc(100vh - 32px); overflow: hidden; }
+.evaluation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 14px; padding: 13px 14px; border: 1px solid color-mix(in srgb, #6c8cff 45%, var(--line)); border-radius: 12px; background: #171b25; }
+.evaluation-toolbar p { margin: 3px 0 0; }
+.evaluation-layout { min-height: 0; height: calc(100% - 112px); display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(340px, .88fr); gap: 12px; margin-top: 12px; }
+.evaluation-pane { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #13171e; }
+.pane-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px 10px; }
+.pane-title h3 { margin: 0; font-size: 14px; }
+.pane-title span { color: var(--muted); font-size: 11px; }
+.evaluation-suite-list { min-height: 0; overflow-y: auto; margin: 0; padding-right: 3px; }
+.evaluation-suite-block { display: grid; gap: 6px; padding: 8px; border: 1px solid #29313d; border-radius: 10px; background: #171c24; }
+.evaluation-suite-block > .managed-item { flex-wrap: wrap; border: 0; padding: 4px 3px; background: transparent; }
+.evaluation-suite-block > .managed-item .managed-main { flex-basis: 240px; }
+.evaluation-case-list { border-top: 1px solid #29313d; }
+.evaluation-case-list summary { padding: 7px 4px 2px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.evaluation-case-list[open] summary { margin-bottom: 5px; }
+.evaluation-case-item { margin-top: 5px; background: #141922; }
+.evaluation-report { min-height: 0; display: grid; align-content: start; gap: 8px; overflow-y: auto; margin: 0; padding-right: 3px; }
+.evaluation-empty { display: grid; min-height: 180px; place-items: center; padding: 24px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: center; }
 .evaluation-report-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
 .evaluation-trial { padding: 9px 11px; border-left: 3px solid var(--line); border-radius: 7px; background: #141820; }
 .evaluation-trial.pass { border-left-color: var(--green); }
@@ -304,4 +330,12 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .form-grid { grid-template-columns: 1fr; }
   .form-field.full { grid-column: auto; }
   .upload-row { align-items: stretch; flex-direction: column; }
+  .home-actions, .usage-metrics { grid-template-columns: 1fr 1fr; }
+  .evaluation-dialog { overflow-y: auto; }
+  .evaluation-toolbar { align-items: stretch; flex-direction: column; }
+  .evaluation-toolbar .managed-actions { width: 100%; }
+  .evaluation-layout { height: auto; grid-template-columns: 1fr; }
+  .evaluation-pane { min-height: 360px; }
+  .usage-row { grid-template-columns: 1fr; gap: 2px; }
+  .usage-row small { text-align: left; }
 }

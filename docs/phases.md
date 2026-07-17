@@ -77,7 +77,7 @@
 - [x] Schema 迁移 10、Console 业务工作台、Store 回归测试和中文文档
 - [x] 59 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
-## 阶段 11：P1 长期使用效率
+## 阶段 11：长期使用效率
 
 - [x] 项目级任务模板、`${变量}`、附件/工具要求和 `/review`、`/summarize`、`/research` 快捷指令
 - [x] 模型配置方案、项目默认/后备模型、提交前上下文/输出/成本预估和切换模型重试
@@ -88,7 +88,8 @@
 - [x] 模板、模型方案、定时任务和通知的新建操作统一为结构化表单；定时任务使用模板下拉选择与动态周期字段
 - [x] Session Markdown/JSON/完整审计包导出、隐私脱敏和跨实例导入
 - [x] Skill 来源/Ref/Commit/作用域、预检、启停、固定、升级、回滚与 MCP Console 配置
-- [x] Schema 迁移 11、P1 Console、Store 回归测试和中文文档
+- [x] Schema 迁移 11、效率 Console、Store 回归测试和中文文档
+- [x] 首页独立效率入口、核心指标固定网格、最近用量折叠明细和限高滚动布局
 - [x] 61 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
 ## 阶段 12：Agent 评测中心
@@ -100,10 +101,11 @@
 - [x] 人工确认基线、关键工具保留检查和 Token/耗时 150% 退化判断
 - [x] 内部评测 Run 排除自动 Memory 提取，避免评测输入污染长期记忆
 - [x] 版本化官方 Starter Pack：4 个套件、17 个用例、幂等安装和 Console 用例启停
+- [x] 评测中心从效率工作台抽离为首页一级入口，套件/报告双栏展示、用例默认折叠并独立滚动
 - [x] Schema 迁移 12、评测 Console、Store/评分回归测试和中文文档
 - [x] 65 项自动化测试覆盖 Common、Server 与 Sandbox Agent，并通过真实 REST 多 Trial/基线冒烟
 
-## 阶段 13：生产化 P0/P1 加固
+## 阶段 13：生产化运行时加固
 
 - [x] Run 终态单向状态机、状态与 Event 原子提交、每 Session 单活跃 Run 数据库约束
 - [x] 同轮 ToolCall 原子持久化和顺序执行；工具 Effect 分类，安全恢复与非幂等 `UNKNOWN` 人工对账
