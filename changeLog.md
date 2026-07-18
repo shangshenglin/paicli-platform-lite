@@ -24,6 +24,15 @@
 
 ## 2026-07-19
 
+### Plan 执行闭环、Async Job 与验证证据
+
+- 变更：新增 Schema 迁移 16，为 `plan_steps` 增加 `run_id`，并新增 `async_jobs`、`validation_checks` 表。
+- 变更：新增 `PlanExecutionService` 和 Plan Worker，支持 `READY` Step 创建普通 ReAct Run，Run 终态回写 Step、Plan、Async Job 和 Validation Check；`ASYNC`/`ASYNC_JOB` Step 进入 `WAITING_JOB` 并可轮询 Job。
+- 变更：新增 `/v1/plans/{id}/dispatch`、`/dag/batches`、`/jobs`、`/validation-checks`、通用 `/v1/async-jobs` 与 Job cancel API；Console 效率工作台新增 Plan 工作台入口。
+- 变更：评测 Starter Pack 增加默认关闭的 Plan/DAG/验证模板用例。
+- 思路：继续复用现有 RunProcessor、ToolCall、Approval 和预算链路，不让 Plan 调度器直接执行工具；Read-only 并行当前先做 DAG 批次分析和保守调度，真正并行留给资源锁与会话隔离阶段。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，覆盖 Step 内 ReAct Run 调度、Async Job、Validation Check、Read-only DAG 批次和迁移 1-16。
+
 ### Plan Runtime 基础持久化
 
 - 变更：新增 `plans`、`plan_steps`、`plan_edges`、`plan_revisions` 和 `plan_events` 表，登记 Schema 迁移 15，并在删除 Session 时同步清理关联 Plan 数据。

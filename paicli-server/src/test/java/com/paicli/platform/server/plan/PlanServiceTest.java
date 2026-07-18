@@ -66,6 +66,78 @@ class PlanServiceTest {
                 .satisfies(step -> assertThat(step.title()).isEqualTo("Summarize"));
     }
 
+    @Test
+    void dispatchesReadyStepAsReactRunAndCompletesValidationChecks() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+        var session = runtime.createSession("plan-run", "project-a");
+
+        var plan = service.generate(session.id(), null, "summarize");
+        service.start(plan.id());
+        var report = execution.dispatchPlan(plan.id(), 1);
+
+        assertThat(report.startedSteps()).isEqualTo(1);
+        var running = service.view(plan.id()).steps().get(0);
+        assertThat(running.status()).isEqualTo("RUNNING");
+        assertThat(running.runId()).isNotBlank();
+
+        runtime.completeRun(running.runId());
+        execution.dispatchPlan(plan.id(), 1);
+
+        var finished = service.view(plan.id());
+        assertThat(finished.plan().status()).isEqualTo("COMPLETED");
+        assertThat(finished.steps()).singleElement()
+                .satisfies(step -> assertThat(step.status()).isEqualTo("COMPLETED"));
+        assertThat(store.validationChecks(plan.id(), 10)).singleElement()
+                .satisfies(check -> assertThat(check.status()).isEqualTo("PASSED"));
+    }
+
+    @Test
+    void tracksAsyncStepThroughJobAndRun() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(asyncPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+        var session = runtime.createSession("plan-async", "project-a");
+
+        var plan = service.generate(session.id(), null, "long task");
+        service.start(plan.id());
+        execution.dispatchPlan(plan.id(), 1);
+
+        var step = service.view(plan.id()).steps().get(0);
+        assertThat(step.status()).isEqualTo("WAITING_JOB");
+        assertThat(store.asyncJobs(plan.id(), 10)).singleElement()
+                .satisfies(job -> assertThat(job.runId()).isEqualTo(step.runId()));
+
+        runtime.completeRun(step.runId());
+        execution.dispatchPlan(plan.id(), 1);
+
+        assertThat(store.asyncJobs(plan.id(), 10)).singleElement()
+                .satisfies(job -> assertThat(job.status()).isEqualTo("COMPLETED"));
+        assertThat(service.view(plan.id()).plan().status()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void exposesReadOnlyParallelBatches() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(validPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+
+        var plan = service.generate(null, "default", "inspect project");
+        var batches = execution.parallelBatches(plan.id());
+
+        assertThat(batches).hasSize(2);
+        assertThat(batches.get(0).readOnlyEligible()).isTrue();
+        assertThat(batches.get(0).stepIds()).hasSize(2);
+        assertThat(batches.get(1).readOnlyEligible()).isFalse();
+    }
+
     private PlanService service(SqliteRuntimeStore runtime, ModelClient model) {
         return new PlanService(new PlanStore(properties()), new PlanParser(mapper), runtime, model, mapper);
     }
@@ -114,6 +186,18 @@ class PlanServiceTest {
                   "summary": "One step.",
                   "steps": [
                     {"client_id":"s","title":"Summarize","description":"Summarize only","type":"SYNTHESIS","dependencies":[],"done_criteria":["summary exists"]}
+                  ]
+                }
+                """;
+    }
+
+    private static String asyncPlan() {
+        return """
+                {
+                  "objective": "long task",
+                  "summary": "One async step.",
+                  "steps": [
+                    {"client_id":"async","title":"Long task","description":"Run a long task","type":"ASYNC_JOB","execution_mode":"ASYNC","dependencies":[],"done_criteria":["job completed"]}
                   ]
                 }
                 """;

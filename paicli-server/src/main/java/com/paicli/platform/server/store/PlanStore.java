@@ -50,6 +50,7 @@ public class PlanStore {
                 }
                 insertSteps(c, planId, steps, now);
                 insertEdges(c, planId, edges, now);
+                insertValidationChecks(c, planId, steps, now);
                 appendEvent(c, planId, null, "plan.created", "{\"steps\":" + steps.size() + "}", now);
                 c.commit();
                 return findPlan(planId).orElseThrow();
@@ -132,6 +133,47 @@ public class PlanStore {
         }
     }
 
+    public List<Plan> activePlans(int limit) {
+        List<Plan> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM plans WHERE status='ACTIVE' ORDER BY updated_at LIMIT ?")) {
+            ps.setInt(1, Math.max(1, Math.min(limit, 100)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(plan(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list active plans", e);
+        }
+    }
+
+    public List<PlanStep> readySteps(String planId, int limit) {
+        List<PlanStep> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM plan_steps WHERE plan_id=? AND status='READY' ORDER BY ordinal LIMIT ?")) {
+            ps.setString(1, planId);
+            ps.setInt(2, Math.max(1, Math.min(limit, 20)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(step(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list ready plan steps", e);
+        }
+    }
+
+    public Optional<PlanStep> findStepByRun(String runId) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM plan_steps WHERE run_id=? ORDER BY updated_at DESC LIMIT 1")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(step(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("find plan step by run", e);
+        }
+    }
+
     public Plan activate(String planId, String eventType) {
         try (Connection c = open()) {
             c.setAutoCommit(false);
@@ -194,6 +236,154 @@ public class PlanStore {
         }
     }
 
+    public Optional<PlanStep> claimReadyStep(String stepId) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status='RUNNING',started_at=COALESCE(started_at,?),updated_at=? " +
+                                "WHERE id=? AND status='READY'")) {
+                    ps.setString(1, now);
+                    ps.setString(2, now);
+                    ps.setString(3, stepId);
+                    if (ps.executeUpdate() != 1) {
+                        rollback(c);
+                        return Optional.empty();
+                    }
+                }
+                appendEvent(c, current.planId(), stepId, "plan_step.claimed", "{}", now);
+                c.commit();
+                return findStep(stepId);
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("claim plan step", e);
+        }
+    }
+
+    public PlanStep bindStepRun(String stepId, String runId, boolean asyncJob) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status=?,run_id=?,updated_at=? WHERE id=? " +
+                                "AND status IN ('RUNNING','WAITING_JOB')")) {
+                    ps.setString(1, asyncJob ? "WAITING_JOB" : "RUNNING");
+                    ps.setString(2, runId);
+                    ps.setString(3, now);
+                    ps.setString(4, stepId);
+                    if (ps.executeUpdate() != 1) throw new IllegalStateException("plan step is not claimed");
+                }
+                appendEvent(c, current.planId(), stepId, asyncJob ? "plan_step.job_bound" : "plan_step.run_bound",
+                        "{\"runId\":\"" + escape(runId) + "\"}", now);
+                c.commit();
+                return findStep(stepId).orElseThrow();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("bind plan step run", e);
+        }
+    }
+
+    public void markStepWaitingApproval(String stepId) {
+        setStepRuntimeStatus(stepId, "WAITING_APPROVAL", null, "plan_step.waiting_approval");
+    }
+
+    public void markStepRunningAgain(String stepId) {
+        setStepRuntimeStatus(stepId, "RUNNING", null, "plan_step.resumed");
+    }
+
+    public void completeStep(String stepId, String resultSummary) {
+        setStepTerminal(stepId, "COMPLETED", resultSummary, null, "plan_step.completed");
+    }
+
+    public void failStep(String stepId, String reason) {
+        setStepTerminal(stepId, "FAILED", null, reason, "plan_step.failed");
+    }
+
+    public void cancelStep(String stepId, String reason) {
+        setStepTerminal(stepId, "CANCELED", null, reason, "plan_step.canceled");
+    }
+
+    public void releaseStep(String stepId, String reason) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status='READY',failure_reason=?,updated_at=? " +
+                                "WHERE id=? AND status='RUNNING' AND run_id IS NULL")) {
+                    ps.setString(1, nullable(reason));
+                    ps.setString(2, now);
+                    ps.setString(3, stepId);
+                    ps.executeUpdate();
+                }
+                appendEvent(c, current.planId(), stepId, "plan_step.released",
+                        "{\"reason\":\"" + escape(reason) + "\"}", now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("release plan step", e);
+        }
+    }
+
+    public void refreshReadySteps(String planId) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                String now = Instant.now().toString();
+                markReadySteps(c, planId, now);
+                finishPlanIfTerminal(c, planId, now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("refresh ready plan steps", e);
+        }
+    }
+
+    public void failPlan(String planId, String reason) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plans SET status='FAILED',failure_reason=?,completed_at=?,updated_at=? " +
+                                "WHERE id=? AND status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+                    ps.setString(1, value(reason, 1_000));
+                    ps.setString(2, now);
+                    ps.setString(3, now);
+                    ps.setString(4, planId);
+                    ps.executeUpdate();
+                }
+                appendEvent(c, planId, null, "plan.failed", "{\"reason\":\"" + escape(reason) + "\"}", now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("fail plan", e);
+        }
+    }
+
     public Plan replacePlan(String planId, String reason, String rawPlanJson, String summary,
                             List<StepDraft> steps, List<EdgeDraft> edges) {
         try (Connection c = open()) {
@@ -218,6 +408,7 @@ public class PlanStore {
                 deletePlanChildren(c, planId);
                 insertSteps(c, planId, steps, now);
                 insertEdges(c, planId, edges, now);
+                insertValidationChecks(c, planId, steps, now);
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plans SET summary=?,status='WAITING_APPROVAL',version=?,raw_plan_json=?," +
                                 "validation_errors_json='[]',updated_at=?,failure_reason=NULL WHERE id=?")) {
@@ -246,6 +437,131 @@ public class PlanStore {
 
     public PlanStep skipStep(String stepId, String reason) {
         return updateStepStatus(stepId, "SKIPPED", reason, "plan_step.skipped");
+    }
+
+    public AsyncJob createAsyncJob(String planId, String stepId, String runId, String projectKey,
+                                   String kind, String payloadJson, String idempotencyKey) {
+        Optional<AsyncJob> existing = findAsyncJobByKey(idempotencyKey);
+        if (existing.isPresent()) return existing.get();
+        String jobId = id("job");
+        String now = Instant.now().toString();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO async_jobs(id,plan_id,step_id,run_id,project_key,kind,status,idempotency_key," +
+                        "payload_json,result_json,log,error,attempts,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,'{}','{}','',NULL,0,?,?)")) {
+            ps.setString(1, jobId);
+            ps.setString(2, nullable(planId));
+            ps.setString(3, nullable(stepId));
+            ps.setString(4, nullable(runId));
+            ps.setString(5, project(projectKey));
+            ps.setString(6, text(kind == null ? "GENERIC" : kind.toUpperCase(), "kind", 80));
+            ps.setString(7, "QUEUED");
+            ps.setString(8, text(idempotencyKey, "idempotencyKey", 300));
+            ps.setString(9, now);
+            ps.setString(10, now);
+            ps.executeUpdate();
+            if (payloadJson != null && !payloadJson.isBlank()) {
+                try (PreparedStatement update = c.prepareStatement(
+                        "UPDATE async_jobs SET payload_json=? WHERE id=?")) {
+                    update.setString(1, json(payloadJson, 128_000));
+                    update.setString(2, jobId);
+                    update.executeUpdate();
+                }
+            }
+            return findAsyncJob(jobId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("create async job", e);
+        }
+    }
+
+    public Optional<AsyncJob> findAsyncJob(String id) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement("SELECT * FROM async_jobs WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(job(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("find async job", e);
+        }
+    }
+
+    public Optional<AsyncJob> findAsyncJobByKey(String idempotencyKey) {
+        if (blank(idempotencyKey)) return Optional.empty();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM async_jobs WHERE idempotency_key=?")) {
+            ps.setString(1, idempotencyKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(job(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("find async job by key", e);
+        }
+    }
+
+    public List<AsyncJob> asyncJobs(String planId, int limit) {
+        List<AsyncJob> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM async_jobs WHERE plan_id=? ORDER BY updated_at DESC LIMIT ?")) {
+            ps.setString(1, planId);
+            ps.setInt(2, Math.max(1, Math.min(limit, 200)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(job(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list async jobs", e);
+        }
+    }
+
+    public AsyncJob bindAsyncJobRun(String jobId, String runId) {
+        String now = Instant.now().toString();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "UPDATE async_jobs SET run_id=?,status='RUNNING',started_at=COALESCE(started_at,?),updated_at=? " +
+                        "WHERE id=? AND status IN ('QUEUED','RUNNING')")) {
+            ps.setString(1, runId);
+            ps.setString(2, now);
+            ps.setString(3, now);
+            ps.setString(4, jobId);
+            ps.executeUpdate();
+            return findAsyncJob(jobId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("bind async job run", e);
+        }
+    }
+
+    public AsyncJob completeAsyncJob(String jobId, String resultJson, String log) {
+        return finishAsyncJob(jobId, "COMPLETED", resultJson, log, null);
+    }
+
+    public AsyncJob failAsyncJob(String jobId, String error, String log) {
+        return finishAsyncJob(jobId, "FAILED", "{}", log, error);
+    }
+
+    public AsyncJob cancelAsyncJob(String jobId) {
+        return finishAsyncJob(jobId, "CANCELED", "{}", "", "job canceled");
+    }
+
+    public List<ValidationCheck> validationChecks(String planId, int limit) {
+        List<ValidationCheck> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM validation_checks WHERE plan_id=? ORDER BY created_at, id LIMIT ?")) {
+            ps.setString(1, planId);
+            ps.setInt(2, Math.max(1, Math.min(limit, 500)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(check(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list validation checks", e);
+        }
+    }
+
+    public void passStepChecks(String stepId, String evidence) {
+        finishStepChecks(stepId, "PASSED", "", evidence);
+    }
+
+    public void failStepChecks(String stepId, String error, String evidence) {
+        finishStepChecks(stepId, "FAILED", error, evidence);
     }
 
     private PlanStep updateStepStatus(String stepId, String status, String reason, String eventType) {
@@ -277,6 +593,116 @@ public class PlanStore {
         }
     }
 
+    private void setStepRuntimeStatus(String stepId, String status, String reason, String eventType) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status=?,failure_reason=?,updated_at=? WHERE id=? " +
+                                "AND status IN ('RUNNING','WAITING_APPROVAL','WAITING_JOB')")) {
+                    ps.setString(1, status);
+                    ps.setString(2, nullable(reason));
+                    ps.setString(3, now);
+                    ps.setString(4, stepId);
+                    ps.executeUpdate();
+                }
+                appendEvent(c, current.planId(), stepId, eventType, "{\"status\":\"" + status + "\"}", now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("update plan step runtime status", e);
+        }
+    }
+
+    private void setStepTerminal(String stepId, String status, String resultSummary, String reason, String eventType) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
+                                "updated_at=? WHERE id=? AND status NOT IN ('COMPLETED','FAILED','SKIPPED','CANCELED')")) {
+                    ps.setString(1, status);
+                    ps.setString(2, nullable(resultSummary));
+                    ps.setString(3, nullable(reason));
+                    ps.setString(4, now);
+                    ps.setString(5, now);
+                    ps.setString(6, stepId);
+                    ps.executeUpdate();
+                }
+                if ("COMPLETED".equals(status)) {
+                    finishStepChecks(c, stepId, "PASSED", "", "step completed", now);
+                } else {
+                    finishStepChecks(c, stepId, "FAILED", reason == null ? status : reason,
+                            "step did not complete", now);
+                }
+                appendEvent(c, current.planId(), stepId, eventType, "{\"status\":\"" + status + "\"}", now);
+                markReadySteps(c, current.planId(), now);
+                finishPlanIfTerminal(c, current.planId(), now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("finish plan step", e);
+        }
+    }
+
+    private AsyncJob finishAsyncJob(String jobId, String status, String resultJson, String log, String error) {
+        String now = Instant.now().toString();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "UPDATE async_jobs SET status=?,result_json=?,log=CASE WHEN ?='' THEN log ELSE ? END," +
+                        "error=?,completed_at=CASE WHEN ? IN ('COMPLETED','FAILED','CANCELED') THEN ? ELSE completed_at END," +
+                        "updated_at=? WHERE id=? AND status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+            ps.setString(1, status);
+            ps.setString(2, json(resultJson, 128_000));
+            ps.setString(3, log == null ? "" : log);
+            ps.setString(4, value(log, 32_000));
+            ps.setString(5, nullable(error));
+            ps.setString(6, status);
+            ps.setString(7, now);
+            ps.setString(8, now);
+            ps.setString(9, jobId);
+            ps.executeUpdate();
+            return findAsyncJob(jobId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("finish async job", e);
+        }
+    }
+
+    private void finishStepChecks(String stepId, String status, String error, String evidence) {
+        try (Connection c = open()) {
+            finishStepChecks(c, stepId, status, error, evidence, Instant.now().toString());
+        } catch (SQLException e) {
+            throw failure("finish validation checks", e);
+        }
+    }
+
+    private void finishStepChecks(Connection c, String stepId, String status, String error, String evidence, String now)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE validation_checks SET status=?,actual=?,evidence=?,error=?,completed_at=?,updated_at=? " +
+                        "WHERE step_id=? AND status='PENDING'")) {
+            ps.setString(1, status);
+            ps.setString(2, status);
+            ps.setString(3, value(evidence, 4_000));
+            ps.setString(4, nullable(error));
+            ps.setString(5, now);
+            ps.setString(6, now);
+            ps.setString(7, stepId);
+            ps.executeUpdate();
+        }
+    }
+
     public Optional<PlanStep> findStep(String stepId) {
         try (Connection c = open()) {
             return findStep(c, stepId);
@@ -288,7 +714,7 @@ public class PlanStore {
     private void insertSteps(Connection c, String planId, List<StepDraft> steps, String now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO plan_steps(id,plan_id,client_id,ordinal,title,description,type,status,execution_mode," +
-                        "done_criteria_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'PENDING',?,?,?,?)")) {
+                        "done_criteria_json,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'PENDING',?,?,NULL,?,?)")) {
             for (StepDraft step : steps) {
                 ps.setString(1, step.id());
                 ps.setString(2, planId);
@@ -301,6 +727,26 @@ public class PlanStore {
                 ps.setString(9, step.doneCriteriaJson());
                 ps.setString(10, now);
                 ps.setString(11, now);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private void insertValidationChecks(Connection c, String planId, List<StepDraft> steps, String now)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO validation_checks(id,plan_id,step_id,name,kind,status,expected,actual,evidence,error," +
+                        "created_at,updated_at) VALUES(?,?,?,?,?,'PENDING',?,'','',NULL,?,?)")) {
+            for (StepDraft step : steps) {
+                ps.setString(1, id("vcheck"));
+                ps.setString(2, planId);
+                ps.setString(3, step.id());
+                ps.setString(4, value(step.title(), 160));
+                ps.setString(5, "DONE_CRITERIA");
+                ps.setString(6, json(step.doneCriteriaJson(), 16_000));
+                ps.setString(7, now);
+                ps.setString(8, now);
                 ps.addBatch();
             }
             ps.executeBatch();
@@ -322,7 +768,7 @@ public class PlanStore {
     }
 
     private void deletePlanChildren(Connection c, String planId) throws SQLException {
-        for (String table : List.of("plan_edges", "plan_steps")) {
+        for (String table : List.of("async_jobs", "validation_checks", "plan_edges", "plan_steps")) {
             try (PreparedStatement ps = c.prepareStatement("DELETE FROM " + table + " WHERE plan_id=?")) {
                 ps.setString(1, planId);
                 ps.executeUpdate();
@@ -339,6 +785,48 @@ public class PlanStore {
             ps.setString(1, now);
             ps.setString(2, planId);
             ps.executeUpdate();
+        }
+    }
+
+    private void finishPlanIfTerminal(Connection c, String planId, String now) throws SQLException {
+        try (PreparedStatement failed = c.prepareStatement(
+                "SELECT failure_reason FROM plan_steps WHERE plan_id=? AND status='FAILED' ORDER BY updated_at DESC LIMIT 1")) {
+            failed.setString(1, planId);
+            try (ResultSet rs = failed.executeQuery()) {
+                if (rs.next()) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE plans SET status='FAILED',failure_reason=?,completed_at=?,updated_at=? " +
+                                    "WHERE id=? AND status='ACTIVE'")) {
+                        ps.setString(1, rs.getString(1));
+                        ps.setString(2, now);
+                        ps.setString(3, now);
+                        ps.setString(4, planId);
+                        if (ps.executeUpdate() > 0) {
+                            appendEvent(c, planId, null, "plan.failed", "{}", now);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        try (PreparedStatement open = c.prepareStatement(
+                "SELECT COUNT(*) FROM plan_steps WHERE plan_id=? " +
+                        "AND status NOT IN ('COMPLETED','SKIPPED','CANCELED')")) {
+            open.setString(1, planId);
+            try (ResultSet rs = open.executeQuery()) {
+                if (rs.next() && rs.getLong(1) == 0) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE plans SET status='COMPLETED',completed_at=?,updated_at=? " +
+                                    "WHERE id=? AND status='ACTIVE'")) {
+                        ps.setString(1, now);
+                        ps.setString(2, now);
+                        ps.setString(3, planId);
+                        if (ps.executeUpdate() > 0) {
+                            appendEvent(c, planId, null, "plan.completed", "{}", now);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -396,7 +884,7 @@ public class PlanStore {
         return new PlanStep(r.getString("id"), r.getString("plan_id"), r.getString("client_id"),
                 r.getInt("ordinal"), r.getString("title"), r.getString("description"),
                 r.getString("type"), r.getString("status"), r.getString("execution_mode"),
-                r.getString("done_criteria_json"), r.getString("result_summary"),
+                r.getString("done_criteria_json"), r.getString("run_id"), r.getString("result_summary"),
                 r.getString("failure_reason"), instant(r.getString("started_at")),
                 instant(r.getString("completed_at")), instant(r.getString("created_at")),
                 instant(r.getString("updated_at")));
@@ -409,6 +897,21 @@ public class PlanStore {
         return new PlanEvent(r.getLong("id"), r.getString("plan_id"), r.getString("step_id"),
                 r.getString("event_type"), r.getString("event_data"), r.getLong("sequence"),
                 instant(r.getString("created_at")));
+    }
+    private static AsyncJob job(ResultSet r) throws SQLException {
+        return new AsyncJob(r.getString("id"), r.getString("plan_id"), r.getString("step_id"),
+                r.getString("run_id"), r.getString("project_key"), r.getString("kind"),
+                r.getString("status"), r.getString("idempotency_key"), r.getString("payload_json"),
+                r.getString("result_json"), r.getString("log"), r.getString("error"),
+                r.getInt("attempts"), instant(r.getString("created_at")), instant(r.getString("updated_at")),
+                instant(r.getString("started_at")), instant(r.getString("completed_at")));
+    }
+    private static ValidationCheck check(ResultSet r) throws SQLException {
+        return new ValidationCheck(r.getString("id"), r.getString("plan_id"), r.getString("step_id"),
+                r.getString("name"), r.getString("kind"), r.getString("status"),
+                r.getString("expected"), r.getString("actual"), r.getString("evidence"),
+                r.getString("error"), instant(r.getString("created_at")), instant(r.getString("updated_at")),
+                instant(r.getString("completed_at")));
     }
     private static String project(String v) {
         String x = blank(v) ? "default" : v.trim();
@@ -436,6 +939,9 @@ public class PlanStore {
     }
     private static String nullable(String v) { return blank(v) ? null : v.trim(); }
     private static boolean blank(String v) { return v == null || v.isBlank(); }
+    private static String escape(String v) {
+        return v == null ? "" : v.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
     private static String id(String p) { return p + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16); }
     private static Instant instant(String v) { return blank(v) ? null : Instant.parse(v); }
     private static void rollback(Connection c) { try { c.rollback(); } catch (Exception ignored) { } }
@@ -449,11 +955,18 @@ public class PlanStore {
                        Instant startedAt, Instant completedAt, String failureReason) { }
     public record PlanStep(String id, String planId, String clientId, int ordinal, String title,
                            String description, String type, String status, String executionMode,
-                           String doneCriteriaJson, String resultSummary, String failureReason,
+                           String doneCriteriaJson, String runId, String resultSummary, String failureReason,
                            Instant startedAt, Instant completedAt, Instant createdAt, Instant updatedAt) { }
     public record PlanEdge(String planId, String fromStepId, String toStepId, Instant createdAt) { }
     public record PlanEvent(long id, String planId, String stepId, String type, String data,
                             long sequence, Instant createdAt) { }
+    public record AsyncJob(String id, String planId, String stepId, String runId, String projectKey,
+                           String kind, String status, String idempotencyKey, String payloadJson,
+                           String resultJson, String log, String error, int attempts, Instant createdAt,
+                           Instant updatedAt, Instant startedAt, Instant completedAt) { }
+    public record ValidationCheck(String id, String planId, String stepId, String name, String kind,
+                                  String status, String expected, String actual, String evidence,
+                                  String error, Instant createdAt, Instant updatedAt, Instant completedAt) { }
     public record StepDraft(String id, String clientId, int ordinal, String title, String description,
                             String type, String executionMode, String doneCriteriaJson) { }
     public record EdgeDraft(String fromStepId, String toStepId) { }

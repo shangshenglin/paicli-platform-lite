@@ -304,11 +304,15 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, client_id TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
                     "title TEXT NOT NULL, description TEXT NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL, " +
                     "execution_mode TEXT NOT NULL DEFAULT 'REACT', done_criteria_json TEXT NOT NULL DEFAULT '[]', " +
-                    "result_summary TEXT, failure_reason TEXT, started_at TEXT, completed_at TEXT, " +
+                    "run_id TEXT, result_summary TEXT, failure_reason TEXT, started_at TEXT, completed_at TEXT, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(plan_id, client_id), " +
-                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE)");
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "run_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_status " +
                     "ON plan_steps(plan_id, status, ordinal)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_run " +
+                    "ON plan_steps(run_id)");
             statement.execute("CREATE TABLE IF NOT EXISTS plan_edges (" +
                     "plan_id TEXT NOT NULL, from_step_id TEXT NOT NULL, to_step_id TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, PRIMARY KEY(plan_id, from_step_id, to_step_id), " +
@@ -331,6 +335,28 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE SET NULL)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_events_plan " +
                     "ON plan_events(plan_id, id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS async_jobs (" +
+                    "id TEXT PRIMARY KEY, plan_id TEXT, step_id TEXT, run_id TEXT, project_key TEXT NOT NULL, " +
+                    "kind TEXT NOT NULL, status TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, " +
+                    "payload_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}', " +
+                    "log TEXT NOT NULL DEFAULT '', error TEXT, attempts INTEGER NOT NULL DEFAULT 0, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE SET NULL, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_async_jobs_status_updated " +
+                    "ON async_jobs(status, updated_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_async_jobs_plan " +
+                    "ON async_jobs(plan_id, step_id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS validation_checks (" +
+                    "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, step_id TEXT, name TEXT NOT NULL, " +
+                    "kind TEXT NOT NULL, status TEXT NOT NULL, expected TEXT NOT NULL DEFAULT '', " +
+                    "actual TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', error TEXT, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE SET NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_validation_checks_plan " +
+                    "ON validation_checks(plan_id, step_id, status)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
             statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
@@ -2388,7 +2414,8 @@ public class SqliteRuntimeStore {
     private static void deletePlansForSession(Connection connection, String sessionId) throws SQLException {
         String predicate = "plan_id IN (SELECT id FROM plans WHERE session_id=? " +
                 "OR run_id IN (SELECT id FROM runs WHERE session_id=?))";
-        for (String table : List.of("plan_events", "plan_revisions", "plan_edges", "plan_steps")) {
+        for (String table : List.of("plan_events", "plan_revisions", "validation_checks",
+                "async_jobs", "plan_edges", "plan_steps")) {
             try (PreparedStatement ps = connection.prepareStatement("DELETE FROM " + table + " WHERE " + predicate)) {
                 ps.setString(1, sessionId);
                 ps.setString(2, sessionId);

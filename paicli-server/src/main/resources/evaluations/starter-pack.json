@@ -236,6 +236,38 @@
           "enabled": true
         }
       ]
+    },
+    {
+      "name": "官方·05 Plan DAG 与验证",
+      "description": "Plan Runtime 回归模板：检查结构化计划、只读并行候选和完成证据。默认关闭，适合在启用 Plan API 后手动开启。",
+      "defaultTrials": 1,
+      "passThreshold": 80,
+      "cases": [
+        {
+          "name": "结构化计划输出",
+          "prompt": "为“读取 README 和 pom 后总结项目构建方式”生成一个包含 DAG 依赖和验收标准的计划说明，回答中必须包含 PLAN_DAG_READY，不要调用工具。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command", "spawn_agent", "cancel_agent"],
+          "requiredResponse": ["PLAN_DAG_READY"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 0,
+          "maxTokens": 900,
+          "maxDurationMs": 60000,
+          "enabled": false
+        },
+        {
+          "name": "验证证据闭环说明",
+          "prompt": "说明一个 Agent 完成任务后应该给出测试命令、结果、失败项和未验证风险，回答中必须包含 VALIDATION_EVIDENCE，不要调用工具。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command", "spawn_agent", "cancel_agent"],
+          "requiredResponse": ["VALIDATION_EVIDENCE"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 0,
+          "maxTokens": 900,
+          "maxDurationMs": 60000,
+          "enabled": false
+        }
+      ]
     }
   ]
 }

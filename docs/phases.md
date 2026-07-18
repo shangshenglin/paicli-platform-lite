@@ -128,15 +128,23 @@
 - [x] 启动 Plan 时只将依赖已满足的根 Step 推进到 `READY`，不提前绕过 ReAct Run、ToolCall 或 Approval 边界
 - [x] Session 删除时同步清理关联 Plan 数据；补充 PlanService 和迁移回归测试
 
-### 阶段 14 后续工作
+## 阶段 15：Plan 执行闭环、Async Job 和验证证据
 
-- [ ] Step 内创建/绑定普通 ReAct Run
+- [x] `plan_steps` 增加 `run_id`，新增 `async_jobs` 与 `validation_checks`；Schema 迁移 16
+- [x] 新增 `PlanExecutionService` 与 Plan Worker，自动领取 `READY` Step，创建普通 ReAct Run，并在 Run 终态后回写 Step、Plan、Async Job 和 Validation Check
+- [x] 支持 `REACT`、`ASYNC`/`ASYNC_JOB`、`NONE`、`MANUAL`/`USER_APPROVAL` 的基础 Step 状态推进
+- [x] 新增 `/dispatch`、`/dag/batches`、`/jobs`、`/validation-checks` 和通用 `/v1/async-jobs` API
+- [x] 新增 Read-only DAG 批次分析；当前先做保守调度，不绕过同一 Session 的活跃 Run 限制
+- [x] Console 效率工作台新增 Plan 工作台，展示计划、调度、Async Job、Validation Check 和 DAG 批次
+- [x] 评测 Starter Pack 增加默认关闭的 Plan/DAG/验证模板用例
+- [x] 补充 Plan 调度、Async Job、Validation Check 和迁移回归测试
+
+### 阶段 15 后续工作
+
 - [ ] Replan 支持 ACTIVE Plan 的局部下游替换
-- [ ] Async Jobs 与 `WAITING_JOB`
-- [ ] Read-only 并行 DAG 与资源锁
-- [ ] Validation Checks 与完成证据
-- [ ] Console Plan 工作台
-- [ ] 评测中心补 Plan/并行/验证用例
+- [ ] Read-only DAG 真正并行执行、资源锁和会话隔离策略
+- [ ] Async Job 接入可审批的长命令、下载、OCR、CI 查询等真实后台执行器
+- [ ] Validation Check 拆分为命令/API/截图/文件断言，并沉淀最终回答证据包
 
 ## 明确不做
 

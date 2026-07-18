@@ -71,6 +71,10 @@ final class ApiDtos {
 
     record SkipPlanStepRequest(String reason) { }
 
+    record CreateAsyncJobRequest(String planId, String stepId, String runId,
+                                 @NotBlank String projectKey, @NotBlank String kind,
+                                 String payloadJson, @NotBlank String idempotencyKey) { }
+
     record McpServerRequest(@NotBlank String name, @NotBlank String url, Boolean enabled,
                             Map<String, String> headers) { }
 

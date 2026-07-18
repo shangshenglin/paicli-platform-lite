@@ -877,7 +877,7 @@ async function openWorkbench() {
   const creationButtons = ['addTemplate', 'addProfile', 'addSchedule', 'addNotification'].map($);
   creationButtons.forEach(button => { button.disabled = true; });
   $('workbenchDialog').showModal();
-  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadApprovalPolicies(), loadProductivityData()]); }
+  try { await Promise.all([loadManagedMemories(), loadArtifacts(), loadPlans(), loadApprovalPolicies(), loadProductivityData()]); }
   finally { creationButtons.forEach(button => { button.disabled = false; }); }
 }
 
@@ -1685,6 +1685,51 @@ async function deleteArtifact(id) {
   catch (error) { showNotice(`删除失败：${error.message}`, true); }
 }
 
+async function loadPlans() {
+  const list = $('planList');
+  if (!list) return;
+  try {
+    const values = await api(`/v1/plans?projectKey=${encodeURIComponent(currentProjectKey())}&limit=50`);
+    list.replaceChildren(...values.map(plan => {
+      const item = workbenchItem(`${plan.status} · ${plan.objective}`, `v${plan.version} · ${plan.id} · ${new Date(plan.updatedAt).toLocaleString()}`);
+      if (['WAITING_APPROVAL', 'DRAFT'].includes(plan.status)) actionButton(item, '启动', () => startPlan(plan.id), true);
+      if (plan.status === 'ACTIVE') actionButton(item, '调度', () => dispatchPlan(plan.id), true);
+      actionButton(item, '详情', () => inspectPlan(plan.id));
+      return item;
+    }));
+    if (!values.length) list.append(element('div', 'hint', '暂无 Plan'));
+  } catch (error) { showNotice(`Plan 加载失败：${error.message}`, true); }
+}
+
+async function startPlan(id) {
+  try { await api(`/v1/plans/${id}/start`, {method: 'POST', body: '{}'}); await loadPlans(); }
+  catch (error) { showNotice(`Plan 启动失败：${error.message}`, true); }
+}
+
+async function dispatchPlan(id) {
+  try {
+    const report = await api(`/v1/plans/${id}/dispatch`, {method: 'POST', body: '{}'});
+    showNotice(`Plan 调度：启动 ${report.startedSteps} 步，刷新 ${report.refreshedSteps} 步`);
+    await loadPlans();
+  } catch (error) { showNotice(`Plan 调度失败：${error.message}`, true); }
+}
+
+async function inspectPlan(id) {
+  try {
+    const [view, jobs, checks, batches] = await Promise.all([
+      api(`/v1/plans/${id}`),
+      api(`/v1/plans/${id}/jobs`),
+      api(`/v1/plans/${id}/validation-checks`),
+      api(`/v1/plans/${id}/dag/batches`)
+    ]);
+    const steps = view.steps.map(step => `${step.status} · ${step.clientId} · ${step.title}${step.runId ? ` · run ${step.runId}` : ''}`).join('\n');
+    const jobText = jobs.map(job => `${job.status} · ${job.kind} · ${job.id}${job.runId ? ` · run ${job.runId}` : ''}`).join('\n') || '无';
+    const checkText = checks.map(check => `${check.status} · ${check.name} · ${check.evidence || check.expected}`).join('\n') || '无';
+    const batchText = batches.map(batch => `#${batch.ordinal} ${batch.readOnlyEligible ? 'read-only' : 'serial'} · ${batch.stepIds.join(', ')}`).join('\n') || '无';
+    alert(`Plan: ${view.plan.objective}\nStatus: ${view.plan.status}\n\nSteps:\n${steps}\n\nDAG Batches:\n${batchText}\n\nAsync Jobs:\n${jobText}\n\nValidation Checks:\n${checkText}`);
+  } catch (error) { showNotice(`Plan 详情加载失败：${error.message}`, true); }
+}
+
 async function loadApprovalPolicies() {
   try {
     const values = await api(`/v1/approvals/policies?projectKey=${encodeURIComponent(currentProjectKey())}`);
@@ -1806,6 +1851,7 @@ $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
 $('refreshMemories').onclick = loadManagedMemories;
 $('refreshArtifacts').onclick = loadArtifacts;
+$('refreshPlans').onclick = loadPlans;
 $('refreshPolicies').onclick = loadApprovalPolicies;
 $('refreshProductivity').onclick = loadProductivityData;
 $('refreshQueue').onclick = loadProductivityData;

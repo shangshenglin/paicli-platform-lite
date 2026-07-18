@@ -1,10 +1,12 @@
 package com.paicli.platform.server.api;
 
 import com.paicli.platform.server.plan.PlanService;
+import com.paicli.platform.server.plan.PlanExecutionService;
 import com.paicli.platform.server.store.PlanStore;
 import jakarta.validation.Valid;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -21,10 +23,12 @@ import java.util.List;
 @Tag(name = "Plans", description = "Durable plan lifecycle, DAG steps, and plan revisions")
 public class PlanController {
     private final PlanService service;
+    private final PlanExecutionService execution;
     private final PlanStore store;
 
-    public PlanController(PlanService service, PlanStore store) {
+    public PlanController(PlanService service, PlanExecutionService execution, PlanStore store) {
         this.service = service;
+        this.execution = execution;
         this.store = store;
     }
 
@@ -56,12 +60,28 @@ public class PlanController {
 
     @PostMapping("/plans/{planId}/approve")
     public PlanService.PlanView approve(@PathVariable String planId) {
-        return service.view(service.approve(planId).id());
+        var plan = service.approve(planId);
+        execution.dispatchPlan(planId, 4);
+        return service.view(plan.id());
     }
 
     @PostMapping("/plans/{planId}/start")
     public PlanService.PlanView start(@PathVariable String planId) {
-        return service.view(service.start(planId).id());
+        var plan = service.start(planId);
+        execution.dispatchPlan(planId, 4);
+        return service.view(plan.id());
+    }
+
+    @PostMapping("/plans/{planId}/dispatch")
+    public PlanExecutionService.DispatchReport dispatch(@PathVariable String planId,
+                                                        @RequestParam(defaultValue = "4") int limit) {
+        return execution.dispatchPlan(planId, limit);
+    }
+
+    @GetMapping("/plans/{planId}/dag/batches")
+    public List<PlanExecutionService.ParallelBatch> batches(@PathVariable String planId) {
+        service.view(planId);
+        return execution.parallelBatches(planId);
     }
 
     @PostMapping("/plans/{planId}/cancel")
@@ -87,6 +107,38 @@ public class PlanController {
                                             @RequestParam(defaultValue = "200") int limit) {
         service.view(planId);
         return store.events(planId, after, limit);
+    }
+
+    @GetMapping("/plans/{planId}/jobs")
+    public List<PlanStore.AsyncJob> jobs(@PathVariable String planId,
+                                         @RequestParam(defaultValue = "100") int limit) {
+        service.view(planId);
+        return store.asyncJobs(planId, limit);
+    }
+
+    @GetMapping("/plans/{planId}/validation-checks")
+    public List<PlanStore.ValidationCheck> validationChecks(@PathVariable String planId,
+                                                            @RequestParam(defaultValue = "200") int limit) {
+        service.view(planId);
+        return store.validationChecks(planId, limit);
+    }
+
+    @PostMapping("/async-jobs/{jobId}/cancel")
+    public PlanStore.AsyncJob cancelJob(@PathVariable String jobId) {
+        return store.cancelAsyncJob(jobId);
+    }
+
+    @PostMapping("/async-jobs")
+    @ResponseStatus(HttpStatus.CREATED)
+    public PlanStore.AsyncJob createJob(@Valid @RequestBody ApiDtos.CreateAsyncJobRequest request) {
+        return store.createAsyncJob(request.planId(), request.stepId(), request.runId(), request.projectKey(),
+                request.kind(), request.payloadJson(), request.idempotencyKey());
+    }
+
+    @GetMapping("/async-jobs/{jobId}")
+    public PlanStore.AsyncJob job(@PathVariable String jobId) {
+        return store.findAsyncJob(jobId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "async job not found"));
     }
 
     @PostMapping("/plan-steps/{stepId}/retry")
