@@ -23,7 +23,8 @@ final class SqliteSchemaMigrator {
             new Migration(11, "long-term productivity templates profiles budgets schedules and queue"),
             new Migration(12, "agent evaluation suites cases executions trials and baselines"),
             new Migration(13, "production run state tool recovery model attempts budgets and notification outbox"),
-            new Migration(14, "evaluation output token metric and concurrent SQLite hardening")
+            new Migration(14, "evaluation output token metric and concurrent SQLite hardening"),
+            new Migration(15, "durable plan runtime schema")
     );
 
     private SqliteSchemaMigrator() { }

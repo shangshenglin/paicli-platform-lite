@@ -62,6 +62,15 @@ final class ApiDtos {
 
     record EvaluationStartRequest(String modelProfileId, Integer trialCount, Integer passThreshold) { }
 
+    record CreatePlanRequest(String sessionId, String runId, String projectKey, @NotBlank String objective,
+                             @NotBlank String rawPlanJson, String source) { }
+
+    record GeneratePlanRequest(String sessionId, String projectKey, @NotBlank String objective) { }
+
+    record ReplanRequest(@NotBlank String reason, @NotBlank String rawPlanJson) { }
+
+    record SkipPlanStepRequest(String reason) { }
+
     record McpServerRequest(@NotBlank String name, @NotBlank String url, Boolean enabled,
                             Map<String, String> headers) { }
 

@@ -119,11 +119,30 @@
 - [x] WAL 一次性初始化、30 秒 SQLite 写锁等待和并发写入回归
 - [x] 相同工具与参数默认最多重复 3 次，超限立即终止失控 Run；Schema 迁移 14
 
+## 阶段 14：Plan Runtime 基础
+
+- [x] 新增 `plans`、`plan_steps`、`plan_edges`、`plan_revisions` 和 `plan_events` 持久化表；Schema 迁移 15
+- [x] 新增 Plan JSON 解析器，清理 Markdown code fence，重映射模型 step id，并校验 Step 类型、执行模式、依赖存在和 DAG 循环
+- [x] 新增 Planner 服务，通过现有 ModelClient 生成结构化计划；Demo 模型保留单步计划降级，方便本地无模型 Key 验证
+- [x] 新增 Plan 生命周期 API：创建、生成、查看、批准/启动、取消、Replan、Step retry/skip 和 Plan events
+- [x] 启动 Plan 时只将依赖已满足的根 Step 推进到 `READY`，不提前绕过 ReAct Run、ToolCall 或 Approval 边界
+- [x] Session 删除时同步清理关联 Plan 数据；补充 PlanService 和迁移回归测试
+
+### 阶段 14 后续工作
+
+- [ ] Step 内创建/绑定普通 ReAct Run
+- [ ] Replan 支持 ACTIVE Plan 的局部下游替换
+- [ ] Async Jobs 与 `WAITING_JOB`
+- [ ] Read-only 并行 DAG 与资源锁
+- [ ] Validation Checks 与完成证据
+- [ ] Console Plan 工作台
+- [ ] 评测中心补 Plan/并行/验证用例
+
 ## 明确不做
 
 - Kubernetes、MicroVM、多地域和多租户
 - Kafka、Redis、PostgreSQL、MinIO
 - 跨项目 Memory 联想图谱
-- 自治 Planner/Reviewer Agent Team 和复杂团队 Console
+- 自治 Planner/Reviewer Agent Team 和复杂团队 Console；当前只做单 Agent 的持久化 Plan Runtime
 - 默认 Lite 配置中的外部向量数据库
 - 音视频理解和历史原始图片重复注入

@@ -22,6 +22,16 @@
 - 验证：运行了哪些测试、构建或人工检查。
 ```
 
+## 2026-07-19
+
+### Plan Runtime 基础持久化
+
+- 变更：新增 `plans`、`plan_steps`、`plan_edges`、`plan_revisions` 和 `plan_events` 表，登记 Schema 迁移 15，并在删除 Session 时同步清理关联 Plan 数据。
+- 变更：新增 Plan JSON 解析校验能力，支持清理 Markdown code fence、重新映射模型生成的 step id、校验步骤类型/执行模式、依赖存在性和 DAG 循环。
+- 变更：新增 Planner 服务和 `/v1/plans` 系列 API，支持创建、模型生成、查看、批准/启动、取消、Replan、Step retry/skip 和事件读取；启动阶段只把根 Step 推进到 `READY`，不绕过现有 ReAct Run、ToolCall 和 Approval 边界。
+- 思路：先把 Agent 的计划从“模型输出文本”升级为可恢复、可审计的数据对象，再逐步接入 Step 内 ReAct Run、Async Jobs、Read-only 并行 DAG、Validation Checks 和 Console 工作台，避免一次性重写现有 Agent Loop。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，覆盖 Plan DAG 校验、启动根 Step、Replan 版本和迁移 1-15。
+
 ## 2026-07-18
 
 ### 补充 Agent 评测中心面试讲解

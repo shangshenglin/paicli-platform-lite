@@ -288,6 +288,49 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id) ON DELETE CASCADE)");
             SqliteSchemaMigrator.ensureColumn(connection, "evaluation_baselines", "token_metric",
                     "TEXT NOT NULL DEFAULT 'TOTAL'");
+            statement.execute("CREATE TABLE IF NOT EXISTS plans (" +
+                    "id TEXT PRIMARY KEY, session_id TEXT, run_id TEXT, project_key TEXT NOT NULL, " +
+                    "objective TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, " +
+                    "version INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'MANUAL', " +
+                    "raw_plan_json TEXT NOT NULL DEFAULT '{}', validation_errors_json TEXT NOT NULL DEFAULT '[]', " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, " +
+                    "failure_reason TEXT, FOREIGN KEY(session_id) REFERENCES sessions(id), " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plans_project_updated " +
+                    "ON plans(project_key, updated_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plans_session_created " +
+                    "ON plans(session_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS plan_steps (" +
+                    "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, client_id TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
+                    "title TEXT NOT NULL, description TEXT NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL, " +
+                    "execution_mode TEXT NOT NULL DEFAULT 'REACT', done_criteria_json TEXT NOT NULL DEFAULT '[]', " +
+                    "result_summary TEXT, failure_reason TEXT, started_at TEXT, completed_at TEXT, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(plan_id, client_id), " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_status " +
+                    "ON plan_steps(plan_id, status, ordinal)");
+            statement.execute("CREATE TABLE IF NOT EXISTS plan_edges (" +
+                    "plan_id TEXT NOT NULL, from_step_id TEXT NOT NULL, to_step_id TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, PRIMARY KEY(plan_id, from_step_id, to_step_id), " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(from_step_id) REFERENCES plan_steps(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(to_step_id) REFERENCES plan_steps(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_edges_to_step " +
+                    "ON plan_edges(plan_id, to_step_id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS plan_revisions (" +
+                    "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, version INTEGER NOT NULL, reason TEXT NOT NULL, " +
+                    "raw_plan_json TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE)");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_revisions_version " +
+                    "ON plan_revisions(plan_id, version)");
+            statement.execute("CREATE TABLE IF NOT EXISTS plan_events (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT NOT NULL, step_id TEXT, " +
+                    "event_type TEXT NOT NULL, event_data TEXT NOT NULL, sequence INTEGER NOT NULL, " +
+                    "created_at TEXT NOT NULL, UNIQUE(plan_id, sequence), " +
+                    "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE SET NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_events_plan " +
+                    "ON plan_events(plan_id, id)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
             statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
@@ -481,6 +524,7 @@ public class SqliteRuntimeStore {
                     deleteBySessionRuns(connection, "tool_calls", currentSession);
                     deleteBySessionRuns(connection, "run_events", currentSession);
                     deleteBySessionRuns(connection, "artifacts", currentSession);
+                    deletePlansForSession(connection, currentSession);
                     try (PreparedStatement attachments = connection.prepareStatement(
                             "DELETE FROM input_attachments WHERE session_id=?")) {
                         attachments.setString(1, currentSession);
@@ -2337,6 +2381,24 @@ public class SqliteRuntimeStore {
         try (PreparedStatement ps = connection.prepareStatement(
                 "DELETE FROM " + table + " WHERE " + runColumn + " IN (SELECT id FROM runs WHERE session_id=?)")) {
             ps.setString(1, sessionId);
+            ps.executeUpdate();
+        }
+    }
+
+    private static void deletePlansForSession(Connection connection, String sessionId) throws SQLException {
+        String predicate = "plan_id IN (SELECT id FROM plans WHERE session_id=? " +
+                "OR run_id IN (SELECT id FROM runs WHERE session_id=?))";
+        for (String table : List.of("plan_events", "plan_revisions", "plan_edges", "plan_steps")) {
+            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM " + table + " WHERE " + predicate)) {
+                ps.setString(1, sessionId);
+                ps.setString(2, sessionId);
+                ps.executeUpdate();
+            }
+        }
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM plans WHERE session_id=? OR run_id IN (SELECT id FROM runs WHERE session_id=?)")) {
+            ps.setString(1, sessionId);
+            ps.setString(2, sessionId);
             ps.executeUpdate();
         }
     }

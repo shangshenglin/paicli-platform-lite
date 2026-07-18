@@ -1,8 +1,8 @@
 # PaiCLI Platform Lite
 
-PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
+PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–13，包含 76 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–14，包含 79 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -11,6 +11,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 - 服务或 Worker 中断后，Run 如何恢复，而不是从头猜测执行到了哪里。
 - 写文件、执行命令等副作用如何先持久化、再审批、最后执行。
 - 一轮多个 ToolCall 如何原子落库，并保持模型给出的顺序。
+- 复杂任务的计划、步骤、依赖和修订如何从模型文本变成可恢复的持久化对象。
 - 模型密钥如何只留在 Server，不进入 Docker Sandbox。
 - 长对话、Memory、知识文档和大工具结果如何在有限上下文中按需召回。
 - SSE 断线后如何重放过程，并以数据库终态完成对账。
@@ -24,6 +25,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 可靠 Runtime | SQLite WAL、持久化状态机、可恢复 Worker、ToolCall 幂等、SSE 重放、取消与失败恢复 |
 | 执行安全 | Local/Docker Sandbox、危险工具审批、持久化审批策略、路径/资源/密钥边界、JSONL 审计 |
 | 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、摘要、Token 预算、Artifact、项目规则 |
+| Plan Runtime | 持久化 Plan/Step/Edge、JSON 计划解析校验、DAG 合法性检查、审批/启动/取消/Replan API |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、预算、队列、定时任务、通知、迁移 |
 | 质量闭环 | 官方入门评测集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
@@ -38,6 +40,7 @@ Web Console / REST Client
 paicli-server（Agent Runtime / 脑）
   ├─ Session / Run / Message / Event / ToolCall / Approval
   ├─ RunWorkerCoordinator + RunProcessor（可恢复 ReAct Loop）
+  ├─ PlanService（Plan JSON / DAG / Revision / Step 状态）
   ├─ ModelClient（Demo / OpenAI-compatible）
   ├─ ContextManager（规则 / Memory / RAG / 摘要 / Token 预算）
   ├─ Server Tool Provider（Skill / Knowledge / Web / MCP / Delegation）
@@ -422,7 +425,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–14：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机，以及评测 Token 口径与 SQLite 并发加固。
+SQLite `schema_migrations` 当前记录版本 1–15：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固，以及 Plan Runtime 基础表。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -450,6 +453,24 @@ GET                         /v1/runs/{runId}/events
 GET                         /v1/sessions/{sessionId}/export
 POST                        /v1/sessions/import
 ```
+
+### Plan Runtime
+
+```text
+GET/POST                    /v1/plans
+POST                        /v1/plans/generate
+GET                         /v1/plans/{planId}
+POST                        /v1/plans/{planId}/approve
+POST                        /v1/plans/{planId}/start
+POST                        /v1/plans/{planId}/cancel
+POST                        /v1/plans/{planId}/replan
+GET                         /v1/plans/{planId}/steps
+GET                         /v1/plans/{planId}/events
+POST                        /v1/plan-steps/{stepId}/retry
+POST                        /v1/plan-steps/{stepId}/skip
+```
+
+Plan Runtime 第一版只负责把计划变成可持久化、可校验和可审计的数据对象：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准和状态；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。Step 内复用 ReAct Run、Async Jobs、Read-only 并行 DAG、Validation Checks 和 Console Plan 工作台属于后续阶段。
 
 ### Approval、附件与 Artifact
 
@@ -564,13 +585,14 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 .\scripts\start-local.ps1
 ```
 
-当前自动化测试总数为 76，覆盖：
+当前自动化测试总数为 79，覆盖：
 
 - Common、Server、Sandbox Agent 模块边界。
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
 - ContextManager、摘要、Memory、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–14、WAL 并发写入、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–15、WAL 并发写入、Artifact 原子写入、维护和备份安全相关行为。
+- Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪和 Replan 版本记录。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
 - Agent 评测多 Trial、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 Starter Pack 完整性和幂等安装。
 
