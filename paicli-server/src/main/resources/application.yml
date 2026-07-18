@@ -25,8 +25,8 @@ management:
 paicli:
   data-dir: data
   workspace-root: data/workspaces
-  worker-count: 2
-  worker-poll-millis: 300
+  worker-count: ${PAICLI_WORKER_COUNT:1}
+  worker-poll-millis: ${PAICLI_WORKER_POLL_MILLIS:300}
   sandbox-mode: local
   security:
     api-key: ${PAICLI_API_KEY:}

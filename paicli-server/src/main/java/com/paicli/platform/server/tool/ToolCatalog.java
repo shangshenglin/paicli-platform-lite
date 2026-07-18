@@ -32,11 +32,11 @@ public class ToolCatalog {
                         "type", "object", "properties", Map.of("path", stringProperty()), "required", List.of("path"))),
                 tool("read_file", "Read a UTF-8 workspace file", Map.of(
                         "type", "object", "properties", Map.of("path", stringProperty()), "required", List.of("path"))),
-                tool("write_file", "Write a UTF-8 workspace file; requires approval", Map.of(
+                tool("write_file", "Write a UTF-8 workspace file; requires approval. Use this for file writes instead of execute_command; parent directories are handled by the file tool when possible.", Map.of(
                         "type", "object", "properties", Map.of(
                                 "path", stringProperty(), "content", stringProperty()),
                         "required", List.of("path", "content"))),
-                tool("execute_command", "Execute a shell command in the workspace; requires approval", Map.of(
+                tool("execute_command", "Execute a shell command in the workspace; requires approval. Do not use this as a fallback for ordinary file writes when write_file can satisfy the request.", Map.of(
                         "type", "object", "properties", Map.of(
                                 "command", stringProperty(), "cwd", stringProperty()),
                         "required", List.of("command"))),

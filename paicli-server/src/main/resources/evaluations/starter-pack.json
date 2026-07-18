@@ -82,7 +82,7 @@
           "forbiddenTools": ["execute_command", "spawn_agent", "cancel_agent"],
           "requiredResponse": [],
           "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
-          "maxToolCalls": 2,
+          "maxToolCalls": 3,
           "maxTokens": 1000,
           "maxDurationMs": 120000,
           "enabled": true
@@ -113,7 +113,7 @@
         },
         {
           "name": "写后读取工具序列",
-          "prompt": "先用 write_file 将 PAICLI_CHAIN_OK 写入 evaluation/chain.txt，获批并写入后，再用 read_file 读取同一文件，最后说明读取结果。",
+          "prompt": "先用 write_file 将 PAICLI_CHAIN_OK 写入 evaluation/chain.txt，获批并写入后，再用 read_file 读取同一文件，最后说明读取结果。不要调用 execute_command；即使需要创建目录，也必须继续使用 write_file/read_file。",
           "requiredTools": ["write_file", "read_file"],
           "forbiddenTools": ["execute_command", "spawn_agent", "cancel_agent"],
           "requiredResponse": ["PAICLI_CHAIN_OK"],
