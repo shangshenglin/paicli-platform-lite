@@ -596,6 +596,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 - [技术架构与面试讲解](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md)
 - [架构说明](docs/architecture.md)
 - [阶段状态](docs/phases.md)
+- [变更日志与优化复盘](changeLog.md)
 - [Docker Sandbox](docs/docker-sandbox.md)
 - [在线产品站](https://paicli-platform-lite.fuermalin2002.chatgpt.site)
 - 产品站源码：`paicli-site/`

@@ -19,6 +19,7 @@
 - 数据库行为修改必须补迁移兼容和 Store 测试；API 行为修改必须同步 README/OpenAPI。
 - 项目规则只从受控 data/workspace 根目录读取，并受总字符预算限制。
 - 不提交 `.env`、`data/`、`backups/`、`target/`。
+- 任意会话、任意工作区、任意分支只要修改代码、脚本、配置、测试、文档、静态资源或产品站点，都必须同步更新根目录 `changeLog.md`，并在同一次提交中说明变更、思路和验证。
 - 模型 content/reasoning delta 必须批量持久化，不能在网络流回调中对每个 token 同步写 SQLite。
 - Console 的 `.app -> .workspace -> .chat/.detail -> .messages/.events` 高度链必须保持 `min-height: 0` 和受控 Grid 行，避免内容撑高视口后让内层滚动失效。
 - 删除 Session 必须先拒绝存在活跃 Run 的会话，再于同一事务删除 Approval / ToolCall / Event / Artifact / ModelUsage / MemoryExtraction / Message / Run；删除分组只将会话移到未分组。
@@ -31,4 +32,4 @@
 .\scripts\start-local.ps1
 ```
 
-架构与阶段状态见 `docs/architecture.md`、`docs/phases.md`。
+架构与阶段状态见 `docs/architecture.md`、`docs/phases.md`；完整演进记录和后续修改规范见 `changeLog.md`。
