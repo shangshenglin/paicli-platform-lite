@@ -113,12 +113,17 @@ public class RunProcessor {
             if (metrics != null) metrics.modelCall(modelClient.name(), run.modelProfileId());
             store.appendEvent(run.id(), "model.started", json(Map.of("provider", modelClient.name())));
             var session = store.findSession(run.sessionId()).orElseThrow();
+            var agentProfile = productivity == null ? java.util.Optional.<ProductivityStore.AgentProfile>empty()
+                    : productivity.resolveAgentProfile(session.projectKey(), run.agentProfileId());
             var profile = productivity == null ? java.util.Optional.<ProductivityStore.ModelProfile>empty()
                     : productivity.resolveModelProfile(session.projectKey(), run.modelProfileId());
             ContextManager.PreparedContext context = profile
                     .map(value -> contextManager.prepare(run.sessionId(), run.id(),
-                            value.maxContextTokens(), value.maxOutputTokens()))
-                    .orElseGet(() -> contextManager.prepare(run.sessionId(), run.id()));
+                            value.maxContextTokens(), value.maxOutputTokens(), agentProfile.orElse(null)))
+                    .orElseGet(() -> contextManager.prepare(run.sessionId(), run.id(),
+                            modelProperties == null ? 0 : modelProperties.maxContextTokens(),
+                            modelProperties == null ? 0 : modelProperties.maxOutputTokens(),
+                            agentProfile.orElse(null)));
             var request = profile.map(value -> context.request().withRoute(productivity.route(value)))
                     .orElse(context.request());
             if (productivity != null) {

@@ -27,6 +27,11 @@ public class ToolCatalog {
     }
 
     public List<ModelToolDefinition> definitions() {
+        return definitions(Set.of());
+    }
+
+    public List<ModelToolDefinition> definitions(Set<String> allowedNames) {
+        Set<String> allow = allowedNames == null ? Set.of() : allowedNames;
         List<ModelToolDefinition> definitions = new ArrayList<>(List.of(
                 tool("list_dir", "List files under a workspace directory", Map.of(
                         "type", "object", "properties", Map.of("path", stringProperty()), "required", List.of("path"))),
@@ -47,10 +52,12 @@ public class ToolCatalog {
                                 "limit", Map.of("type", "integer", "minimum", 1, "maximum", 32000)),
                         "required", List.of("artifact_id")))
         ));
+        if (!allow.isEmpty()) definitions.removeIf(definition -> !allow.contains(definition.name()));
         Set<String> names = new HashSet<>();
         definitions.forEach(definition -> names.add(definition.name()));
         for (ServerToolProvider provider : providers) {
             for (ModelToolDefinition definition : provider.definitions()) {
+                if (!allow.isEmpty() && !allow.contains(definition.name())) continue;
                 if (!names.add(definition.name())) {
                     throw new IllegalStateException("Duplicate tool definition: " + definition.name());
                 }

@@ -81,6 +81,7 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "queued_at", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "priority", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "model_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "agent_profile_id", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "retry_count", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("UPDATE runs SET queued_at=created_at WHERE queued_at IS NULL");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runs_status_created ON runs(status, created_at)");
@@ -197,12 +198,21 @@ public class SqliteRuntimeStore {
             statement.execute("CREATE TABLE IF NOT EXISTS run_delegations (" +
                     "id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, parent_tool_call_id TEXT NOT NULL UNIQUE, " +
                     "child_session_id TEXT NOT NULL, child_run_id TEXT NOT NULL UNIQUE, agent_name TEXT NOT NULL, " +
-                    "task TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "agent_profile_id TEXT, task TEXT NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(parent_run_id) REFERENCES runs(id), " +
                     "FOREIGN KEY(parent_tool_call_id) REFERENCES tool_calls(id), " +
                     "FOREIGN KEY(child_session_id) REFERENCES sessions(id), " +
                     "FOREIGN KEY(child_run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "agent_profile_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_parent ON run_delegations(parent_run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_collaboration_policies (" +
+                    "run_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, complexity TEXT NOT NULL DEFAULT 'MEDIUM', " +
+                    "risk TEXT NOT NULL DEFAULT 'MEDIUM', allowed_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]', " +
+                    "max_experts INTEGER NOT NULL DEFAULT 3, max_depth INTEGER NOT NULL DEFAULT 1, " +
+                    "max_child_runs INTEGER NOT NULL DEFAULT 6, max_estimated_tokens INTEGER NOT NULL DEFAULT 0, " +
+                    "max_estimated_cost REAL NOT NULL DEFAULT 0, allow_expert_delegation INTEGER NOT NULL DEFAULT 0, " +
+                    "require_reviewer INTEGER NOT NULL DEFAULT 0, require_runner INTEGER NOT NULL DEFAULT 0, " +
+                    "created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES runs(id))");
             statement.execute("CREATE TABLE IF NOT EXISTS task_templates (" +
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, shortcut TEXT NOT NULL DEFAULT '', " +
                     "prompt TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', attachment_requirements TEXT NOT NULL DEFAULT '', " +
@@ -218,6 +228,19 @@ public class SqliteRuntimeStore {
                     "output_price REAL NOT NULL DEFAULT 0, local_model INTEGER NOT NULL DEFAULT 0, is_default INTEGER NOT NULL DEFAULT 0, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_model_profiles_project ON model_profiles(project_key,is_default DESC,name)");
+            statement.execute("CREATE TABLE IF NOT EXISTS agent_profiles (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', " +
+                    "system_prompt TEXT NOT NULL, model_profile_id TEXT, tool_names_json TEXT NOT NULL DEFAULT '[]', " +
+                    "skill_names_json TEXT NOT NULL DEFAULT '[]', output_schema TEXT NOT NULL DEFAULT '', " +
+                    "collaboration_role TEXT NOT NULL DEFAULT 'EXPERT', handoff_policy TEXT NOT NULL DEFAULT 'MANUAL', " +
+                    "workspace_scope TEXT NOT NULL DEFAULT 'PROJECT', approval_policy TEXT NOT NULL DEFAULT 'INHERIT', " +
+                    "template_key TEXT NOT NULL DEFAULT '', template_version INTEGER NOT NULL DEFAULT 0, " +
+                    "enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "UNIQUE(project_key,name))");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "template_key", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "template_version", "INTEGER NOT NULL DEFAULT 0");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_profiles_project " +
+                    "ON agent_profiles(project_key,enabled DESC,name COLLATE NOCASE)");
             statement.execute("CREATE TABLE IF NOT EXISTS budget_policies (" +
                     "project_key TEXT PRIMARY KEY, daily_tokens INTEGER NOT NULL DEFAULT 0, monthly_tokens INTEGER NOT NULL DEFAULT 0, " +
                     "daily_cost REAL NOT NULL DEFAULT 0, monthly_cost REAL NOT NULL DEFAULT 0, warn_ratio REAL NOT NULL DEFAULT 0.8, " +
@@ -637,6 +660,14 @@ public class SqliteRuntimeStore {
                                String thinkingMode, String reasoningEffort,
                                List<String> attachmentIds, String modelProfileId,
                                int priority, int retryCount) {
+        return createRun(sessionId, input, thinkingMode, reasoningEffort, attachmentIds,
+                modelProfileId, null, priority, retryCount);
+    }
+
+    public RunRecord createRun(String sessionId, String input,
+                               String thinkingMode, String reasoningEffort,
+                               List<String> attachmentIds, String modelProfileId,
+                               String agentProfileId, int priority, int retryCount) {
         if (input == null || input.isBlank()) {
             throw new IllegalArgumentException("input must not be blank");
         }
@@ -655,8 +686,8 @@ public class SqliteRuntimeStore {
             try {
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode," +
-                                "reasoning_effort,priority,model_profile_id,retry_count,created_at,queued_at,version) " +
-                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,?,0)")) {
+                                "reasoning_effort,priority,model_profile_id,agent_profile_id,retry_count," +
+                                "created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,0)")) {
                     ps.setString(1, runId);
                     ps.setString(2, sessionId);
                     ps.setString(3, RunStatus.QUEUED.name());
@@ -665,9 +696,10 @@ public class SqliteRuntimeStore {
                     ps.setString(6, resolvedEffort);
                     ps.setInt(7, Math.max(-10, Math.min(priority, 10)));
                     ps.setString(8, modelProfileId == null || modelProfileId.isBlank() ? null : modelProfileId);
-                    ps.setInt(9, Math.max(0, retryCount));
-                    ps.setString(10, now.toString());
+                    ps.setString(9, agentProfileId == null || agentProfileId.isBlank() ? null : agentProfileId);
+                    ps.setInt(10, Math.max(0, retryCount));
                     ps.setString(11, now.toString());
+                    ps.setString(12, now.toString());
                     ps.executeUpdate();
                 }
                 MessageRecord userMessage = insertMessage(connection, sessionId, runId, "user", input.trim(),
@@ -678,7 +710,7 @@ public class SqliteRuntimeStore {
                 connection.commit();
                 return new RunRecord(runId, sessionId, RunStatus.QUEUED, input.trim(), 0,
                         null, resolvedThinking, resolvedEffort, Math.max(-10, Math.min(priority, 10)),
-                        modelProfileId, Math.max(0, retryCount), now, null, null, 0);
+                        modelProfileId, agentProfileId, Math.max(0, retryCount), now, null, null, 0);
             } catch (Exception e) {
                 rollback(connection);
                 throw e;
@@ -689,7 +721,7 @@ public class SqliteRuntimeStore {
     }
 
     public InputAttachmentRecord createInputAttachment(String sessionId, String name, String mimeType,
-                                                        String relativePath, long size, String sha256) {
+                                                       String relativePath, long size, String sha256) {
         if (findSession(sessionId).isEmpty()) throw new IllegalArgumentException("session not found: " + sessionId);
         String attachmentId = id("attachment");
         Instant now = Instant.now();
@@ -825,8 +857,110 @@ public class SqliteRuntimeStore {
 
     public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
                                                        String agentName, String task) {
+        return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, null, null);
+    }
+
+    public CollaborationPolicy saveCollaborationPolicy(String runId, boolean enabled, String complexity, String risk,
+                                                       String allowedAgentProfileIdsJson, int maxExperts,
+                                                       int maxDepth, int maxChildRuns, long maxEstimatedTokens,
+                                                       double maxEstimatedCost, boolean allowExpertDelegation,
+                                                       boolean requireReviewer, boolean requireRunner) {
+        findRun(runId).orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
+        Instant now = Instant.now();
+        String resolvedComplexity = normalizeEnum(complexity, Set.of("SIMPLE", "MEDIUM", "COMPLEX"), "MEDIUM");
+        String resolvedRisk = normalizeEnum(risk, Set.of("LOW", "MEDIUM", "HIGH"), "MEDIUM");
+        int resolvedMaxExperts = Math.max(0, Math.min(maxExperts, 6));
+        int resolvedMaxDepth = Math.max(0, Math.min(maxDepth, 3));
+        int resolvedMaxChildRuns = Math.max(0, Math.min(maxChildRuns, 12));
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO run_collaboration_policies(run_id,enabled,complexity,risk,allowed_agent_profile_ids_json," +
+                        "max_experts,max_depth,max_child_runs,max_estimated_tokens,max_estimated_cost," +
+                        "allow_expert_delegation,require_reviewer,require_runner,created_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET " +
+                        "enabled=excluded.enabled,complexity=excluded.complexity,risk=excluded.risk," +
+                        "allowed_agent_profile_ids_json=excluded.allowed_agent_profile_ids_json," +
+                        "max_experts=excluded.max_experts,max_depth=excluded.max_depth," +
+                        "max_child_runs=excluded.max_child_runs,max_estimated_tokens=excluded.max_estimated_tokens," +
+                        "max_estimated_cost=excluded.max_estimated_cost,allow_expert_delegation=excluded.allow_expert_delegation," +
+                        "require_reviewer=excluded.require_reviewer,require_runner=excluded.require_runner")) {
+            int i = 1;
+            ps.setString(i++, runId);
+            ps.setInt(i++, enabled ? 1 : 0);
+            ps.setString(i++, resolvedComplexity);
+            ps.setString(i++, resolvedRisk);
+            ps.setString(i++, allowedAgentProfileIdsJson == null || allowedAgentProfileIdsJson.isBlank()
+                    ? "[]" : allowedAgentProfileIdsJson);
+            ps.setInt(i++, resolvedMaxExperts);
+            ps.setInt(i++, resolvedMaxDepth);
+            ps.setInt(i++, resolvedMaxChildRuns);
+            ps.setLong(i++, Math.max(0, maxEstimatedTokens));
+            ps.setDouble(i++, Math.max(0, maxEstimatedCost));
+            ps.setInt(i++, allowExpertDelegation ? 1 : 0);
+            ps.setInt(i++, requireReviewer ? 1 : 0);
+            ps.setInt(i++, requireRunner ? 1 : 0);
+            ps.setString(i, now.toString());
+            ps.executeUpdate();
+            return collaborationPolicy(runId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("save collaboration policy", e);
+        }
+    }
+
+    public Optional<CollaborationPolicy> collaborationPolicy(String runId) {
+        try (Connection connection = open()) {
+            return collaborationPolicy(connection, runId);
+        } catch (SQLException e) {
+            throw failure("find collaboration policy", e);
+        }
+    }
+
+    public Optional<CollaborationPolicy> collaborationPolicyForTree(String runId) {
+        try (Connection connection = open()) {
+            String current = runId;
+            for (int i = 0; i < 8 && current != null && !current.isBlank(); i++) {
+                Optional<CollaborationPolicy> policy = collaborationPolicy(connection, current);
+                if (policy.isPresent()) return policy;
+                current = parentRunId(connection, current).orElse(null);
+            }
+            return Optional.empty();
+        } catch (SQLException e) {
+            throw failure("find collaboration policy tree", e);
+        }
+    }
+
+    public int delegationDepth(String runId) {
+        try (Connection connection = open()) {
+            return delegationDepth(connection, runId);
+        } catch (SQLException e) {
+            throw failure("delegation depth", e);
+        }
+    }
+
+    public int delegationCountForTree(String runId) {
+        try (Connection connection = open()) {
+            String root = rootRunId(connection, runId);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "WITH RECURSIVE tree(run_id) AS (" +
+                            "SELECT ? UNION ALL SELECT d.child_run_id FROM run_delegations d " +
+                            "JOIN tree t ON d.parent_run_id=t.run_id) " +
+                            "SELECT COUNT(*) FROM run_delegations d JOIN tree t ON d.parent_run_id=t.run_id")) {
+                ps.setString(1, root);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : 0;
+                }
+            }
+        } catch (SQLException e) {
+            throw failure("delegation tree count", e);
+        }
+    }
+
+    public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
+                                                       String agentName, String task, String agentProfileId,
+                                                       String modelProfileId) {
         String name = requireText(agentName, "agentName", 80);
         String input = requireText(task, "task", 32_000);
+        String childAgentProfileId = nullableText(agentProfileId);
+        String childModelProfileId = nullableText(modelProfileId);
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -858,6 +992,8 @@ public class SqliteRuntimeStore {
                     }
                 }
                 SessionRecord parentSession = findSession(connection, parent.sessionId()).orElseThrow();
+                String resolvedAgentProfileId = childAgentProfileId == null ? parent.agentProfileId() : childAgentProfileId;
+                String resolvedModelProfileId = childModelProfileId == null ? parent.modelProfileId() : childModelProfileId;
                 Instant now = Instant.now();
                 String childSessionId = id("session");
                 String childRunId = id("run");
@@ -876,15 +1012,18 @@ public class SqliteRuntimeStore {
                 }
                 try (PreparedStatement run = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode,reasoning_effort," +
-                                "created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,0)")) {
+                                "model_profile_id,agent_profile_id,created_at,queued_at,version) " +
+                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,0)")) {
                     run.setString(1, childRunId);
                     run.setString(2, childSessionId);
                     run.setString(3, RunStatus.QUEUED.name());
                     run.setString(4, input);
                     run.setString(5, parent.thinkingMode());
                     run.setString(6, parent.reasoningEffort());
-                    run.setString(7, now.toString());
-                    run.setString(8, now.toString());
+                    run.setString(7, resolvedModelProfileId);
+                    run.setString(8, resolvedAgentProfileId);
+                    run.setString(9, now.toString());
+                    run.setString(10, now.toString());
                     run.executeUpdate();
                 }
                 insertMessage(connection, childSessionId, childRunId, "user", input,
@@ -893,22 +1032,23 @@ public class SqliteRuntimeStore {
                 String delegationId = id("delegation");
                 try (PreparedStatement delegation = connection.prepareStatement(
                         "INSERT INTO run_delegations(id,parent_run_id,parent_tool_call_id,child_session_id," +
-                                "child_run_id,agent_name,task,created_at) VALUES(?,?,?,?,?,?,?,?)")) {
+                                "child_run_id,agent_profile_id,agent_name,task,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
                     delegation.setString(1, delegationId);
                     delegation.setString(2, parentRunId);
                     delegation.setString(3, parentToolCallId);
                     delegation.setString(4, childSessionId);
                     delegation.setString(5, childRunId);
-                    delegation.setString(6, name);
-                    delegation.setString(7, input);
-                    delegation.setString(8, now.toString());
+                    delegation.setString(6, resolvedAgentProfileId);
+                    delegation.setString(7, name);
+                    delegation.setString(8, input);
+                    delegation.setString(9, now.toString());
                     delegation.executeUpdate();
                 }
                 insertEvent(connection, parentRunId, "agent.delegated", "{\"childRunId\":\""
                         + childRunId + "\",\"agentName\":\"" + escape(name) + "\"}");
                 connection.commit();
                 return new RunDelegationRecord(delegationId, parentRunId, parentToolCallId,
-                        childSessionId, childRunId, name, input, now);
+                        childSessionId, childRunId, resolvedAgentProfileId, name, input, now);
             } catch (Exception e) {
                 rollback(connection);
                 throw e;
@@ -2487,6 +2627,36 @@ public class SqliteRuntimeStore {
         }
     }
 
+    private Optional<CollaborationPolicy> collaborationPolicy(Connection connection, String runId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_collaboration_policies WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapCollaborationPolicy(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private Optional<String> parentRunId(Connection connection, String childRunId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT parent_run_id FROM run_delegations WHERE child_run_id=?")) {
+            ps.setString(1, childRunId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.ofNullable(rs.getString(1)) : Optional.empty();
+            }
+        }
+    }
+
+    private String rootRunId(Connection connection, String runId) throws SQLException {
+        String current = runId;
+        for (int i = 0; i < 16; i++) {
+            Optional<String> parent = parentRunId(connection, current);
+            if (parent.isEmpty() || parent.get().isBlank()) return current;
+            current = parent.get();
+        }
+        return current;
+    }
+
     private Optional<SessionRecord> findSession(Connection connection, String id) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM sessions WHERE id=?")) {
             ps.setString(1, id);
@@ -2716,7 +2886,8 @@ public class SqliteRuntimeStore {
         return new RunRecord(rs.getString("id"), rs.getString("session_id"),
                 RunStatus.valueOf(rs.getString("status")), rs.getString("input"), rs.getInt("current_step"),
                 rs.getString("error"), rs.getString("thinking_mode"), rs.getString("reasoning_effort"),
-                rs.getInt("priority"), rs.getString("model_profile_id"), rs.getInt("retry_count"),
+                rs.getInt("priority"), rs.getString("model_profile_id"), rs.getString("agent_profile_id"),
+                rs.getInt("retry_count"),
                 instant(rs.getString("created_at")), instant(rs.getString("started_at")),
                 instant(rs.getString("finished_at")), rs.getLong("version"));
     }
@@ -2743,8 +2914,18 @@ public class SqliteRuntimeStore {
     private static RunDelegationRecord mapDelegation(ResultSet rs) throws SQLException {
         return new RunDelegationRecord(rs.getString("id"), rs.getString("parent_run_id"),
                 rs.getString("parent_tool_call_id"), rs.getString("child_session_id"),
-                rs.getString("child_run_id"), rs.getString("agent_name"), rs.getString("task"),
-                instant(rs.getString("created_at")));
+                rs.getString("child_run_id"), rs.getString("agent_profile_id"),
+                rs.getString("agent_name"), rs.getString("task"), instant(rs.getString("created_at")));
+    }
+
+    private static CollaborationPolicy mapCollaborationPolicy(ResultSet rs) throws SQLException {
+        return new CollaborationPolicy(rs.getString("run_id"), rs.getInt("enabled") != 0,
+                rs.getString("complexity"), rs.getString("risk"),
+                rs.getString("allowed_agent_profile_ids_json"), rs.getInt("max_experts"),
+                rs.getInt("max_depth"), rs.getInt("max_child_runs"),
+                rs.getLong("max_estimated_tokens"), rs.getDouble("max_estimated_cost"),
+                rs.getInt("allow_expert_delegation") != 0, rs.getInt("require_reviewer") != 0,
+                rs.getInt("require_runner") != 0, instant(rs.getString("created_at")));
     }
 
     private static InputAttachmentRecord mapInputAttachment(ResultSet rs) throws SQLException {
@@ -2865,11 +3046,23 @@ public class SqliteRuntimeStore {
         return normalized;
     }
 
+    private static String normalizeEnum(String value, Set<String> allowed, String fallback) {
+        String normalized = value == null || value.isBlank() ? fallback : value.trim().toUpperCase();
+        if (!allowed.contains(normalized)) {
+            throw new IllegalArgumentException("unsupported value: " + value);
+        }
+        return normalized;
+    }
+
     private static String requireText(String value, String name, int maxLength) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(name + " must not be blank");
         String normalized = value.trim();
         if (normalized.length() > maxLength) throw new IllegalArgumentException(name + " is too long");
         return normalized;
+    }
+
+    private static String nullableText(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private static String id(String prefix) {
@@ -2892,4 +3085,10 @@ public class SqliteRuntimeStore {
         return value.replace("\\", "\\\\").replace("\"", "\\\"")
                 .replace("\r", "\\r").replace("\n", "\\n");
     }
+
+    public record CollaborationPolicy(String runId, boolean enabled, String complexity, String risk,
+                                      String allowedAgentProfileIdsJson, int maxExperts, int maxDepth,
+                                      int maxChildRuns, long maxEstimatedTokens, double maxEstimatedCost,
+                                      boolean allowExpertDelegation, boolean requireReviewer,
+                                      boolean requireRunner, Instant createdAt) { }
 }

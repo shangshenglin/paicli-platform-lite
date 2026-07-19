@@ -24,6 +24,30 @@
 
 ## 2026-07-19
 
+### Multica 方向智能体专家 Profile 实验
+
+- 变更：新建 `codex/agent-profile-multica` 独立实验分支，基于本地 `master` 最新提交开发，不依赖远端未推送状态。
+- 变更：新增 Schema 迁移 17，增加 `agent_profiles` 表与 `runs.agent_profile_id`，专家 Profile 保存专家指令、模型方案、工具白名单、Skill 白名单、输出契约、协作角色、交接策略、工作区范围、审批策略和启用状态。
+- 变更：新增 `/v1/productivity/agent-profiles` CRUD API；创建/重试 Run 支持 `agentProfileId`，未显式指定模型方案时优先使用专家绑定的模型方案。
+- 变更：ContextManager 在选择专家时注入专家系统指令，并按专家配置过滤传给模型的 Tool Definition 与可见 Skill 索引；委派子 Run 继承父 Run 的专家配置。
+- 变更：聊天输入区新增专家下拉选择，静态资源版本号同步更新；专家创建后续收敛到首页左侧独立入口，避免和效率工作台重复。
+- 变更：新增 Schema 迁移 18，为 `run_delegations` 增加 `agent_profile_id`；`spawn_agent` 支持按 `agent_profile_id` 创建子 Run，并优先使用该专家绑定的模型方案。
+- 变更：新增只读工具 `list_agent_profiles`，Leader 可先读取当前项目启用的专家目录，再按专家 Profile 分派任务；`list_agents` 和 `get_agent_result` 返回子任务关联的专家 Profile。
+- 变更：`/v1/productivity/agent-profiles/starter-pack` 幂等补齐内置专家模板，包含 Leader 任务队长、需求分析、代码实现、测试验证、代码审查和文档交付专家。
+- 变更：Console 首页左侧新增“专家创建”独立模块，集中展示专家概览、专家列表、模板补齐和编辑创建；首页空状态新增“普通对话 / 专家协作”模式切换，专家协作模式承载一句话协作启动，会创建独立 Session，并用 Leader Profile 发起第一轮 Run。
+- 变更：专家列表新增编辑入口，内置专家模板与用户自建专家都可通过同一表单修改；“选用”改为“用于对话”并显示当前选用状态，明确它只影响聊天输入区下一次 Run 的专家 Profile。
+- 变更：专家表单中的工具和 Skill 白名单从逗号文本改为多选下拉，工具提供内置工具清单，Skill 从当前项目 `/v1/skills` 加载；协作角色下拉增加说明，解释 Leader、Expert、Reviewer 和 Runner 的当前运行语义。
+- 变更：新增 `run_collaboration_policies` 持久化协作策略，首页协作启动前可设置复杂度、风险、最多专家数、允许专家范围、最大递归深度、是否允许子专家继续分派、Reviewer/Runner 要求和预算上限字段。
+- 变更：`list_agent_profiles` 会按协作策略过滤本次可见专家；`spawn_agent` 会在执行时校验 `agent_profile_id`、允许列表、最大专家数、最大子 Run 数、最大深度以及非 Leader 派发限制，避免只靠 Prompt 自觉遵守。
+- 变更：新增 `/v1/runs/{runId}/collaboration`，Console 在当前 Session 消息区顶部展示“协作任务看板”，列出 Leader 已分派的专家、子 Run 状态、任务说明、错误和终态专家结果。
+- 变更：专家模板新增 `template_key`/`template_version` 元数据；新增内置模板列表、恢复默认模板和复制专家 API；Console 专家列表支持复制为新专家、恢复内置模板版本，并展示模板版本。
+- 变更：角色默认工具与审批策略落到创建保存逻辑：Leader 默认获得协作派发工具，Reviewer 默认只读审批和只读工具，Runner 默认包含 `execute_command`，非 Leader 保存时会移除协作派发工具；专家工具/Skill 选择器升级为搜索标签式添加。
+- 变更：新增 `/v1/sessions/{sessionId}/plans`，按 Session、Session Run 和 Plan Step 绑定的 Run 查找关联 Plan；Console 普通消息区顶部展示关联 Plan 的目标、状态、步骤进度、当前步骤和工作台/详情/调度动作。
+- 变更：移除效率工作台中的“智能体专家”重复列表和“新建专家”入口，专家新建、编辑、复制、恢复默认模板统一留在首页左侧“专家创建”模块；普通对话只显示关联 Plan，不会因此自动进入专家协作模式。
+- 变更：专家协作首页模式隐藏底部普通聊天发送框，只保留上方协作启动表单；切回普通对话或进入具体 Session 后自动恢复底部输入区。
+- 思路：先把 Multica/WorkBuddy 式多专家协作所需的“专家目录”和 Leader 最小协作闭环做成可持久化、可审计、可恢复的基础能力；随后把“模型建议、后端约束”的调度策略落地，让 Leader 负责判断和拆分，后端负责数量、范围、递归和权限边界。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js`；运行 `git diff --check`，仅有 Windows 换行提示；运行 `mvn -pl paicli-server -am "-Dtest=WebSecurityIntegrationTest,PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，29 个测试通过，覆盖 Console 静态入口、Plan 执行闭环、协作策略持久化、迁移和 Session 删除级联；运行 `mvn -pl paicli-server -am -DskipTests package` 打包通过；尝试以 8081 local sandbox 启动，前台日志显示 Tomcat 已启动，当前工具环境未能让后台子进程持续保活，因此未完成 HTTP 冒烟。
+
 ### Plan 执行闭环、Async Job 与验证证据
 
 - 变更：新增 Schema 迁移 16，为 `plan_steps` 增加 `run_id`，并新增 `async_jobs`、`validation_checks` 表。

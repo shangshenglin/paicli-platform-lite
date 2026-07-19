@@ -16,7 +16,12 @@ const state = {
   pendingAttachments: [],
   templates: [],
   modelProfiles: [],
+  agentProfiles: [],
+  availableSkills: [],
+  editingAgentProfileId: '',
+  homeMode: localStorage.getItem('paicli_home_mode') || 'chat',
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
+  agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
   notifiedRunId: '',
   detailOpen: innerWidth > 1000
 };
@@ -30,6 +35,28 @@ const statusNames = {
   COMPLETED: '已完成',
   FAILED: '失败',
   CANCELED: '已取消'
+};
+const agentToolOptions = [
+  ['list_agent_profiles', '列出专家 Profile'],
+  ['spawn_agent', '创建子智能体任务'],
+  ['list_agents', '查看子任务状态'],
+  ['get_agent_result', '读取子任务结果'],
+  ['cancel_agent', '取消子任务'],
+  ['list_dir', '列目录'],
+  ['read_file', '读文件'],
+  ['write_file', '写文件'],
+  ['execute_command', '执行命令'],
+  ['read_artifact', '读 Artifact'],
+  ['search_knowledge', '查项目知识库'],
+  ['session_search', '查历史会话'],
+  ['web_search', '网页搜索'],
+  ['web_fetch', '读取网页']
+];
+const agentRoleHelp = {
+  LEADER: 'Leader：协作入口会优先选择；通常允许 list_agent_profiles / spawn_agent 来拆分和汇总任务。',
+  EXPERT: 'Expert：领域执行者；按专家提示和工具白名单完成被分派的子任务。',
+  REVIEWER: 'Reviewer：审查者；建议搭配只读工具和 READ_ONLY 审批策略，用于风险、回归和缺失测试检查。',
+  RUNNER: 'Runner：验证执行者；通常允许 execute_command，用于运行测试、构建或检查命令。'
 };
 
 function headers(json = true) {
@@ -96,25 +123,151 @@ function scrollBottom() {
   requestAnimationFrame(() => $('messages').scrollTop = $('messages').scrollHeight);
 }
 
+function updateComposerVisibility() {
+  const hidden = !state.sessionId && state.homeMode === 'collaboration';
+  $('compose').hidden = hidden;
+}
+
 function renderEmpty() {
+  updateComposerVisibility();
   const empty = element('div', 'empty');
   const content = element('div');
-  const actions = element('div', 'home-actions');
-  const productivity = element('button', 'secondary home-action');
-  productivity.append(element('strong', '', '效率工作台'), element('small', '', '用量、模板、队列与自动化'));
-  productivity.onclick = openWorkbench;
-  const evaluations = element('button', 'primary home-action');
-  evaluations.append(element('strong', '', 'Agent 评测中心'), element('small', '', '套件、运行报告与质量基线'));
-  evaluations.onclick = openEvaluationCenter;
-  actions.append(productivity, evaluations);
-  content.append(
-    element('div', 'logo', 'π'),
-    element('h1', '', '今天想完成什么？'),
-    element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。'),
-    actions
-  );
+  const switcher = element('div', 'home-mode-switch');
+  const chatMode = element('button', state.homeMode === 'chat' ? 'primary' : 'secondary', '普通对话');
+  const collaborationMode = element('button', state.homeMode === 'collaboration' ? 'primary' : 'secondary', '专家协作');
+  chatMode.onclick = () => setHomeMode('chat');
+  collaborationMode.onclick = () => setHomeMode('collaboration');
+  switcher.append(chatMode, collaborationMode);
+  content.append(switcher);
+  if (state.homeMode === 'collaboration') content.append(renderHomeCollaboration());
+  else {
+    const actions = element('div', 'home-actions');
+    const productivity = element('button', 'secondary home-action');
+    productivity.append(element('strong', '', '效率工作台'), element('small', '', '用量、模板、队列与自动化'));
+    productivity.onclick = openWorkbench;
+    const evaluations = element('button', 'primary home-action');
+    evaluations.append(element('strong', '', 'Agent 评测中心'), element('small', '', '套件、运行报告与质量基线'));
+    evaluations.onclick = openEvaluationCenter;
+    actions.append(productivity, evaluations);
+    content.append(
+      element('div', 'logo', 'π'),
+      element('h1', '', '今天想完成什么？'),
+      element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。'),
+      actions
+    );
+  }
   empty.append(content);
   $('stack').replaceChildren(empty);
+}
+
+function setHomeMode(mode) {
+  state.homeMode = mode;
+  localStorage.setItem('paicli_home_mode', mode);
+  renderEmpty();
+}
+
+function renderHomeCollaboration() {
+  const panel = element('div', 'home-collaboration');
+  const head = element('div', 'home-collaboration-head');
+  const copy = element('div');
+  copy.append(
+    element('h1', '', '多智能体协作'),
+    element('p', '', '输入一句话目标，由 Leader 查看专家目录、分派子任务并汇总结果。')
+  );
+  head.append(element('div', 'logo', 'π'), copy);
+  const leaderField = element('label', 'form-field full');
+  leaderField.append(element('span', '', 'Leader'));
+  const leader = element('select');
+  leader.id = 'homeCollaborationLeader';
+  leader.append(new Option('自动选择 Leader', ''));
+  homeLeaders().forEach(value => leader.append(new Option(`${value.collaborationRole || 'EXPERT'} · ${value.name}`, value.id)));
+  leaderField.append(leader);
+  const objectiveField = element('label', 'form-field full');
+  objectiveField.append(element('span', '', '一句话目标'));
+  const objective = element('textarea');
+  objective.id = 'homeCollaborationObjective';
+  objective.rows = 5;
+  objective.placeholder = '例如：评估并实现专家协作模块的最小可用版本，最后给出验证结果';
+  objectiveField.append(objective);
+  const policy = element('div', 'collaboration-policy');
+  const complexityField = element('label', 'form-field');
+  complexityField.append(element('span', '', '任务复杂度'));
+  const complexity = element('select');
+  complexity.id = 'homeCollaborationComplexity';
+  [['MEDIUM', '中等'], ['SIMPLE', '简单'], ['COMPLEX', '复杂']].forEach(([id, label]) => complexity.append(new Option(label, id)));
+  complexityField.append(complexity);
+  const riskField = element('label', 'form-field');
+  riskField.append(element('span', '', '风险等级'));
+  const risk = element('select');
+  risk.id = 'homeCollaborationRisk';
+  [['MEDIUM', '中等'], ['LOW', '低'], ['HIGH', '高']].forEach(([id, label]) => risk.append(new Option(label, id)));
+  riskField.append(risk);
+  const maxField = element('label', 'form-field');
+  maxField.append(element('span', '', '最多专家'));
+  const maxExperts = element('input');
+  maxExperts.id = 'homeCollaborationMaxExperts';
+  maxExperts.type = 'number';
+  maxExperts.min = '0';
+  maxExperts.max = '6';
+  maxExperts.value = '3';
+  maxField.append(maxExperts);
+  policy.append(complexityField, riskField, maxField);
+  const checks = element('div', 'checkbox-row collaboration-options');
+  checks.append(
+    checkboxControl('homeCollaborationRequireReviewer', '高风险/代码任务必须审查', true),
+    checkboxControl('homeCollaborationRequireRunner', '需要验证时必须测试', true),
+    checkboxControl('homeCollaborationAllowExpertDelegation', '允许子专家继续分派', false)
+  );
+  const allowed = renderCollaborationAgentChoices();
+  const error = element('div', 'form-error');
+  error.id = 'homeCollaborationError';
+  error.setAttribute('role', 'alert');
+  const actions = element('div', 'dialog-actions');
+  const manage = element('button', 'secondary', '管理专家');
+  manage.onclick = openAgentStudio;
+  const start = element('button', 'primary', '启动协作');
+  start.id = 'homeStartCollaboration';
+  start.onclick = startCollaboration;
+  actions.append(manage, start);
+  panel.append(head, leaderField, objectiveField, policy, checks, allowed, error, actions);
+  return panel;
+}
+
+function checkboxControl(id, label, checked = false) {
+  const outer = element('label');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.id = id;
+  input.checked = checked;
+  outer.append(input, document.createTextNode(` ${label}`));
+  return outer;
+}
+
+function renderCollaborationAgentChoices() {
+  const field = element('fieldset', 'agent-choice-field');
+  const legend = element('legend', '', '本次可用专家');
+  const hint = element('small', '', '不勾选表示允许全部启用专家；Leader 自身不会因此自动被派发。');
+  const grid = element('div', 'agent-choice-grid');
+  state.agentProfiles.filter(value => value.enabled && (value.collaborationRole || '').toUpperCase() !== 'LEADER')
+    .forEach(value => {
+      const label = element('label', 'agent-choice');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = value.id;
+      input.dataset.collaborationAgent = 'true';
+      label.append(input, element('strong', '', value.name), element('small', '', `${value.collaborationRole || 'EXPERT'} · ${value.description || '未填写说明'}`));
+      grid.append(label);
+    });
+  if (!grid.children.length) grid.append(element('div', 'hint', '暂无可用子专家，请先到“专家创建”补齐模板'));
+  field.append(legend, hint, grid);
+  return field;
+}
+
+function homeLeaders() {
+  const enabled = state.agentProfiles.filter(value => value.enabled);
+  const leaders = enabled.filter(value => (value.collaborationRole || '').toUpperCase() === 'LEADER');
+  const experts = enabled.filter(value => (value.collaborationRole || '').toUpperCase() !== 'LEADER');
+  return leaders.concat(experts);
 }
 
 function renderMessage(message) {
@@ -151,9 +304,98 @@ async function loadMessages() {
   if (!state.sessionId) return renderEmpty();
   const messages = await api(`/v1/sessions/${state.sessionId}/messages`);
   $('stack').replaceChildren();
+  await renderSessionPlanPanel();
+  await renderCollaborationBoard();
   messages.forEach(renderMessage);
   if (!$('stack').children.length) renderEmpty();
   scrollBottom();
+}
+
+async function renderSessionPlanPanel() {
+  try {
+    const values = await api(`/v1/sessions/${state.sessionId}/plans?limit=3`);
+    if (!values.length) return;
+    const panel = element('section', 'session-plan-panel');
+    const title = element('div', 'section-title');
+    title.append(
+      element('h3', '', '关联 Plan'),
+      element('span', '', `${values.length} 个计划`)
+    );
+    const list = element('div', 'session-plan-list');
+    values.forEach(view => list.append(renderSessionPlanItem(view)));
+    panel.append(title, list);
+    $('stack').append(panel);
+  } catch (error) {
+    const panel = element('section', 'session-plan-panel');
+    panel.append(element('div', 'form-error', `Plan 面板加载失败：${error.message}`));
+    $('stack').append(panel);
+  }
+}
+
+function renderSessionPlanItem(view) {
+  const plan = view.plan;
+  const steps = view.steps || [];
+  const counts = steps.reduce((acc, step) => {
+    acc[step.status] = (acc[step.status] || 0) + 1;
+    return acc;
+  }, {});
+  const completed = (counts.COMPLETED || 0) + (counts.SKIPPED || 0);
+  const running = steps.find(step => ['RUNNING', 'READY'].includes(step.status));
+  const failed = steps.find(step => step.status === 'FAILED');
+  const current = failed || running || steps.find(step => !['COMPLETED', 'SKIPPED', 'CANCELED'].includes(step.status)) || steps[steps.length - 1];
+  const item = workbenchItem(
+    `${plan.status} · ${plan.objective}`,
+    `v${plan.version} · ${completed}/${steps.length} 步 · ${current ? `${current.status}：${current.title}` : '暂无步骤'}`
+  );
+  item.classList.add('session-plan-item');
+  if (plan.status === 'ACTIVE') actionButton(item, '调度', () => dispatchPlan(plan.id), true);
+  actionButton(item, '详情', () => inspectPlan(plan.id));
+  actionButton(item, '打开工作台', async () => { await openWorkbench(); });
+  return item;
+}
+
+async function renderCollaborationBoard() {
+  if (!state.runId) return;
+  try {
+    const board = await api(`/v1/runs/${state.runId}/collaboration`);
+    if (!board.enabled && !board.tasks.length) return;
+    const panel = element('section', 'collaboration-board');
+    const policy = board.policy || {};
+    const title = element('div', 'section-title');
+    title.append(
+      element('h3', '', '协作任务看板'),
+      element('span', '', `${policy.complexity || 'MEDIUM'} · ${policy.risk || 'MEDIUM'} · ${board.tasks.length}/${policy.maxExperts || 0} 专家`)
+    );
+    const list = element('div', 'collaboration-task-list');
+    board.tasks.forEach(task => list.append(renderCollaborationTask(task)));
+    if (!board.tasks.length) list.append(element('div', 'hint', 'Leader 尚未分派子专家；等待它调用 list_agent_profiles / spawn_agent。'));
+    panel.append(title, list);
+    $('stack').append(panel);
+  } catch (error) {
+    const panel = element('section', 'collaboration-board');
+    panel.append(element('div', 'form-error', `协作看板加载失败：${error.message}`));
+    $('stack').append(panel);
+  }
+}
+
+function renderCollaborationTask(task) {
+  const item = element('article', 'collaboration-task');
+  const head = element('div', 'collaboration-task-head');
+  const profile = task.profile || {};
+  head.append(
+    element('strong', '', task.agentName || profile.name || '子专家'),
+    element('span', `status ${terminal.has(task.status) ? '' : 'active'}`, task.status || 'UNKNOWN')
+  );
+  item.append(head);
+  item.append(element('div', 'hint', `${profile.role || 'EXPERT'} · ${task.childRunId}`));
+  item.append(element('p', '', task.task || ''));
+  if (task.error) item.append(element('div', 'form-error', task.error));
+  if (task.result) {
+    const details = element('details', 'collaboration-result');
+    details.append(element('summary', '', '查看专家结果'), element('pre', '', task.result));
+    item.append(details);
+  }
+  return item;
 }
 
 function renderSessions() {
@@ -252,6 +494,7 @@ async function selectSession(id, rerender = true) {
   $('chatTitle').textContent = session?.title || '对话';
   $('runMeta').textContent = session ? `项目 · ${session.projectKey}` : '尚未开始';
   $('input').value = localStorage.getItem(`paicli_draft_${id}`) || '';
+  updateComposerVisibility();
   resizeInput();
   await refreshComposerOptions();
   setStatus();
@@ -282,6 +525,24 @@ async function createSession() {
   } catch (error) {
     showNotice(error.message, true);
   }
+}
+
+function showHome() {
+  state.stream?.abort();
+  state.sessionId = '';
+  state.runId = '';
+  state.runStatus = '';
+  localStorage.removeItem('paicli_session');
+  $('chatTitle').textContent = '新对话';
+  $('runMeta').textContent = '尚未开始任务';
+  $('input').value = '';
+  resizeInput();
+  setStatus();
+  clearEvents();
+  renderSessions();
+  renderEmpty();
+  $('sidebar').classList.remove('open');
+  if (!$('compose').hidden) $('input').focus();
 }
 
 async function moveSession(sessionId, groupId) {
@@ -362,7 +623,8 @@ async function sendMessage() {
         thinkingMode: state.thinkingMode,
         reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
         attachmentIds: state.pendingAttachments.map(item => item.id),
-        modelProfileId: state.modelProfileId || null
+        modelProfileId: state.modelProfileId || null,
+        agentProfileId: state.agentProfileId || null
       })
     });
     $('input').value = '';
@@ -856,7 +1118,11 @@ async function retryRun(branch) {
   if (!state.runId || !terminal.has(state.runStatus)) return;
   try {
     const result = await api(`/v1/runs/${state.runId}/retry`, {
-      method: 'POST', body: JSON.stringify({branch, modelProfileId: state.modelProfileId || null})
+      method: 'POST', body: JSON.stringify({
+        branch,
+        modelProfileId: state.modelProfileId || null,
+        agentProfileId: state.agentProfileId || null
+      })
     });
     if (branch) {
       await refreshSessions();
@@ -1080,9 +1346,10 @@ async function resolveEvaluationApproval(id, decision, executionId) {
 async function refreshComposerOptions() {
   try {
     const project = encodeURIComponent(currentProjectKey());
-    [state.templates, state.modelProfiles] = await Promise.all([
+    [state.templates, state.modelProfiles, state.agentProfiles] = await Promise.all([
       api(`/v1/productivity/templates?projectKey=${project}`),
-      api(`/v1/productivity/model-profiles?projectKey=${project}`)
+      api(`/v1/productivity/model-profiles?projectKey=${project}`),
+      api(`/v1/productivity/agent-profiles?projectKey=${project}`)
     ]);
     const template = $('quickTemplate');
     template.replaceChildren(element('option', '', '快捷指令'));
@@ -1100,7 +1367,17 @@ async function refreshComposerOptions() {
     });
     if (state.modelProfiles.some(value => value.id === state.modelProfileId)) profile.value = state.modelProfileId;
     else state.modelProfileId = '';
+    const agent = $('agentProfile');
+    agent.replaceChildren(element('option', '', '默认专家'));
+    agent.firstElementChild.value = '';
+    state.agentProfiles.filter(value => value.enabled).forEach(value => {
+      const option = element('option', '', `${value.collaborationRole || 'EXPERT'} · ${value.name}`);
+      option.value = value.id; agent.append(option);
+    });
+    if (state.agentProfiles.some(value => value.id === state.agentProfileId && value.enabled)) agent.value = state.agentProfileId;
+    else state.agentProfileId = '';
     scheduleEstimate();
+    if (!state.sessionId && state.homeMode === 'collaboration') renderEmpty();
   } catch (error) { showNotice(`效率配置加载失败：${error.message}`, true); }
 }
 
@@ -1139,17 +1416,19 @@ async function applyTemplate(id) {
 async function loadProductivityData() {
   const project = encodeURIComponent(currentProjectKey());
   try {
-    const [usage, templates, profiles, queue, schedules, notifications] = await Promise.all([
+    const [usage, templates, profiles, agents, skills, queue, schedules, notifications] = await Promise.all([
       api(`/v1/productivity/usage?projectKey=${project}&days=30`),
       api(`/v1/productivity/templates?projectKey=${project}`),
       api(`/v1/productivity/model-profiles?projectKey=${project}`),
+      api(`/v1/productivity/agent-profiles?projectKey=${project}`),
+      api(`/v1/skills?projectKey=${project}`),
       api(`/v1/productivity/queue?projectKey=${project}`),
       api(`/v1/productivity/schedules?projectKey=${project}`),
       api(`/v1/productivity/notifications?projectKey=${project}`)
     ]);
-    renderUsage(usage); renderTemplates(templates); renderProfiles(profiles); renderQueue(queue);
+    state.templates = templates; state.modelProfiles = profiles; state.agentProfiles = agents; state.availableSkills = skills;
+    renderUsage(usage); renderTemplates(templates); renderAgentStudio(agents); renderProfiles(profiles); renderQueue(queue);
     renderSchedules(schedules, templates); renderNotifications(notifications);
-    state.templates = templates; state.modelProfiles = profiles;
   } catch (error) { showNotice(`效率工作台加载失败：${error.message}`, true); }
 }
 
@@ -1204,12 +1483,251 @@ function renderTemplates(values) {
   }));
 }
 
+function renderAgentStudio(values = state.agentProfiles) {
+  const list = $('agentStudioList');
+  if (!list) return;
+  const enabled = values.filter(value => value.enabled);
+  const leaders = enabled.filter(value => (value.collaborationRole || '').toUpperCase() === 'LEADER');
+  const experts = enabled.filter(value => (value.collaborationRole || '').toUpperCase() !== 'LEADER');
+  $('agentStudioSummary').replaceChildren(
+    agentStudioMetric('专家总数', values.length),
+    agentStudioMetric('可用专家', enabled.length),
+    agentStudioMetric('Leader', leaders.length)
+  );
+  list.replaceChildren(...values.map(value => {
+    const tools = parseStringListJson(value.toolNamesJson);
+    const model = state.modelProfiles.find(item => item.id === value.modelProfileId);
+    const subtitle = [
+      value.description || '未填写说明',
+      `角色 ${value.collaborationRole || 'EXPERT'}`,
+      value.templateKey ? `模板 ${value.templateKey}@v${value.templateVersion || 0}` : '自定义专家',
+      model ? `模型 ${model.name}` : '项目默认模型',
+      tools.length ? `工具 ${tools.slice(0, 8).join(', ')}` : '工具不限制'
+    ].join(' · ');
+    const selected = state.agentProfileId === value.id;
+    const item = workbenchItem(`${selected ? '当前 · ' : ''}${value.enabled ? '●' : '○'} ${value.name}`, subtitle);
+    if (selected) item.classList.add('selected');
+    if (value.enabled) actionButton(item, selected ? '已用于对话' : '用于对话', () => selectAgentForChat(value), true);
+    actionButton(item, '编辑', () => openAgentProfileDialog(value));
+    actionButton(item, '复制', () => copyAgentProfile(value));
+    if (value.templateKey) actionButton(item, '恢复默认', () => restoreAgentTemplate(value));
+    return item;
+  }));
+  if (!values.length) list.append(element('div', 'hint', '暂无专家模板；点击“补齐专家模板”安装 Leader、需求、实现、测试、审查和文档专家。'));
+}
+
+function selectAgentForChat(value) {
+  state.agentProfileId = value.id;
+  localStorage.setItem('paicli_agent_profile', value.id);
+  $('agentProfile').value = value.id;
+  renderAgentStudio(state.agentProfiles);
+  showNotice(`后续对话将使用专家：${value.name}`);
+}
+
+async function copyAgentProfile(value) {
+  const name = prompt('复制为新专家名称', `${value.name} 副本`);
+  if (name === null) return;
+  try {
+    await api(`/v1/productivity/agent-profiles/${value.id}/copy`, {
+      method: 'POST',
+      body: JSON.stringify({projectKey: currentProjectKey(), name: name.trim() || `${value.name} 副本`})
+    });
+    await Promise.all([loadProductivityData(), refreshComposerOptions()]);
+    showNotice('专家已复制');
+  } catch (error) { showNotice(`复制专家失败：${error.message}`, true); }
+}
+
+async function restoreAgentTemplate(value) {
+  if (!confirm(`恢复“${value.name}”到内置模板版本？当前修改会被覆盖。`)) return;
+  try {
+    await api(`/v1/productivity/agent-profiles/${value.id}/restore-template`, {method: 'POST', body: '{}'});
+    await Promise.all([loadProductivityData(), refreshComposerOptions()]);
+    showNotice('专家模板已恢复');
+  } catch (error) { showNotice(`恢复模板失败：${error.message}`, true); }
+}
+
+function agentStudioMetric(name, value) {
+  const item = element('div', 'capability-status-item');
+  item.append(element('strong', '', name), element('small', '', String(value)));
+  return item;
+}
+
+async function refreshAgentStudio() {
+  const project = encodeURIComponent(currentProjectKey());
+  const [profiles, agents, skills] = await Promise.all([
+    api(`/v1/productivity/model-profiles?projectKey=${project}`),
+    api(`/v1/productivity/agent-profiles?projectKey=${project}`),
+    api(`/v1/skills?projectKey=${project}`)
+  ]);
+  state.modelProfiles = profiles;
+  state.agentProfiles = agents;
+  state.availableSkills = skills;
+  renderAgentStudio(agents);
+}
+
+async function openAgentStudio() {
+  $('agentStudioProject').textContent = `当前项目：${currentProjectKey()}`;
+  $('agentStudioDialog').showModal();
+  try { await refreshAgentStudio(); }
+  catch (error) { showNotice(`专家创建加载失败：${error.message}`, true); }
+}
+
+async function installAgentStarterPack() {
+  try {
+    const project = encodeURIComponent(currentProjectKey());
+    state.agentProfiles = await api(`/v1/productivity/agent-profiles/starter-pack?projectKey=${project}`, {method: 'POST', body: '{}'});
+    renderAgentStudio(state.agentProfiles);
+    await refreshComposerOptions();
+    showNotice('专家模板已补齐');
+  } catch (error) { showNotice(`专家模板安装失败：${error.message}`, true); }
+}
+
+async function startCollaboration() {
+  const ids = {
+    leader: 'homeCollaborationLeader',
+    objective: 'homeCollaborationObjective',
+    error: 'homeCollaborationError',
+    start: 'homeStartCollaboration'
+  };
+  setFormError(ids.error);
+  const objective = $(ids.objective).value.trim();
+  if (!objective) return setFormError(ids.error, '请先填写一句话目标');
+  const enabled = state.agentProfiles.filter(value => value.enabled);
+  const selected = $(ids.leader).value;
+  const leader = enabled.find(value => value.id === selected)
+      || enabled.find(value => (value.collaborationRole || '').toUpperCase() === 'LEADER');
+  if (!leader) return setFormError(ids.error, '没有可用 Leader，请先到“专家创建”补齐或创建专家模板');
+  const allowedAgentProfileIds = [...document.querySelectorAll('[data-collaboration-agent]:checked')]
+      .map(input => input.value).filter(Boolean);
+  const complexity = $('homeCollaborationComplexity').value;
+  const risk = $('homeCollaborationRisk').value;
+  const maxExperts = Math.max(0, Math.min(Number($('homeCollaborationMaxExperts').value || 3), 6));
+  const title = `协作：${objective.slice(0, 42)}`;
+  const prompt = [
+    `协作目标：${objective}`,
+    `任务复杂度：${complexity}；风险等级：${risk}；最多可派发专家数：${maxExperts}。`,
+    allowedAgentProfileIds.length ? `本次只允许从这些 agent_profile_id 中选择：${allowedAgentProfileIds.join(', ')}` : '本次允许从全部启用专家中选择。',
+    '',
+    '请作为 Leader 执行：',
+    '1. 调用 list_agent_profiles 查看本次策略允许的专家。',
+    '2. 先判断是否确实需要分派；简单任务可以不分派或只派 1 个专家。',
+    '3. 使用 list_agents / get_agent_result 跟踪子任务，必要时等待或补充派发。',
+    '4. 派发数量不得超过策略上限；高风险或代码任务优先包含 Reviewer，需验证时优先包含 Runner。',
+    '5. 汇总所有专家结果，交付完整结论、风险和验证建议。'
+  ].join('\n');
+  try {
+    $(ids.start).disabled = true;
+    const session = await api('/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify({title, projectKey: currentProjectKey(), groupId: null})
+    });
+    await api(`/v1/sessions/${session.id}/runs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        input: prompt,
+        thinkingMode: state.thinkingMode,
+        reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
+        modelProfileId: state.modelProfileId || null,
+        agentProfileId: leader.id,
+        collaboration: {
+          enabled: true,
+          complexity,
+          risk,
+          allowedAgentProfileIds,
+          maxExperts,
+          maxDepth: $('homeCollaborationAllowExpertDelegation').checked ? 2 : 1,
+          maxChildRuns: Math.max(maxExperts, 1),
+          allowExpertDelegation: $('homeCollaborationAllowExpertDelegation').checked,
+          requireReviewer: $('homeCollaborationRequireReviewer').checked,
+          requireRunner: $('homeCollaborationRequireRunner').checked
+        }
+      })
+    });
+    $(ids.objective).value = '';
+    if ($('agentStudioDialog').open) $('agentStudioDialog').close();
+    await refreshSessions();
+    await selectSession(session.id);
+    showNotice(`已启动协作：${leader.name}`);
+  } catch (error) { setFormError(ids.error, error.message); }
+  finally { $(ids.start).disabled = false; }
+}
+
 function setFormError(id, message = '') { $(id).textContent = message; }
 
 function fillSelect(select, values, emptyLabel = '') {
   const options = emptyLabel ? [new Option(emptyLabel, '')] : [];
   options.push(...values.map(value => new Option(value.label, value.id)));
   select.replaceChildren(...options);
+}
+
+function fillMultiSelect(select, values, selected = []) {
+  const chosen = new Set(selected);
+  select.replaceChildren(...values.map(value => {
+    const option = new Option(value.label, value.id);
+    option.selected = chosen.has(value.id);
+    return option;
+  }));
+}
+
+function selectedValues(select) {
+  return [...select.selectedOptions].map(option => option.value).filter(Boolean);
+}
+
+function fillTagPicker(select, picker, values, selected = []) {
+  fillMultiSelect(select, values, selected);
+  const render = (filter = '') => {
+    const chosen = new Set(selectedValues(select));
+    const chips = element('div', 'tag-chips');
+    chosen.forEach(id => {
+      const meta = values.find(value => value.id === id) || {id, label: id};
+      const chip = element('button', 'tag-chip', meta.id);
+      chip.type = 'button';
+      chip.title = `${meta.label} · 点击移除`;
+      chip.onclick = () => {
+        [...select.options].forEach(option => { if (option.value === id) option.selected = false; });
+        render(filter);
+      };
+      chips.append(chip);
+    });
+    const input = element('input', 'tag-search');
+    input.placeholder = '搜索并添加';
+    input.value = filter;
+    input.oninput = () => render(input.value);
+    const options = element('div', 'tag-options');
+    const normalized = filter.trim().toLowerCase();
+    values.filter(value => !chosen.has(value.id))
+      .filter(value => !normalized || `${value.id} ${value.label}`.toLowerCase().includes(normalized))
+      .slice(0, 12).forEach(value => {
+        const button = element('button', 'tag-option', value.label);
+        button.type = 'button';
+        button.onclick = () => {
+          [...select.options].forEach(option => { if (option.value === value.id) option.selected = true; });
+          render('');
+        };
+        options.append(button);
+      });
+    if (!options.children.length) options.append(element('div', 'hint', '没有匹配项'));
+    picker.replaceChildren(chips, input, options);
+  };
+  render();
+}
+
+function defaultToolsForRole(role) {
+  if (role === 'LEADER') return ['list_agent_profiles','spawn_agent','list_agents','get_agent_result','cancel_agent','read_file','list_dir','search_knowledge'];
+  if (role === 'REVIEWER') return ['list_dir','read_file','search_knowledge','session_search'];
+  if (role === 'RUNNER') return ['list_dir','read_file','execute_command','search_knowledge'];
+  return ['list_dir','read_file','write_file','search_knowledge'];
+}
+
+function updateAgentRoleHelp() {
+  $('agentRoleHelp').textContent = agentRoleHelp[$('agentRole').value] || '';
+  if (!state.editingAgentProfileId && $('agentToolsPicker')) {
+    fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
+        defaultToolsForRole($('agentRole').value));
+    if ($('agentApproval').value === 'INHERIT' || $('agentApproval').value === 'READ_ONLY') {
+      $('agentApproval').value = $('agentRole').value === 'REVIEWER' ? 'READ_ONLY' : 'INHERIT';
+    }
+  }
 }
 
 function parseStringMap(text, label) {
@@ -1219,6 +1737,17 @@ function parseStringMap(text, label) {
   if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`${label}必须是 JSON 对象`);
   if (Object.values(value).some(item => typeof item !== 'string')) throw new Error(`${label}的值必须全部是字符串`);
   return value;
+}
+
+function parseCsvList(text) {
+  return text.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
+}
+
+function parseStringListJson(text) {
+  try {
+    const value = JSON.parse(text || '[]');
+    return Array.isArray(value) ? value.filter(item => typeof item === 'string' && item.trim()).map(item => item.trim()) : [];
+  } catch { return []; }
 }
 
 function openTemplateDialog() {
@@ -1250,6 +1779,63 @@ async function submitTemplate(event) {
     await Promise.all([loadProductivityData(), refreshComposerOptions()]);
     showNotice('任务模板已创建');
   } catch (error) { setFormError('templateFormError', error.message); }
+  finally { button.disabled = false; }
+}
+
+function openAgentProfileDialog(profile = null) {
+  const editing = !!profile;
+  state.editingAgentProfileId = editing ? profile.id : '';
+  $('agentProfileForm').reset();
+  $('agentProfileDialogTitle').textContent = editing ? '编辑智能体专家' : '新建智能体专家';
+  $('saveAgentProfile').textContent = editing ? '保存专家' : '创建专家';
+  $('agentName').value = editing ? profile.name : '';
+  $('agentDescription').value = editing ? profile.description || '' : '';
+  $('agentPrompt').value = editing ? profile.systemPrompt || '' : '';
+  $('agentOutputSchema').value = editing ? profile.outputSchema || '' : '';
+  $('agentEnabled').checked = editing ? profile.enabled : true;
+  $('agentRole').value = editing ? profile.collaborationRole || 'EXPERT' : 'EXPERT';
+  $('agentHandoff').value = editing ? profile.handoffPolicy || 'MANUAL' : 'MANUAL';
+  $('agentScope').value = editing ? profile.workspaceScope || 'PROJECT' : 'PROJECT';
+  $('agentApproval').value = editing ? profile.approvalPolicy || 'INHERIT' : 'INHERIT';
+  fillSelect($('agentModelProfile'), state.modelProfiles.map(value => ({id: value.id, label: `${value.name} · ${value.model}`})), '使用项目默认模型');
+  if (editing) $('agentModelProfile').value = profile.modelProfileId || '';
+  else if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('agentModelProfile').value = state.modelProfileId;
+  fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
+      editing ? parseStringListJson(profile.toolNamesJson) : defaultToolsForRole($('agentRole').value));
+  fillTagPicker($('agentSkills'), $('agentSkillsPicker'), state.availableSkills.map(value => ({id: value.name, label: `${value.name} · ${value.description || value.source || ''}`})),
+      editing ? parseStringListJson(profile.skillNamesJson) : []);
+  updateAgentRoleHelp();
+  setFormError('agentProfileFormError');
+  $('agentProfileDialog').showModal();
+  $('agentName').focus();
+}
+
+async function submitAgentProfile(event) {
+  event.preventDefault();
+  setFormError('agentProfileFormError');
+  const button = $('saveAgentProfile'); button.disabled = true;
+  try {
+    const id = state.editingAgentProfileId;
+    await api(id ? `/v1/productivity/agent-profiles/${id}` : '/v1/productivity/agent-profiles', {method: id ? 'PUT' : 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(),
+      name: $('agentName').value.trim(),
+      description: $('agentDescription').value.trim(),
+      systemPrompt: $('agentPrompt').value.trim(),
+      modelProfileId: $('agentModelProfile').value || null,
+      toolNames: selectedValues($('agentTools')),
+      skillNames: selectedValues($('agentSkills')),
+      outputSchema: $('agentOutputSchema').value.trim(),
+      collaborationRole: $('agentRole').value,
+      handoffPolicy: $('agentHandoff').value,
+      workspaceScope: $('agentScope').value,
+      approvalPolicy: $('agentApproval').value,
+      enabled: $('agentEnabled').checked
+    })});
+    $('agentProfileDialog').close();
+    state.editingAgentProfileId = '';
+    await Promise.all([loadProductivityData(), refreshComposerOptions()]);
+    showNotice(id ? '智能体专家已保存' : '智能体专家已创建');
+  } catch (error) { setFormError('agentProfileFormError', error.message); }
   finally { button.disabled = false; }
 }
 
@@ -1798,7 +2384,7 @@ function renderModelControls() {
   });
 }
 
-$('new').onclick = createSession;
+$('new').onclick = showHome;
 $('newGroup').onclick = () => {
   $('groupName').value = '';
   $('groupDialog').showModal();
@@ -1844,8 +2430,10 @@ $('menu').onclick = () => $('sidebar').classList.toggle('open');
 $('settings').onclick = () => openConnectionSettings();
 $('capabilities').onclick = openCapabilities;
 $('workbench').onclick = openWorkbench;
+$('agentStudio').onclick = openAgentStudio;
 $('evaluationCenter').onclick = openEvaluationCenter;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
+$('closeAgentStudio').onclick = () => $('agentStudioDialog').close();
 $('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
@@ -1858,23 +2446,29 @@ $('refreshQueue').onclick = loadProductivityData;
 $('refreshEvaluations').onclick = loadEvaluations;
 $('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
 $('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
+$('installAgentStarterPack').onclick = installAgentStarterPack;
+$('addAgentFromStudio').onclick = () => openAgentProfileDialog();
 $('addTemplate').onclick = openTemplateDialog;
 $('addProfile').onclick = openProfileDialog;
 $('addSchedule').onclick = openScheduleDialog;
 $('addNotification').onclick = openNotificationDialog;
 $('cancelTemplate').onclick = () => $('templateDialog').close();
+$('cancelAgentProfile').onclick = () => { state.editingAgentProfileId = ''; $('agentProfileDialog').close(); };
 $('cancelProfile').onclick = () => $('profileDialog').close();
 $('cancelSchedule').onclick = () => $('scheduleDialog').close();
 $('cancelNotification').onclick = () => $('notificationDialog').close();
 $('cancelEvaluationSuite').onclick = () => $('evaluationSuiteDialog').close();
 $('cancelEvaluationCase').onclick = () => $('evaluationCaseDialog').close();
 $('templateForm').onsubmit = submitTemplate;
+$('agentProfileForm').onsubmit = submitAgentProfile;
+$('agentProfileDialog').addEventListener('close', () => { state.editingAgentProfileId = ''; });
 $('profileForm').onsubmit = submitProfile;
 $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
 $('evaluationSuiteForm').onsubmit = submitEvaluationSuite;
 $('evaluationCaseForm').onsubmit = submitEvaluationCase;
 $('profileLocal').onchange = updateProfilePriceFields;
+$('agentRole').onchange = updateAgentRoleHelp;
 $('scheduleType').onchange = updateScheduleFields;
 $('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };
 $('notificationType').onchange = () => updateNotificationFields(true);
@@ -1891,6 +2485,10 @@ $('templateName').oninput = () => {
   }
 };
 $('quickTemplate').onchange = () => applyTemplate($('quickTemplate').value);
+$('agentProfile').onchange = () => {
+  state.agentProfileId = $('agentProfile').value;
+  localStorage.setItem('paicli_agent_profile', state.agentProfileId);
+};
 $('modelProfile').onchange = () => {
   state.modelProfileId = $('modelProfile').value;
   localStorage.setItem('paicli_model_profile', state.modelProfileId);
@@ -1925,11 +2523,12 @@ document.addEventListener('click', () => {
 });
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('input').focus(); }
-  if (event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); createSession(); }
+  if (event.altKey && event.key.toLowerCase() === 'n') { event.preventDefault(); showHome(); }
 });
 
 $('workspace').classList.toggle('hide-detail', !state.detailOpen);
 clearEvents();
 renderModelControls();
 renderEmpty();
+refreshComposerOptions();
 refreshSessions();

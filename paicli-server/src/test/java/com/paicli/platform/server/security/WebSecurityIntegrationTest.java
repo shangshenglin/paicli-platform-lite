@@ -62,6 +62,14 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"profileForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"agentProfileForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"agentStudio\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"agentProfileDialogTitle\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "20260719-collab-home-compose")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"notificationForm\"")))

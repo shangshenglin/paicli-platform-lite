@@ -15,6 +15,7 @@ public record RunRecord(
         String reasoningEffort,
         int priority,
         String modelProfileId,
+        String agentProfileId,
         int retryCount,
         Instant createdAt,
         Instant startedAt,

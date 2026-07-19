@@ -86,7 +86,7 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
         }
     }
 
@@ -227,12 +227,16 @@ class SqliteRuntimeStoreTest {
         var parent = store.createRun(session.id(), "delegate");
         var tool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-key");
 
-        var first = store.createOrGetDelegation(parent.id(), tool.id(), "researcher", "inspect docs");
+        var first = store.createOrGetDelegation(parent.id(), tool.id(), "researcher", "inspect docs",
+                "agent-profile-a", "model-profile-a");
         var second = store.createOrGetDelegation(parent.id(), tool.id(), "ignored", "ignored");
 
         assertThat(second).isEqualTo(first);
-        assertThat(store.findRun(first.childRunId()).orElseThrow().status())
-                .isEqualTo(com.paicli.platform.common.RunStatus.QUEUED);
+        var child = store.findRun(first.childRunId()).orElseThrow();
+        assertThat(child.status()).isEqualTo(com.paicli.platform.common.RunStatus.QUEUED);
+        assertThat(child.agentProfileId()).isEqualTo("agent-profile-a");
+        assertThat(child.modelProfileId()).isEqualTo("model-profile-a");
+        assertThat(first.agentProfileId()).isEqualTo("agent-profile-a");
         assertThat(store.findSession(first.childSessionId()).orElseThrow().projectKey()).isEqualTo("project-a");
         assertThat(store.sessions()).extracting("id").containsExactly(session.id());
         assertThat(store.delegationsForRun(parent.id())).containsExactly(first);
@@ -248,6 +252,26 @@ class SqliteRuntimeStoreTest {
         assertThat(store.deleteSession(session.id())).isTrue();
         assertThat(store.findSession(first.childSessionId())).isEmpty();
         assertThat(store.findRun(first.childRunId())).isEmpty();
+    }
+
+    @Test
+    void persistsCollaborationPolicyAndCountsDelegationTree() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("collab", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var policy = store.saveCollaborationPolicy(parent.id(), true, "complex", "high",
+                "[\"agent-a\",\"agent-b\"]", 2, 1, 3, 12_000, 0.25,
+                false, true, true);
+        var tool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-key");
+        var child = store.createOrGetDelegation(parent.id(), tool.id(), "runner", "run tests",
+                "agent-a", "model-a");
+
+        assertThat(policy.complexity()).isEqualTo("COMPLEX");
+        assertThat(policy.risk()).isEqualTo("HIGH");
+        assertThat(store.collaborationPolicyForTree(child.childRunId())).get()
+                .extracting("runId").isEqualTo(parent.id());
+        assertThat(store.delegationDepth(child.childRunId())).isEqualTo(1);
+        assertThat(store.delegationCountForTree(child.childRunId())).isEqualTo(1);
     }
 
     @Test
@@ -331,9 +355,13 @@ class SqliteRuntimeStoreTest {
         var template = productivity.saveTemplate(null, "project-p1", "代码审查", "/review",
                 "审查 ${repository}", "{\"repository\":\"repo\"}", "代码附件",
                 "read_file,search", profile.id());
+        var agent = productivity.saveAgentProfile(null, "project-p1", "Code Reviewer",
+                "Reviews code changes", "Review code for correctness and risk.", profile.id(),
+                "[\"read_file\",\"search_knowledge\"]", "[\"java-review\"]",
+                "summary, risks, fixes", "REVIEWER", "MANUAL", "PROJECT", "INHERIT", true);
         var budget = productivity.saveBudget("project-p1", 10_000, 100_000, 1, 10, .8, 2);
         var session = store.createSession("P1", "project-p1");
-        var run = store.createRun(session.id(), "review", "disabled", "", List.of(), profile.id(), 5, 0);
+        var run = store.createRun(session.id(), "review", "disabled", "", List.of(), profile.id(), agent.id(), 5, 0);
         store.recordModelUsage(run.id(), "openai-compatible", profile.model(), 100, 90, 10, 20,
                 250, 1, true);
         var schedule = productivity.saveSchedule(null, "project-p1", "日报", template.id(),
@@ -345,6 +373,9 @@ class SqliteRuntimeStoreTest {
         assertThat(productivity.markTemplateUsed("project-p1", template.id()).id()).isEqualTo(template.id());
         assertThat(productivity.markTemplateUsed("project-p1", "review").id()).isEqualTo(template.id());
         assertThat(productivity.resolveModelProfile("project-p1", null)).contains(profile);
+        assertThat(productivity.agentProfiles("project-p1")).containsExactly(agent);
+        assertThat(productivity.resolveAgentProfile("project-p1", agent.id())).contains(agent);
+        assertThat(store.findRun(run.id()).orElseThrow().agentProfileId()).isEqualTo(agent.id());
         assertThat(budget.maxConcurrentRuns()).isEqualTo(2);
         assertThat(productivity.queue("project-p1")).singleElement()
                 .satisfies(item -> {

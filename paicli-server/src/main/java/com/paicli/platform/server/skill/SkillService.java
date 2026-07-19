@@ -123,9 +123,16 @@ public class SkillService {
     }
 
     public String indexPrompt(String projectKey) {
+        return indexPrompt(projectKey, List.of());
+    }
+
+    public String indexPrompt(String projectKey, List<String> allowedNames) {
+        List<String> allow = allowedNames == null ? List.of() : allowedNames.stream()
+                .filter(value -> value != null && !value.isBlank()).map(String::trim).distinct().toList();
         StringBuilder out = new StringBuilder("<available_skills>\n"
                 + "Skills are listed in stable name order. Call load_skill with an exact name before following one.\n");
         for (SkillDescriptor skill : list(projectKey)) {
+            if (!allow.isEmpty() && !allow.contains(skill.name())) continue;
             String line = "- " + skill.name() + ": " + skill.description() + "\n";
             if (out.length() + line.length() + 20 > MAX_INDEX_CHARS) break;
             out.append(line);
