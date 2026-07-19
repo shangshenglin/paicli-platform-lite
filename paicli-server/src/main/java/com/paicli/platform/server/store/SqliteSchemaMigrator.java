@@ -25,7 +25,9 @@ final class SqliteSchemaMigrator {
             new Migration(13, "production run state tool recovery model attempts budgets and notification outbox"),
             new Migration(14, "evaluation output token metric and concurrent SQLite hardening"),
             new Migration(15, "durable plan runtime schema"),
-            new Migration(16, "plan scheduler async jobs and validation checks")
+            new Migration(16, "plan scheduler async jobs and validation checks"),
+            new Migration(17, "agent profile catalog for expert agents"),
+            new Migration(18, "delegated runs can target agent profiles")
     );
 
     private SqliteSchemaMigrator() { }

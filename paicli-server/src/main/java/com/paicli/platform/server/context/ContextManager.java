@@ -17,16 +17,19 @@ import com.paicli.platform.server.artifact.DocumentAttachmentService;
 import com.paicli.platform.server.knowledge.KnowledgeService;
 import com.paicli.platform.server.config.RagProperties;
 import com.paicli.platform.server.memory.LayeredMemoryService;
+import com.paicli.platform.server.store.ProductivityStore;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 @Component
 public class ContextManager {
     private static final TypeReference<List<ModelResponse.ToolPlan>> TOOL_CALLS = new TypeReference<>() { };
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private final SqliteRuntimeStore store;
     private final PromptAssembler prompts;
     private final ToolCatalog toolCatalog;
@@ -78,23 +81,32 @@ public class ContextManager {
 
     public PreparedContext prepare(String sessionId, String runId, int requestedContextTokens,
                                    int requestedOutputTokens) {
+        return prepare(sessionId, runId, requestedContextTokens, requestedOutputTokens, null);
+    }
+
+    public PreparedContext prepare(String sessionId, String runId, int requestedContextTokens,
+                                   int requestedOutputTokens, ProductivityStore.AgentProfile agentProfile) {
         int contextLimit = requestedContextTokens <= 0
                 ? modelProperties.maxContextTokens() : requestedContextTokens;
         int outputLimit = requestedOutputTokens <= 0
                 ? modelProperties.maxOutputTokens() : Math.min(requestedOutputTokens, contextLimit - 1);
         String system = prompts.systemPrompt();
+        String agentInstruction = agentInstruction(agentProfile);
         String runtime = prompts.runtimeContext(platformProperties.workspaceRoot().resolve(runId));
-        int fixedTokens = TokenEstimator.estimateText(system) + TokenEstimator.estimateText(runtime);
+        int fixedTokens = TokenEstimator.estimateText(system) + TokenEstimator.estimateText(agentInstruction)
+                + TokenEstimator.estimateText(runtime);
         var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
 
         List<MessageRecord> active = store.activeMessages(sessionId);
         List<ModelMessage> messages = new ArrayList<>();
         messages.add(ModelMessage.system(system));
+        if (!agentInstruction.isBlank()) messages.add(ModelMessage.system(agentInstruction));
         messages.add(ModelMessage.user(runtime));
         String projectKey = store.findSession(sessionId).orElseThrow().projectKey();
         String projectRules = prompts.projectRules(projectKey, runId);
         if (!projectRules.isBlank()) messages.add(ModelMessage.user(projectRules));
-        String skillIndex = skillService.indexPrompt(projectKey);
+        List<String> allowedSkills = parseStringList(agentProfile == null ? "" : agentProfile.skillNamesJson());
+        String skillIndex = skillService.indexPrompt(projectKey, allowedSkills);
         if (!skillIndex.isBlank()) messages.add(ModelMessage.user(skillIndex));
         String retrievedKnowledge = autoRetrievedKnowledge(projectKey, runId, active);
         if (!retrievedKnowledge.isBlank()) messages.add(ModelMessage.user(retrievedKnowledge));
@@ -116,9 +128,43 @@ public class ContextManager {
                     + estimated + " > " + hardInputLimit);
         }
         var run = store.findRun(runId).orElseThrow();
-        return new PreparedContext(new ModelRequest(messages, toolCatalog.definitions(),
+        Set<String> allowedTools = Set.copyOf(parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
+        return new PreparedContext(new ModelRequest(messages, toolCatalog.definitions(allowedTools),
                 outputLimit, run.thinkingMode(), run.reasoningEffort()),
                 estimated, compaction);
+    }
+
+    private String agentInstruction(ProductivityStore.AgentProfile agentProfile) {
+        if (agentProfile == null) return "";
+        StringBuilder value = new StringBuilder("<agent_profile id=\"")
+                .append(escapeAttribute(agentProfile.id())).append("\" name=\"")
+                .append(escapeAttribute(agentProfile.name())).append("\">\n")
+                .append("Role: ").append(agentProfile.collaborationRole()).append("\n")
+                .append("Handoff policy: ").append(agentProfile.handoffPolicy()).append("\n")
+                .append("Workspace scope: ").append(agentProfile.workspaceScope()).append("\n")
+                .append("Approval policy: ").append(agentProfile.approvalPolicy()).append("\n");
+        if (!agentProfile.description().isBlank()) {
+            value.append("Description: ").append(agentProfile.description()).append("\n");
+        }
+        value.append("\n<expert_instructions>\n")
+                .append(agentProfile.systemPrompt()).append("\n</expert_instructions>\n");
+        if (!agentProfile.outputSchema().isBlank()) {
+            value.append("\n<preferred_output_schema>\n")
+                    .append(agentProfile.outputSchema()).append("\n</preferred_output_schema>\n");
+        }
+        value.append("</agent_profile>");
+        return value.toString();
+    }
+
+    private List<String> parseStringList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return mapper.readValue(json, STRING_LIST).stream()
+                    .filter(value -> value != null && !value.isBlank())
+                    .map(String::trim).distinct().toList();
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     private String autoRetrievedKnowledge(String projectKey, String runId, List<MessageRecord> active) {

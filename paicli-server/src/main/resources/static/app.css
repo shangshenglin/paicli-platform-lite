@@ -152,9 +152,39 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .empty { padding-top: 20vh; color: var(--muted); text-align: center; }
 .empty .logo { width: 52px; height: 52px; margin: 0 auto 14px; font-size: 29px; }
 .empty h1 { margin: 0 0 6px; color: var(--text); font-size: 23px; }
+.home-mode-switch { display: inline-grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 0 auto 22px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: #12161d; }
+.home-mode-switch button { min-width: 118px; }
 .home-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 180px)); justify-content: center; gap: 9px; margin-top: 22px; }
 .home-action { display: grid; gap: 2px; padding: 12px 14px; text-align: left; }
 .home-action small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.home-collaboration { width: min(760px, calc(100vw - 64px)); margin: 0 auto; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: #171b21; text-align: left; }
+.home-collaboration-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.home-collaboration-head .logo { flex: 0 0 auto; margin: 0; }
+.home-collaboration h1 { margin: 0 0 4px; }
+.home-collaboration p { margin: 0; color: var(--muted); }
+.home-collaboration .dialog-actions { margin-top: 12px; }
+.collaboration-policy { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.collaboration-options { margin: 6px 0 10px; color: var(--muted); }
+.agent-choice-field { margin: 0 0 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.agent-choice-field legend { padding: 0 5px; color: var(--text); font-weight: 650; }
+.agent-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.agent-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #12161d; }
+.agent-choice input { grid-row: span 2; margin-top: 3px; }
+.agent-choice strong, .agent-choice small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collaboration-board { margin: 0 0 14px; padding: 14px; border: 1px solid #375365; border-radius: 10px; background: #121922; }
+.session-plan-panel { margin: 0 0 14px; padding: 14px; border: 1px solid #3c5d4f; border-radius: 10px; background: #111a17; }
+.session-plan-list { display: grid; gap: 8px; margin-top: 10px; }
+.session-plan-item { flex-wrap: wrap; background: #151d1a; }
+.collaboration-task-list { display: grid; gap: 9px; }
+.collaboration-task { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #171b21; }
+.collaboration-task-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.collaboration-task p { margin: 8px 0 0; color: var(--muted); }
+.collaboration-result pre { white-space: pre-wrap; color: var(--text); }
+.tag-picker { display: grid; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: #0f1319; }
+.tag-chips, .tag-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip, .tag-option { padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; background: #20252e; color: var(--text); cursor: pointer; }
+.tag-chip { border-color: #39765b; background: #204434; }
+.tag-search { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #12161d; }
 .message { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; margin-bottom: 23px; }
 .avatar { width: 31px; height: 31px; background: #262c35; font-weight: 700; }
 .assistant .avatar { color: var(--green); font-family: Georgia; }
@@ -235,6 +265,7 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .upload-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .managed-list { display: grid; gap: 6px; margin-top: 10px; }
 .managed-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #171b21; }
+.managed-item.selected { border-color: #39765b; background: #182720; }
 .managed-item .managed-main { min-width: 0; flex: 1; }
 .managed-item small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .managed-item button { padding: 4px 8px; }
@@ -331,6 +362,12 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .form-field.full { grid-column: auto; }
   .upload-row { align-items: stretch; flex-direction: column; }
   .home-actions, .usage-metrics { grid-template-columns: 1fr 1fr; }
+  .home-mode-switch { width: 100%; }
+  .home-mode-switch button { min-width: 0; }
+  .home-collaboration { width: 100%; padding: 14px; }
+  .home-collaboration-head { align-items: flex-start; }
+  .collaboration-policy, .agent-choice-grid { grid-template-columns: 1fr; }
+  .collaboration-task-head { align-items: flex-start; flex-direction: column; }
   .evaluation-dialog { overflow-y: auto; }
   .evaluation-toolbar { align-items: stretch; flex-direction: column; }
   .evaluation-toolbar .managed-actions { width: 100%; }

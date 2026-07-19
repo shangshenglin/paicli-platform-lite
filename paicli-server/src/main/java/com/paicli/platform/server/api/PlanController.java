@@ -38,6 +38,14 @@ public class PlanController {
         return store.plans(projectKey, limit);
     }
 
+    @GetMapping("/sessions/{sessionId}/plans")
+    public List<PlanService.PlanView> sessionPlans(@PathVariable String sessionId,
+                                                   @RequestParam(defaultValue = "5") int limit) {
+        return store.plansForSession(sessionId, limit).stream()
+                .map(plan -> service.view(plan.id()))
+                .toList();
+    }
+
     @PostMapping("/plans")
     @ResponseStatus(HttpStatus.CREATED)
     public PlanService.PlanView create(@Valid @RequestBody ApiDtos.CreatePlanRequest request) {

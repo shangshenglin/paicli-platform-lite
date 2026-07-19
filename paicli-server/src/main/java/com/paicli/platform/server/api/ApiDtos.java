@@ -16,11 +16,19 @@ final class ApiDtos {
     record SessionGroupRequest(@NotBlank String name) { }
 
     record CreateRunRequest(@NotBlank String input, String thinkingMode, String reasoningEffort,
-                            List<String> attachmentIds, String modelProfileId, Integer priority) { }
+                            List<String> attachmentIds, String modelProfileId, String agentProfileId,
+                            Integer priority, CollaborationOptions collaboration) { }
+
+    record CollaborationOptions(Boolean enabled, String complexity, String risk,
+                                List<String> allowedAgentProfileIds, Integer maxExperts,
+                                Integer maxDepth, Integer maxChildRuns,
+                                Long maxEstimatedTokens, Double maxEstimatedCost,
+                                Boolean allowExpertDelegation, Boolean requireReviewer,
+                                Boolean requireRunner) { }
 
     record ResolveApprovalRequest(@NotNull ApprovalStatus decision, String rememberScope) { }
 
-    record RetryRunRequest(String input, Boolean branch, String modelProfileId) { }
+    record RetryRunRequest(String input, Boolean branch, String modelProfileId, String agentProfileId) { }
 
     record TaskTemplateRequest(@NotBlank String projectKey, @NotBlank String name, String shortcut,
                                @NotBlank String prompt, Map<String, String> variables,
@@ -34,6 +42,14 @@ final class ApiDtos {
                                String fallbackModel, Integer maxContextTokens, Integer maxOutputTokens,
                                Double inputPrice, Double outputPrice, Boolean localModel,
                                Boolean makeDefault) { }
+
+    record AgentProfileRequest(@NotBlank String projectKey, @NotBlank String name,
+                               String description, @NotBlank String systemPrompt,
+                               String modelProfileId, List<String> toolNames, List<String> skillNames,
+                               String outputSchema, String collaborationRole, String handoffPolicy,
+                               String workspaceScope, String approvalPolicy, Boolean enabled) { }
+
+    record AgentProfileCopyRequest(String projectKey, String name) { }
 
     record BudgetRequest(Long dailyTokens, Long monthlyTokens, Double dailyCost,
                          Double monthlyCost, Double warnRatio, Integer maxConcurrentRuns) { }

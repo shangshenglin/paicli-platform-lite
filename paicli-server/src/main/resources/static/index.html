@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260717-home-layout">
+  <link rel="stylesheet" href="/app.css?v=20260719-collab-home-compose">
 </head>
 <body>
 <div class="app">
@@ -21,6 +21,7 @@
     <div class="sessions" id="sessions"></div>
     <div class="side-foot">
       <button class="secondary" id="workbench">效率工作台</button>
+      <button class="secondary" id="agentStudio">专家创建</button>
       <button class="secondary" id="evaluationCenter">Agent 评测</button>
       <button class="secondary" id="capabilities">能力管理</button>
       <button class="secondary" id="settings">连接设置</button>
@@ -41,10 +42,11 @@
         <button class="secondary" id="toggle">执行详情</button>
       </header>
       <div class="messages" id="messages"><div class="stack" id="stack"></div></div>
-      <div class="compose">
+      <div class="compose" id="compose">
         <div class="approvals" id="approvals"></div>
         <div class="model-controls">
           <select id="quickTemplate" title="任务模板"><option value="">快捷指令</option></select>
+          <select id="agentProfile" title="智能体专家"><option value="">默认专家</option></select>
           <select id="modelProfile" title="模型配置方案"><option value="">默认模型</option></select>
           <span>深度思考</span>
           <button class="mode-button" data-thinking="disabled">关闭</button>
@@ -111,6 +113,18 @@
     <div class="section-title"><h3>MCP Server</h3><button class="secondary" id="addMcp">新增</button></div>
     <p class="hint">敏感 Header 仅保存环境变量名，例如 <code>env:MCP_TOKEN</code>，不会保存或回显真实值。</p>
     <div class="managed-list" id="mcpList"></div>
+  </section>
+</dialog>
+<dialog id="agentStudioDialog" class="wide-dialog workbench-dialog">
+  <div class="dialog-title"><strong>专家创建</strong><button class="secondary" id="closeAgentStudio">关闭</button></div>
+  <div class="hint" id="agentStudioProject">当前项目：default</div>
+  <section class="capability-section productivity-overview">
+    <div class="section-title">
+      <div><h3>智能体专家</h3><p class="hint">项目级 Profile 会约束专家指令、模型、工具、Skill 和交付格式；Leader 可以按 Profile 分派子任务。</p></div>
+      <div class="managed-actions"><button class="secondary" id="installAgentStarterPack" title="只补齐缺失的内置专家；已有同名专家会保留，不覆盖你的修改">补齐专家模板</button><button class="primary" id="addAgentFromStudio">新建专家</button></div>
+    </div>
+    <div class="capability-status" id="agentStudioSummary"></div>
+    <div class="managed-list" id="agentStudioList"></div>
   </section>
 </dialog>
 <dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
@@ -252,6 +266,28 @@
     <div class="dialog-actions"><button type="submit" class="primary" id="saveTemplate">创建模板</button></div>
   </form>
 </dialog>
+<dialog id="agentProfileDialog" class="form-dialog">
+  <form id="agentProfileForm" class="entity-form">
+    <div class="dialog-title"><strong id="agentProfileDialogTitle">新建智能体专家</strong><button type="button" class="secondary" id="cancelAgentProfile">取消</button></div>
+    <p class="hint">保存专家指令、模型方案、工具/Skill 白名单和输出契约；后续 Leader 可以从这里选择成员。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>专家名称 *</span><input id="agentName" maxlength="80" required placeholder="例如：代码审查专家"></label>
+      <label class="form-field"><span>协作角色</span><select id="agentRole"><option value="EXPERT">Expert</option><option value="LEADER">Leader</option><option value="REVIEWER">Reviewer</option><option value="RUNNER">Runner</option></select><small id="agentRoleHelp"></small></label>
+      <label class="form-field full"><span>说明</span><input id="agentDescription" maxlength="500" placeholder="给用户和 Leader 看的能力描述"></label>
+      <label class="form-field full"><span>专家指令 *</span><textarea id="agentPrompt" rows="6" required placeholder="定义这个专家的目标、边界、工作方式和质量标准"></textarea></label>
+      <label class="form-field full"><span>模型配置方案</span><select id="agentModelProfile"><option value="">使用项目默认模型</option></select></label>
+      <label class="form-field"><span>允许工具</span><select id="agentTools" multiple hidden></select><div id="agentToolsPicker" class="tag-picker"></div><small>按角色提供默认工具；可搜索后点选添加。</small></label>
+      <label class="form-field"><span>允许 Skill</span><select id="agentSkills" multiple hidden></select><div id="agentSkillsPicker" class="tag-picker"></div><small>不添加表示不限定 Skill；可搜索后点选添加。</small></label>
+      <label class="form-field"><span>交接策略</span><select id="agentHandoff"><option value="MANUAL">Manual</option><option value="LEADER_ASSIGNED">Leader Assigned</option><option value="AUTO">Auto</option></select></label>
+      <label class="form-field"><span>工作区范围</span><select id="agentScope"><option value="PROJECT">Project</option><option value="SESSION">Session</option><option value="RUN">Run</option></select></label>
+      <label class="form-field"><span>审批策略</span><select id="agentApproval"><option value="INHERIT">Inherit</option><option value="STRICT">Strict</option><option value="READ_ONLY">Read Only</option></select></label>
+      <label class="form-field full"><span>输出契约</span><textarea id="agentOutputSchema" rows="4" placeholder="例如：必须输出 summary / risks / files_changed / next_actions"></textarea></label>
+      <div class="form-field full checkbox-row"><label><input id="agentEnabled" type="checkbox" checked> 启用专家</label></div>
+    </div>
+    <div class="form-error" id="agentProfileFormError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveAgentProfile">创建专家</button></div>
+  </form>
+</dialog>
 <dialog id="profileDialog" class="form-dialog">
   <form id="profileForm" class="entity-form">
     <div class="dialog-title"><strong>新建模型配置方案</strong><button type="button" class="secondary" id="cancelProfile">取消</button></div>
@@ -364,6 +400,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260716-memory-forms"></script>
+<script src="/app.js?v=20260719-collab-home-compose"></script>
 </body>
 </html>

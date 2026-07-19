@@ -89,6 +89,29 @@ public class PlanStore {
         }
     }
 
+    public List<Plan> plansForSession(String sessionId, int limit) {
+        List<Plan> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT DISTINCT p.* FROM plans p " +
+                        "LEFT JOIN plan_steps ps ON ps.plan_id=p.id " +
+                        "WHERE p.session_id=? " +
+                        "OR p.run_id IN (SELECT id FROM runs WHERE session_id=?) " +
+                        "OR ps.run_id IN (SELECT id FROM runs WHERE session_id=?) " +
+                        "ORDER BY p.updated_at DESC LIMIT ?")) {
+            String id = nullable(sessionId);
+            ps.setString(1, id);
+            ps.setString(2, id);
+            ps.setString(3, id);
+            ps.setInt(4, Math.max(1, Math.min(limit, 20)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(plan(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list session plans", e);
+        }
+    }
+
     public List<PlanStep> steps(String planId) {
         List<PlanStep> values = new ArrayList<>();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(

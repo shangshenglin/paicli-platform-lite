@@ -143,6 +143,89 @@ public class ProductivityStore {
 
     public boolean deleteModelProfile(String id) { return delete("model_profiles", id); }
 
+    public List<AgentProfile> agentProfiles(String projectKey) {
+        List<AgentProfile> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM agent_profiles WHERE project_key=? ORDER BY enabled DESC,name COLLATE NOCASE")) {
+            ps.setString(1, project(projectKey));
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) values.add(agentProfile(rs)); }
+            return values;
+        } catch (SQLException e) { throw failure("list agent profiles", e); }
+    }
+
+    public Optional<AgentProfile> findAgentProfile(String id) {
+        if (blank(id)) return Optional.empty();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM agent_profiles WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(agentProfile(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) { throw failure("find agent profile", e); }
+    }
+
+    public Optional<AgentProfile> resolveAgentProfile(String projectKey, String requestedId) {
+        if (blank(requestedId)) return Optional.empty();
+        return findAgentProfile(requestedId)
+                .filter(profile -> profile.projectKey().equals(project(projectKey)) && profile.enabled());
+    }
+
+    public AgentProfile saveAgentProfile(String id, String projectKey, String name, String description,
+                                         String systemPrompt, String modelProfileId, String toolNamesJson,
+                                         String skillNamesJson, String outputSchema, String collaborationRole,
+                                         String handoffPolicy, String workspaceScope, String approvalPolicy,
+                                          boolean enabled) {
+        return saveAgentProfile(id, projectKey, name, description, systemPrompt, modelProfileId, toolNamesJson,
+                skillNamesJson, outputSchema, collaborationRole, handoffPolicy, workspaceScope, approvalPolicy,
+                enabled, "", 0);
+    }
+
+    public AgentProfile saveAgentProfile(String id, String projectKey, String name, String description,
+                                         String systemPrompt, String modelProfileId, String toolNamesJson,
+                                         String skillNamesJson, String outputSchema, String collaborationRole,
+                                         String handoffPolicy, String workspaceScope, String approvalPolicy,
+                                         boolean enabled, String templateKey, int templateVersion) {
+        String key = project(projectKey);
+        String resolvedId = blank(id) ? id("agent") : id.trim();
+        Instant now = Instant.now();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO agent_profiles(id,project_key,name,description,system_prompt,model_profile_id," +
+                        "tool_names_json,skill_names_json,output_schema,collaboration_role,handoff_policy," +
+                        "workspace_scope,approval_policy,template_key,template_version,enabled,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
+                        "name=excluded.name,description=excluded.description,system_prompt=excluded.system_prompt," +
+                        "model_profile_id=excluded.model_profile_id,tool_names_json=excluded.tool_names_json," +
+                        "skill_names_json=excluded.skill_names_json,output_schema=excluded.output_schema," +
+                        "collaboration_role=excluded.collaboration_role,handoff_policy=excluded.handoff_policy," +
+                        "workspace_scope=excluded.workspace_scope,approval_policy=excluded.approval_policy," +
+                        "template_key=excluded.template_key,template_version=excluded.template_version," +
+                        "enabled=excluded.enabled,updated_at=excluded.updated_at")) {
+            int i = 1;
+            ps.setString(i++, resolvedId);
+            ps.setString(i++, key);
+            ps.setString(i++, text(name, "name", 120));
+            ps.setString(i++, value(description, 1_000));
+            ps.setString(i++, text(systemPrompt, "systemPrompt", 32_000));
+            ps.setString(i++, nullable(modelProfileId));
+            ps.setString(i++, json(toolNamesJson));
+            ps.setString(i++, json(skillNamesJson));
+            ps.setString(i++, value(outputSchema, 8_000));
+            ps.setString(i++, value(collaborationRole, 40).isBlank() ? "EXPERT" : value(collaborationRole, 40).toUpperCase());
+            ps.setString(i++, value(handoffPolicy, 40).isBlank() ? "MANUAL" : value(handoffPolicy, 40).toUpperCase());
+            ps.setString(i++, value(workspaceScope, 40).isBlank() ? "PROJECT" : value(workspaceScope, 40).toUpperCase());
+            ps.setString(i++, value(approvalPolicy, 40).isBlank() ? "INHERIT" : value(approvalPolicy, 40).toUpperCase());
+            ps.setString(i++, value(templateKey, 120));
+            ps.setInt(i++, Math.max(0, templateVersion));
+            ps.setInt(i++, enabled ? 1 : 0);
+            ps.setString(i++, now.toString());
+            ps.setString(i, now.toString());
+            ps.executeUpdate();
+            return findAgentProfile(resolvedId).orElseThrow();
+        } catch (SQLException e) { throw failure("save agent profile", e); }
+    }
+
+    public boolean deleteAgentProfile(String id) { return delete("agent_profiles", id); }
+
     public BudgetPolicy saveBudget(String projectKey, long dailyTokens, long monthlyTokens,
                                    double dailyCost, double monthlyCost, double warnRatio, int maxConcurrentRuns) {
         String key=project(projectKey); Instant now=Instant.now();
@@ -415,13 +498,14 @@ public class ProductivityStore {
     }
 
     private boolean delete(String table,String id){
-        if(!List.of("task_templates","model_profiles","scheduled_tasks","notification_channels").contains(table))throw new IllegalArgumentException("unsupported table");
+        if(!List.of("task_templates","model_profiles","agent_profiles","scheduled_tasks","notification_channels").contains(table))throw new IllegalArgumentException("unsupported table");
         try(Connection c=open();PreparedStatement ps=c.prepareStatement("DELETE FROM "+table+" WHERE id=?")){ps.setString(1,id);return ps.executeUpdate()>0;}
         catch(SQLException e){throw failure("delete "+table,e);}
     }
     private Connection open()throws SQLException{return connections.open();}
     private static TaskTemplate template(ResultSet r)throws SQLException{return new TaskTemplate(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("shortcut"),r.getString("prompt"),r.getString("variables_json"),r.getString("attachment_requirements"),r.getString("allowed_tools"),r.getString("model_profile_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")),instant(r.getString("last_used_at")),r.getInt("use_count"));}
     private static ModelProfile profile(ResultSet r)throws SQLException{return new ModelProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("base_url"),r.getString("api_key_env"),r.getString("model"),r.getString("fallback_model"),r.getInt("max_context_tokens"),r.getInt("max_output_tokens"),r.getDouble("input_price"),r.getDouble("output_price"),r.getInt("local_model")!=0,r.getInt("is_default")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
+    private static AgentProfile agentProfile(ResultSet r)throws SQLException{return new AgentProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("system_prompt"),r.getString("model_profile_id"),r.getString("tool_names_json"),r.getString("skill_names_json"),r.getString("output_schema"),r.getString("collaboration_role"),r.getString("handoff_policy"),r.getString("workspace_scope"),r.getString("approval_policy"),r.getString("template_key"),r.getInt("template_version"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static ScheduledTask schedule(ResultSet r)throws SQLException{return new ScheduledTask(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("template_id"),r.getString("schedule_type"),r.getString("schedule_value"),r.getString("variables_json"),r.getInt("enabled")!=0,instant(r.getString("next_run_at")),instant(r.getString("last_run_at")),r.getString("last_run_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationChannel channel(ResultSet r)throws SQLException{return new NotificationChannel(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("type"),r.getString("endpoint"),r.getString("secret_env"),r.getString("events"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationDelivery delivery(ResultSet r)throws SQLException{
@@ -432,7 +516,7 @@ public class ProductivityStore {
         return new NotificationDelivery(r.getString("id"),channel,r.getString("event_type"),r.getString("run_id"),
                 r.getString("message"),r.getInt("attempts"));
     }
-    private static RunRecord run(ResultSet r)throws SQLException{return new RunRecord(r.getString("id"),r.getString("session_id"),RunStatus.valueOf(r.getString("status")),r.getString("input"),r.getInt("current_step"),r.getString("error"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getInt("priority"),r.getString("model_profile_id"),r.getInt("retry_count"),instant(r.getString("created_at")),instant(r.getString("started_at")),instant(r.getString("finished_at")),r.getLong("version"));}
+    private static RunRecord run(ResultSet r)throws SQLException{return new RunRecord(r.getString("id"),r.getString("session_id"),RunStatus.valueOf(r.getString("status")),r.getString("input"),r.getInt("current_step"),r.getString("error"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getInt("priority"),r.getString("model_profile_id"),r.getString("agent_profile_id"),r.getInt("retry_count"),instant(r.getString("created_at")),instant(r.getString("started_at")),instant(r.getString("finished_at")),r.getLong("version"));}
     private static String project(String v){String x=blank(v)?"default":v.trim();if(!x.matches("[a-zA-Z0-9_.-]{1,80}"))throw new IllegalArgumentException("invalid projectKey");return x;}
     private static String text(String v,String n,int max){if(blank(v))throw new IllegalArgumentException(n+" must not be blank");return value(v,max);}
     private static String value(String v,int max){String x=v==null?"":v.trim();if(x.length()>max)throw new IllegalArgumentException("value is too long");return x;}
@@ -450,6 +534,11 @@ public class ProductivityStore {
     public record ModelProfile(String id,String projectKey,String name,String baseUrl,String apiKeyEnv,String model,
                                String fallbackModel,int maxContextTokens,int maxOutputTokens,double inputPrice,
                                double outputPrice,boolean localModel,boolean defaultProfile,Instant createdAt,Instant updatedAt){}
+    public record AgentProfile(String id,String projectKey,String name,String description,String systemPrompt,
+                               String modelProfileId,String toolNamesJson,String skillNamesJson,String outputSchema,
+                               String collaborationRole,String handoffPolicy,String workspaceScope,
+                               String approvalPolicy,String templateKey,int templateVersion,boolean enabled,
+                               Instant createdAt,Instant updatedAt){}
     public record BudgetPolicy(String projectKey,long dailyTokens,long monthlyTokens,double dailyCost,double monthlyCost,
                                double warnRatio,int maxConcurrentRuns,Instant updatedAt){}
     public record UsageSummary(String projectKey,int days,long calls,long inputTokens,long outputTokens,long cachedTokens,

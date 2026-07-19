@@ -8,6 +8,7 @@ public record RunDelegationRecord(
         String parentToolCallId,
         String childSessionId,
         String childRunId,
+        String agentProfileId,
         String agentName,
         String task,
         Instant createdAt
