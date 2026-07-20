@@ -226,6 +226,55 @@ public class PlanStore {
         }
     }
 
+    /** Activates an automatic orchestration plan and binds its root Run atomically. */
+    public Plan activateAndBindFirstStep(String planId, String runId) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                Plan plan = findPlan(c, planId).orElseThrow(() -> new IllegalArgumentException("plan not found"));
+                if (!List.of("DRAFT", "WAITING_APPROVAL").contains(plan.status())) {
+                    throw new IllegalStateException("only draft or waiting approval plans can be started");
+                }
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plans SET status='ACTIVE',started_at=COALESCE(started_at,?),updated_at=? WHERE id=?")) {
+                    ps.setString(1, now);
+                    ps.setString(2, now);
+                    ps.setString(3, planId);
+                    ps.executeUpdate();
+                }
+                markReadySteps(c, planId, now);
+                PlanStep root;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT * FROM plan_steps WHERE plan_id=? AND status='READY' ORDER BY ordinal LIMIT 1")) {
+                    ps.setString(1, planId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) throw new IllegalStateException("automatic plan has no ready root step");
+                        root = step(rs);
+                    }
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status='RUNNING',run_id=?,started_at=COALESCE(started_at,?),updated_at=? " +
+                                "WHERE id=? AND status='READY'")) {
+                    ps.setString(1, runId);
+                    ps.setString(2, now);
+                    ps.setString(3, now);
+                    ps.setString(4, root.id());
+                    if (ps.executeUpdate() != 1) throw new IllegalStateException("automatic plan root is not ready");
+                }
+                appendEvent(c, planId, null, "plan.started", "{}", now);
+                appendEvent(c, planId, root.id(), "plan_step.run_bound", "{\"runId\":\"" + escape(runId) + "\"}", now);
+                c.commit();
+                return findPlan(planId).orElseThrow();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("activate and bind automatic plan", e);
+        }
+    }
+
     public Plan cancel(String planId) {
         try (Connection c = open()) {
             c.setAutoCommit(false);

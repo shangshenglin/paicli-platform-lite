@@ -5,9 +5,11 @@ import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.config.DockerSandboxProperties;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Files;
@@ -28,14 +30,23 @@ public class DockerSandboxDriver implements SandboxDriver {
     private final SandboxAgentClient agentClient;
     private final DockerSandboxProperties dockerProperties;
     private final Path workspaceRoot;
+    private final SqliteRuntimeStore store;
     private final Map<String, ContainerLease> leases = new ConcurrentHashMap<>();
 
     public DockerSandboxDriver(DockerCommandExecutor docker, SandboxAgentClient agentClient,
                                DockerSandboxProperties dockerProperties, PlatformProperties platformProperties) {
+        this(docker, agentClient, dockerProperties, platformProperties, null);
+    }
+
+    @Autowired
+    public DockerSandboxDriver(DockerCommandExecutor docker, SandboxAgentClient agentClient,
+                               DockerSandboxProperties dockerProperties, PlatformProperties platformProperties,
+                               SqliteRuntimeStore store) {
         this.docker = docker;
         this.agentClient = agentClient;
         this.dockerProperties = dockerProperties;
         this.workspaceRoot = platformProperties.workspaceRoot().toAbsolutePath().normalize();
+        this.store = store;
     }
 
     @PostConstruct
@@ -83,7 +94,8 @@ public class DockerSandboxDriver implements SandboxDriver {
     }
 
     private ContainerLease startContainer(String runId) throws Exception {
-        Path workspace = workspaceRoot.resolve(runId).normalize();
+        String workspaceOwner = store == null ? runId : store.workspaceOwnerRunId(runId);
+        Path workspace = workspaceRoot.resolve(workspaceOwner).normalize();
         if (!workspace.startsWith(workspaceRoot)) throw new IllegalArgumentException("Invalid run id: " + runId);
         Files.createDirectories(workspace);
         String name = "paicli-sandbox-" + safeSuffix(runId);

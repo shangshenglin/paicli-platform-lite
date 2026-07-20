@@ -76,6 +76,20 @@ public class PlanService {
         return create(sessionId, null, resolvedProject, objective, raw, "MODEL");
     }
 
+    /**
+     * Creates the durable root progress item for an automatically orchestrated
+     * conversation. The Leader Run owns the actual expert delegation; this plan
+     * tracks that orchestration as one recoverable unit instead of dispatching a
+     * second set of ordinary plan-step Runs.
+     */
+    public PlanStore.Plan createAutomaticCollaborationPlan(String sessionId, String runId,
+                                                            String projectKey, String objective) {
+        String raw = fallbackCollaborationPlan(objective);
+        PlanStore.Plan plan = create(sessionId, runId, projectKey, objective, raw,
+                "AUTO_COLLABORATION");
+        return plans.activateAndBindFirstStep(plan.id(), runId);
+    }
+
     public PlanStore.Plan replan(String planId, String reason, String rawPlanJson) {
         PlanStore.Plan current = plans.findPlan(planId)
                 .orElseThrow(() -> new IllegalArgumentException("plan not found"));
@@ -125,6 +139,26 @@ public class PlanService {
             ));
         } catch (Exception e) {
             throw new IllegalStateException("failed to create fallback plan", e);
+        }
+    }
+
+    private String fallbackCollaborationPlan(String objective) {
+        try {
+            return mapper.writeValueAsString(Map.of(
+                    "objective", objective,
+                    "summary", "Leader 将规划任务、分派专家、跟踪结果并完成最终汇总。",
+                    "steps", List.of(Map.of(
+                            "client_id", "collaboration",
+                            "title", "Leader 协调执行",
+                            "description", "由 Leader 判断任务拆分方式，选择合适的专家 Profile，跟踪子任务并汇总可验证结果。",
+                            "type", "DELEGATION",
+                            "execution_mode", "REACT",
+                            "dependencies", List.of(),
+                            "done_criteria", List.of("已完成必要的专家分派、结果核验和最终交付。")
+                    ))
+            ));
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to create automatic collaboration plan", e);
         }
     }
 

@@ -23,6 +23,7 @@ const state = {
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
   agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
   notifiedRunId: '',
+  planRefreshTimer: 0,
   detailOpen: innerWidth > 1000
 };
 const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED']);
@@ -32,6 +33,7 @@ const statusNames = {
   WAITING_MODEL: '思考中',
   WAITING_TOOL: '执行工具',
   WAITING_APPROVAL: '等待确认',
+  WAITING_AGENT: '等待专家',
   COMPLETED: '已完成',
   FAILED: '失败',
   CANCELED: '已取消'
@@ -50,7 +52,9 @@ const agentToolOptions = [
   ['search_knowledge', '查项目知识库'],
   ['session_search', '查历史会话'],
   ['web_search', '网页搜索'],
-  ['web_fetch', '读取网页']
+  ['web_fetch', '读取网页'],
+  ['github_repo_fetch', 'GitHub 仓库读取'],
+  ['mcp__github__*', 'GitHub MCP 全部工具']
 ];
 const agentRoleHelp = {
   LEADER: 'Leader：协作入口会优先选择；通常允许 list_agent_profiles / spawn_agent 来拆分和汇总任务。',
@@ -107,11 +111,11 @@ function setStatus(value = '') {
   $('status').className = `status${value && !terminal.has(value) ? ' active' : ''}`
     + `${value === 'FAILED' ? ' error' : ''}`;
   $('composer').classList.toggle('running', Boolean(value && !terminal.has(value)));
-  $('input').disabled = value === 'WAITING_APPROVAL';
+  $('input').disabled = value === 'WAITING_APPROVAL' || value === 'WAITING_AGENT';
   const retryable = Boolean(state.runId && terminal.has(value));
   $('retryRun').hidden = !retryable;
   $('branchRun').hidden = !retryable;
-  if ((terminal.has(value) || value === 'WAITING_APPROVAL') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
+  if ((terminal.has(value) || value === 'WAITING_APPROVAL' || value === 'WAITING_AGENT') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
     state.notifiedRunId = `${state.runId}:${value}`;
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
       new Notification(`PaiCLI · ${statusNames[value] || value}`, {body: $('chatTitle').textContent || state.runId});
@@ -304,17 +308,18 @@ async function loadMessages() {
   if (!state.sessionId) return renderEmpty();
   const messages = await api(`/v1/sessions/${state.sessionId}/messages`);
   $('stack').replaceChildren();
-  await renderSessionPlanPanel();
+  const hasPlans = await renderSessionPlanPanel();
   await renderCollaborationBoard();
   messages.forEach(renderMessage);
   if (!$('stack').children.length) renderEmpty();
+  configurePlanPolling(hasPlans);
   scrollBottom();
 }
 
 async function renderSessionPlanPanel() {
   try {
     const values = await api(`/v1/sessions/${state.sessionId}/plans?limit=3`);
-    if (!values.length) return;
+    if (!values.length) return false;
     const panel = element('section', 'session-plan-panel');
     const title = element('div', 'section-title');
     title.append(
@@ -325,10 +330,13 @@ async function renderSessionPlanPanel() {
     values.forEach(view => list.append(renderSessionPlanItem(view)));
     panel.append(title, list);
     $('stack').append(panel);
+    return values.some(view => ['ACTIVE', 'WAITING_APPROVAL'].includes(view.plan.status)
+      || (view.steps || []).some(step => !['COMPLETED', 'FAILED', 'SKIPPED', 'CANCELED'].includes(step.status)));
   } catch (error) {
     const panel = element('section', 'session-plan-panel');
     panel.append(element('div', 'form-error', `Plan 面板加载失败：${error.message}`));
     $('stack').append(panel);
+    return false;
   }
 }
 
@@ -348,10 +356,31 @@ function renderSessionPlanItem(view) {
     `v${plan.version} · ${completed}/${steps.length} 步 · ${current ? `${current.status}：${current.title}` : '暂无步骤'}`
   );
   item.classList.add('session-plan-item');
+  const progress = element('div', 'plan-progress');
+  const bar = element('span', '');
+  bar.style.width = `${steps.length ? Math.round(completed / steps.length * 100) : 0}%`;
+  progress.append(bar);
+  const stepList = element('div', 'plan-step-strip');
+  steps.slice(0, 8).forEach(step => stepList.append(element('span', `plan-step ${step.status.toLowerCase()}`,
+    `${step.status} · ${step.title}`)));
+  if (steps.length > 8) stepList.append(element('span', 'plan-step', `+${steps.length - 8}`));
+  item.querySelector('.managed-main').append(progress, stepList);
   if (plan.status === 'ACTIVE') actionButton(item, '调度', () => dispatchPlan(plan.id), true);
   actionButton(item, '详情', () => inspectPlan(plan.id));
   actionButton(item, '打开工作台', async () => { await openWorkbench(); });
   return item;
+}
+
+function configurePlanPolling(enabled) {
+  clearInterval(state.planRefreshTimer);
+  state.planRefreshTimer = 0;
+  if (!enabled || !state.sessionId) return;
+  state.planRefreshTimer = setInterval(async () => {
+    if (!state.sessionId) return;
+    const panel = $('stack').querySelector('.session-plan-panel');
+    if (!panel) return;
+    await loadMessages();
+  }, 6000);
 }
 
 async function renderCollaborationBoard() {
@@ -614,6 +643,7 @@ async function sendMessage() {
   if (state.runStatus && !terminal.has(state.runStatus)) {
     return showNotice('当前任务仍在运行', true);
   }
+  if (shouldUsePlan(text)) return createPlanFromComposer(text, true);
   try {
     if (!state.sessionId) await createSession();
     const run = await api(`/v1/sessions/${state.sessionId}/runs`, {
@@ -639,6 +669,40 @@ async function sendMessage() {
     watch(run.id);
   } catch (error) {
     showNotice(error.message, true);
+  }
+}
+
+function shouldUsePlan(text) {
+  if (/(按计划执行|创建计划|指定计划|持久化计划|plan\s*:|\/plan|用plan|转为计划)/i.test(text)) return true;
+  return false;
+}
+
+async function createPlanFromComposer(text = null, autoStart = true) {
+  const objective = (text || $('input').value).trim();
+  if (!objective) return showNotice('请输入要执行的计划目标', true);
+  if (state.runStatus && !terminal.has(state.runStatus)) return showNotice('当前任务仍在运行', true);
+  try {
+    if (!state.sessionId) await createSession();
+    showNotice('正在创建持久化 Plan');
+    const view = await api('/v1/plans/generate', {
+      method: 'POST',
+      body: JSON.stringify({sessionId: state.sessionId, projectKey: currentProjectKey(), objective})
+    });
+    $('input').value = '';
+    localStorage.removeItem(`paicli_draft_${state.sessionId}`);
+    clearPendingAttachments();
+    resizeInput();
+    if (autoStart) {
+      await api(`/v1/plans/${view.plan.id}/start`, {method: 'POST', body: '{}'});
+      const report = await api(`/v1/plans/${view.plan.id}/dispatch`, {method: 'POST', body: '{}'});
+      showNotice(`Plan 已创建并调度：启动 ${report.startedSteps} 步`);
+    } else {
+      showNotice('Plan 已创建');
+    }
+    await loadMessages();
+    await loadPlans();
+  } catch (error) {
+    showNotice(`Plan 创建失败：${error.message}`, true);
   }
 }
 
@@ -817,6 +881,19 @@ async function addMcp() {
   const header = prompt('敏感 Header 名称（可空，例如 Authorization）', '') || '';
   const env = header ? prompt('环境变量引用（例如 env:MCP_TOKEN）', 'env:MCP_TOKEN') : '';
   await saveMcp({name, url, enabled: true, headers: header ? {[header]: env} : {}});
+}
+
+async function addGithubMcp() {
+  const tokenEnv = prompt('GitHub MCP Token 环境变量引用', 'env:GITHUB_MCP_TOKEN');
+  if (!tokenEnv) return;
+  await saveMcp({
+    name: 'github',
+    url: 'https://api.githubcopilot.com/mcp/',
+    enabled: true,
+    headers: {Authorization: tokenEnv}
+  });
+  showNotice('GitHub MCP 已保存；请确认 Server 环境里存在对应 Token，然后点击测试');
+  await refreshCapabilities();
 }
 
 function workbenchItem(title, subtitle) {
@@ -1012,6 +1089,7 @@ async function handleEvent(event) {
   } else if (event.type === 'run.status_changed') {
     addEvent(event, data);
     setStatus(data.status);
+    if (data.status === 'WAITING_AGENT' || data.status === 'WAITING_APPROVAL') await loadApprovals();
   } else if (event.type === 'approval.requested') {
     addEvent(event, data);
     setStatus('WAITING_APPROVAL');
@@ -1095,6 +1173,7 @@ async function watch(runId) {
     try {
       const run = await api(`/v1/runs/${runId}`);
       setStatus(run.status);
+      if (run.status === 'WAITING_AGENT' || run.status === 'WAITING_APPROVAL') await loadApprovals();
       if (terminal.has(run.status)) {
         finishLive();
         await loadMessages();
@@ -1888,10 +1967,12 @@ async function submitProfile(event) {
 }
 
 function renderQueue(values) {
+  if ($('queueSummary')) $('queueSummary').textContent = values.length ? `${values.length} 个任务` : '无任务';
   $('queueList').replaceChildren(...values.map(value => {
     const run = value.run; const remaining = value.remainingBudgetTokens < 0 ? '预算不限' : `项目余量 ${value.remainingBudgetTokens.toLocaleString()} Token`;
     const item = workbenchItem(`${run.status} · ${value.sessionTitle}`, `${run.id} · step ${run.currentStep} · 优先级 ${run.priority} · ${Math.round(value.elapsedMs / 1000)}s · 已用 ${value.usedTokens.toLocaleString()} Token · ${remaining} · retry ${run.retryCount}`);
-    if (run.status === 'QUEUED') { actionButton(item, '提高优先级', () => setRunPriority(run.id, run.priority + 1)); actionButton(item, '取消', () => batchQueue([run.id], 'CANCEL')); }
+    if (run.status === 'QUEUED') { actionButton(item, '提高优先级', () => setRunPriority(run.id, run.priority + 1)); actionButton(item, '取消', () => cancelQueueRun(run.id)); }
+    if (!terminal.has(run.status) && run.status !== 'QUEUED') actionButton(item, '终止', () => cancelQueueRun(run.id));
     if (run.status === 'FAILED' || run.status === 'CANCELED') actionButton(item, '重新排队', () => batchQueue([run.id], 'REQUEUE'), true);
     return item;
   }));
@@ -1899,6 +1980,10 @@ function renderQueue(values) {
 }
 async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadProductivityData(); }
 async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadProductivityData(); }
+async function cancelQueueRun(id) {
+  if (!confirm(`终止 Run ${id}？它会变为 CANCELED 终态，之后仍可从队列重新排队。`)) return;
+  await batchQueue([id], 'CANCEL');
+}
 
 function renderSchedules(values, templates) {
   $('scheduleList').replaceChildren(...values.map(value => {
@@ -2334,7 +2419,12 @@ async function loadApprovalPolicies() {
 async function loadApprovals() {
   $('approvals').replaceChildren();
   if (!state.runId) return;
-  const values = (await api('/v1/approvals')).filter(item => item.runId === state.runId);
+  const visibleRunIds = new Set([state.runId]);
+  try {
+    const board = await api(`/v1/runs/${state.runId}/collaboration`);
+    (board.tasks || []).forEach(task => visibleRunIds.add(task.childRunId));
+  } catch (_) { /* A normal Run has no collaboration board. */ }
+  const values = (await api('/v1/approvals')).filter(item => visibleRunIds.has(item.runId));
   for (const approval of values) {
     const card = element('div', 'approval');
     card.append(element('strong', '', '需要你的确认'), element('div', '', approval.reason));
@@ -2396,6 +2486,7 @@ $('groupName').onkeydown = event => {
   if (event.key === 'Enter') createGroup();
 };
 $('send').onclick = sendMessage;
+$('planSend').onclick = () => createPlanFromComposer(null, true);
 $('attach').onclick = () => $('attachmentInput').click();
 $('attachmentInput').onchange = () => uploadAttachments([...$('attachmentInput').files]);
 $('stop').onclick = stopRun;
@@ -2442,7 +2533,7 @@ $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPlans').onclick = loadPlans;
 $('refreshPolicies').onclick = loadApprovalPolicies;
 $('refreshProductivity').onclick = loadProductivityData;
-$('refreshQueue').onclick = loadProductivityData;
+$('refreshQueue').onclick = event => { event.stopPropagation(); loadProductivityData(); };
 $('refreshEvaluations').onclick = loadEvaluations;
 $('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
 $('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
@@ -2499,6 +2590,7 @@ $('sessionImport').onchange = () => { const file = $('sessionImport').files[0]; 
 $('closeCapabilities').onclick = () => $('capabilityDialog').close();
 $('importSkill').onclick = importSkill;
 $('addMcp').onclick = () => addMcp().catch(error => showNotice(`MCP 配置失败：${error.message}`, true));
+$('addGithubMcp').onclick = () => addGithubMcp().catch(error => showNotice(`GitHub MCP 配置失败：${error.message}`, true));
 $('uploadKnowledge').onclick = uploadKnowledge;
 $('close').onclick = () => $('dialog').close();
 $('save').onclick = async () => {

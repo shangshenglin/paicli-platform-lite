@@ -68,7 +68,7 @@ paicli:
     startup-timeout-seconds: 30
     command-timeout-seconds: 90
   web:
-    enabled: ${PAICLI_WEB_ENABLED:false}
+    enabled: ${PAICLI_WEB_ENABLED:true}
     search-url: ${PAICLI_WEB_SEARCH_URL:}
     api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
     api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}

@@ -302,7 +302,7 @@ public class ProductivityController {
     private void ensureBuiltIns(String project){if(!productivity.templates(project).isEmpty())return;try{
         productivity.saveTemplate(null,project,"代码审查","/review","审查 ${repository} 的代码，按 ${outputFormat} 输出风险、证据和修复建议。","{\"repository\":\"当前仓库\",\"outputFormat\":\"Markdown\"}","可选代码或补丁附件","read_file,list_dir,search",null);
         productivity.saveTemplate(null,project,"内容总结","/summarize","总结以下目标或资料，输出 ${outputFormat}，重点保留决策、风险和待办。","{\"outputFormat\":\"Markdown\"}","可选文档附件","read_file,search_knowledge",null);
-        productivity.saveTemplate(null,project,"深度研究","/research","研究 ${topic}，覆盖来源、对比、结论和不确定性，输出 ${outputFormat}。","{\"topic\":\"待填写\",\"outputFormat\":\"Markdown\"}","可选参考资料","web_search,search_knowledge",null);
+        productivity.saveTemplate(null,project,"深度研究","/research","研究 ${topic}，覆盖来源、对比、结论和不确定性，输出 ${outputFormat}。","{\"topic\":\"待填写\",\"outputFormat\":\"Markdown\"}","可选参考资料","web_search,web_fetch,github_repo_fetch,search_knowledge",null);
     }catch(Exception ignored){}}
     private Map<String,String> readMap(String json){try{return new LinkedHashMap<>(mapper.readValue(json,STRING_MAP));}catch(Exception e){return new LinkedHashMap<>();}}
     private static String render(String prompt,Map<String,String> vars){Matcher m=VARIABLE.matcher(prompt);StringBuffer out=new StringBuffer();List<String> missing=new ArrayList<>();while(m.find()){String value=vars.get(m.group(1));if(value==null||value.isBlank()){missing.add(m.group(1));value=m.group();}m.appendReplacement(out,Matcher.quoteReplacement(value));}m.appendTail(out);if(!missing.isEmpty())throw new IllegalArgumentException("missing template variables: "+String.join(", ",missing));return out.toString();}
@@ -325,7 +325,7 @@ public class ProductivityController {
     private static AgentSeed findAgentSeed(String key,String name){return AGENT_SEEDS.stream()
             .filter(seed->(!blank(key)&&seed.key().equals(key))||seed.name().equals(name)).findFirst().orElse(null);}
     private static List<String> defaultToolsForRole(String role){return switch(role){
-        case "LEADER"->List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge");
+        case "LEADER"->List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge","web_search","web_fetch","github_repo_fetch","mcp__github__*");
         case "REVIEWER"->List.of("list_dir","read_file","search_knowledge","session_search");
         case "RUNNER"->List.of("list_dir","read_file","execute_command","search_knowledge");
         default->List.of("list_dir","read_file","write_file","search_knowledge");
@@ -342,7 +342,7 @@ public class ProductivityController {
             new AgentSeed("leader","Leader 任务队长",1,"把一句话目标拆成可验证计划，挑选专家并综合最终交付。",
                     "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要把同一任务重复派发；对子专家给出清晰边界、输入、交付格式和验收标准。",
                     "LEADER","LEADER_ASSIGNED","INHERIT",
-                    List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge"),
+                    List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge","web_search","web_fetch","github_repo_fetch","mcp__github__*"),
                     "输出 Markdown：目标拆解、专家分工、关键结果、风险、最终建议或交付物。"),
             new AgentSeed("requirements","需求分析专家",1,"澄清目标、边界、用户场景和验收标准。",
                     "你是需求分析专家。将模糊目标转成清晰任务说明，识别范围、约束、用户路径、边界条件和验收标准。只在必要时提出阻塞问题；否则给出可执行的需求拆解。",

@@ -354,9 +354,9 @@ public class ProductivityStore {
         BudgetPolicy policy=budget(key);UsageSummary monthly=usage(key,31);
         long remaining=policy.monthlyTokens()>0?Math.max(0,policy.monthlyTokens()-monthly.inputTokens()-monthly.outputTokens()):-1;
         String sql="SELECT r.*,s.title session_title,COALESCE((SELECT SUM((CASE WHEN u.input_tokens>0 THEN u.input_tokens ELSE u.estimated_input_tokens END)+u.output_tokens) FROM model_usage u WHERE u.run_id=r.id),0) used_tokens FROM runs r JOIN sessions s ON s.id=r.session_id " +
-                "WHERE s.project_key=? AND r.status IN ('QUEUED','RUNNING','WAITING_MODEL','WAITING_TOOL','WAITING_APPROVAL','FAILED') " +
+                "WHERE s.project_key=? AND r.status IN ('QUEUED','RUNNING','WAITING_MODEL','WAITING_TOOL','WAITING_APPROVAL','WAITING_AGENT','FAILED') " +
                 "ORDER BY CASE r.status WHEN 'RUNNING' THEN 0 WHEN 'WAITING_MODEL' THEN 1 WHEN 'WAITING_TOOL' THEN 2 " +
-                "WHEN 'WAITING_APPROVAL' THEN 3 WHEN 'QUEUED' THEN 4 ELSE 5 END,r.priority DESC,r.created_at";
+                "WHEN 'WAITING_APPROVAL' THEN 3 WHEN 'WAITING_AGENT' THEN 4 WHEN 'QUEUED' THEN 5 ELSE 6 END,r.priority DESC,r.created_at";
         try(Connection c=open();PreparedStatement ps=c.prepareStatement(sql)){
             ps.setString(1,key);try(ResultSet rs=ps.executeQuery()){while(rs.next()){
                 RunRecord run=run(rs);values.add(new QueueItem(run,rs.getString("session_title"),

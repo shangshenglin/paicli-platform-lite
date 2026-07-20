@@ -175,6 +175,13 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .session-plan-panel { margin: 0 0 14px; padding: 14px; border: 1px solid #3c5d4f; border-radius: 10px; background: #111a17; }
 .session-plan-list { display: grid; gap: 8px; margin-top: 10px; }
 .session-plan-item { flex-wrap: wrap; background: #151d1a; }
+.plan-progress { width: 100%; height: 6px; margin: 8px 0 7px; overflow: hidden; border-radius: 99px; background: #26312d; }
+.plan-progress span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.plan-step-strip { display: flex; flex-wrap: wrap; gap: 5px; }
+.plan-step { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
+.plan-step.completed, .plan-step.skipped { border-color: #315945; color: var(--green); }
+.plan-step.running, .plan-step.ready { border-color: #786338; color: var(--yellow); }
+.plan-step.failed { border-color: #674047; color: var(--red); }
 .collaboration-task-list { display: grid; gap: 9px; }
 .collaboration-task { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #171b21; }
 .collaboration-task-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -300,10 +307,16 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .workbench-dialog { width: min(920px, calc(100% - 28px)); }
 .workbench-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .workbench-search input { margin: 0; }
+.workbench-search-section { margin-top: 12px; }
+.workbench-collapse { border: 1px solid var(--line); border-radius: 10px; background: #14181f; }
+.workbench-collapse summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; font-weight: 650; list-style-position: inside; }
+.workbench-collapse summary small { color: var(--muted); font-weight: 400; }
+.workbench-collapse summary button { justify-self: end; }
+.workbench-collapse .managed-list { padding: 0 10px 10px; border-top: 1px solid var(--line); }
 .portability-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .portability-actions label { color: var(--muted); font-size: 12px; }
 .portability-actions .file-action { color: var(--text); cursor: pointer; }
-.productivity-overview { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.productivity-overview { border-color: rgba(105, 213, 165, 0.45); }
 .usage-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .usage-history { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: #14181f; }
 .usage-history summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; cursor: pointer; font-weight: 650; list-style-position: inside; }
@@ -314,7 +327,7 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .usage-row strong, .usage-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-row small { color: var(--muted); text-align: right; }
 .evaluation-dialog { width: min(1180px, calc(100% - 28px)); height: min(790px, calc(100vh - 32px)); max-height: calc(100vh - 32px); overflow: hidden; }
-.evaluation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 14px; padding: 13px 14px; border: 1px solid color-mix(in srgb, #6c8cff 45%, var(--line)); border-radius: 12px; background: #171b25; }
+.evaluation-toolbar { border: 1px solid rgba(108, 140, 255, 0.45); }
 .evaluation-toolbar p { margin: 3px 0 0; }
 .evaluation-layout { min-height: 0; height: calc(100% - 112px); display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(340px, .88fr); gap: 12px; margin-top: 12px; }
 .evaluation-pane { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #13171e; }

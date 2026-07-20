@@ -18,10 +18,10 @@ public class ToolRouter {
     private final SandboxDriver sandboxDriver;
     private final LocalArtifactStore artifactStore;
     private final List<ServerToolProvider> providers;
-    private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("write_file", "execute_command");
+    private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("execute_command");
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
             "list_dir", "read_file", "read_artifact", "load_skill", "read_skill_resource",
-            "search_knowledge", "web_search", "web_fetch", "session_search",
+            "search_knowledge", "web_search", "web_fetch", "github_repo_fetch", "session_search",
             "get_agent_result", "list_agents", "list_agent_profiles");
 
     @Autowired
@@ -68,7 +68,7 @@ public class ToolRouter {
             }
         }
         if (request.name() != null && (request.name().startsWith("mcp__")
-                || Set.of("load_skill", "read_skill_resource", "search_knowledge", "web_search", "web_fetch",
+                || Set.of("load_skill", "read_skill_resource", "search_knowledge", "web_search", "web_fetch", "github_repo_fetch",
                 "session_search", "spawn_agent", "get_agent_result", "list_agents",
                 "list_agent_profiles", "cancel_agent")
                 .contains(request.name()))) {

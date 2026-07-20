@@ -272,6 +272,25 @@ class SqliteRuntimeStoreTest {
                 .extracting("runId").isEqualTo(parent.id());
         assertThat(store.delegationDepth(child.childRunId())).isEqualTo(1);
         assertThat(store.delegationCountForTree(child.childRunId())).isEqualTo(1);
+        assertThat(store.workspaceOwnerRunId(child.childRunId())).isEqualTo(parent.id());
+    }
+
+    @Test
+    void resumesLeaderWhenAwaitedDelegatedAgentBecomesTerminal() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("parent", "project-a");
+        var parent = store.createRun(session.id(), "delegate");
+        var tool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-key");
+        var child = store.createOrGetDelegation(parent.id(), tool.id(), "expert", "implement");
+
+        assertThat(store.waitForAgent(parent.id())).isTrue();
+        assertThat(store.findRun(parent.id()).orElseThrow().status())
+                .isEqualTo(com.paicli.platform.common.RunStatus.WAITING_AGENT);
+
+        store.completeRun(child.childRunId());
+        assertThat(store.requeueWaitingParentRuns(child.childRunId())).isEqualTo(1);
+        assertThat(store.findRun(parent.id()).orElseThrow().status())
+                .isEqualTo(com.paicli.platform.common.RunStatus.QUEUED);
     }
 
     @Test

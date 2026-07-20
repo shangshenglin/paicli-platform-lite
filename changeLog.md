@@ -24,6 +24,30 @@
 
 ## 2026-07-19
 
+### 效率工作台检索与 Run 队列布局调整
+
+- 变更：将效率工作台的“全局检索”移动到工作台顶部，位于当前项目提示之后，便于先跨 Session、消息、Memory、知识和 Artifact 检索。
+- 变更：将效率工作台的 Run 队列改为默认收缩的折叠区，标题行展示当前队列数量并保留刷新按钮；对运行中、等待模型、等待工具和等待审批的非终态 Run 增加“终止”动作，可主动变为 `CANCELED` 终态后再按需重新排队。
+- 思路：Memory 管理仍作为长期记忆管理区保留在原模块内；全局检索是跨数据源入口，更适合作为工作台第一操作区。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；未启动浏览器做视觉检查。
+
+### GitHub 抓取与 MCP 配置优化
+
+- 变更：新增只读工具 `github_repo_fetch`，在联网开启时可直接读取 GitHub 仓库元数据、README 和顶层文件树，避免依赖 `github.com` HTML 页面抓取。
+- 变更：`web_fetch` 遇到 GitHub 仓库首页时自动转为 GitHub API 摘要，遇到 `github.com/.../blob/...` 文件页时优先转换为 `raw.githubusercontent.com`；网页超时错误会提示使用搜索结果、raw URL 或 `github_repo_fetch`。
+- 变更：能力管理新增“GitHub 快速配置”按钮，保存远程 Streamable HTTP MCP Server `https://api.githubcopilot.com/mcp/` 与 `Authorization: env:GITHUB_MCP_TOKEN`；专家工具白名单支持 `mcp__github__*` 前缀通配。
+- 变更：上下文组装会过滤缺少完整 tool 响应的历史 assistant `tool_calls` 片段，避免取消或异常中断后的坏历史在下一轮请求中触发 OpenAI-compatible `insufficient tool messages following tool_calls message` 400。
+- 思路：SearXNG 继续负责发现网页，GitHub 仓库内容读取优先走结构化 API 或 GitHub MCP，普通 `web_fetch` 只作为兜底。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；运行 `mvn -pl paicli-server -am -DskipTests compile` 通过，覆盖 GitHub 工具、MCP 通配和不完整 tool_calls 历史过滤。
+
+### 对话内 Plan 自动触发与进度可视化
+
+- 变更：聊天输入区新增“按计划执行”按钮，可将当前输入生成持久化 Plan、立即启动并调度执行。
+- 变更：普通发送会对“创建计划/按计划执行/指定计划/plan”等显式计划意图进入 Plan 工作流；复杂但未明确提及 Plan 的任务交给服务端自动 Leader 编排，避免绕过专家协作链路。
+- 变更：当前 Session 的关联 Plan 面板在对话窗口顶部展示步骤进度条、前 8 个步骤状态标签、当前步骤摘要和调度/详情/工作台动作；活跃 Plan 会定时刷新进度。
+- 思路：Plan 作为复杂任务编排和恢复边界，普通聊天保持轻量；只有用户明确意图或复杂度明显时才自动升级为持久化 Plan。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；运行 `mvn -pl paicli-server -am -DskipTests compile` 通过。
+
 ### Multica 方向智能体专家 Profile 实验
 
 - 变更：新建 `codex/agent-profile-multica` 独立实验分支，基于本地 `master` 最新提交开发，不依赖远端未推送状态。
@@ -43,7 +67,7 @@
 - 变更：专家模板新增 `template_key`/`template_version` 元数据；新增内置模板列表、恢复默认模板和复制专家 API；Console 专家列表支持复制为新专家、恢复内置模板版本，并展示模板版本。
 - 变更：角色默认工具与审批策略落到创建保存逻辑：Leader 默认获得协作派发工具，Reviewer 默认只读审批和只读工具，Runner 默认包含 `execute_command`，非 Leader 保存时会移除协作派发工具；专家工具/Skill 选择器升级为搜索标签式添加。
 - 变更：新增 `/v1/sessions/{sessionId}/plans`，按 Session、Session Run 和 Plan Step 绑定的 Run 查找关联 Plan；Console 普通消息区顶部展示关联 Plan 的目标、状态、步骤进度、当前步骤和工作台/详情/调度动作。
-- 变更：移除效率工作台中的“智能体专家”重复列表和“新建专家”入口，专家新建、编辑、复制、恢复默认模板统一留在首页左侧“专家创建”模块；普通对话只显示关联 Plan，不会因此自动进入专家协作模式。
+- 变更：移除效率工作台中的“智能体专家”重复列表和“新建专家”入口，专家新建、编辑、复制、恢复默认模板统一留在首页左侧“专家创建”模块；普通对话会按复杂度自动决定是否进入专家协作模式。
 - 变更：专家协作首页模式隐藏底部普通聊天发送框，只保留上方协作启动表单；切回普通对话或进入具体 Session 后自动恢复底部输入区。
 - 思路：先把 Multica/WorkBuddy 式多专家协作所需的“专家目录”和 Leader 最小协作闭环做成可持久化、可审计、可恢复的基础能力；随后把“模型建议、后端约束”的调度策略落地，让 Leader 负责判断和拆分，后端负责数量、范围、递归和权限边界。
 - 验证：运行 `node --check paicli-server/src/main/resources/static/app.js`；运行 `git diff --check`，仅有 Windows 换行提示；运行 `mvn -pl paicli-server -am "-Dtest=WebSecurityIntegrationTest,PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，29 个测试通过，覆盖 Console 静态入口、Plan 执行闭环、协作策略持久化、迁移和 Session 删除级联；运行 `mvn -pl paicli-server -am -DskipTests package` 打包通过；尝试以 8081 local sandbox 启动，前台日志显示 Tomcat 已启动，当前工具环境未能让后台子进程持续保活，因此未完成 HTTP 冒烟。
@@ -194,3 +218,16 @@
 4. 评测要使用真实运行链路。只有复用真实 Session/Run/ToolCall/Approval/Event，才能发现模型升级、Prompt 修改或工具行为变化带来的真实退化。
 5. 单机 Lite 也要有生产意识。SQLite、Docker、文件系统、API Key、备份恢复、CI、指标和安全响应头都按可交付标准处理，只是不引入分布式复杂度。
 6. Console 交互要随数据增长保持克制。列表、报告、评测和用量明细会越来越多，应使用折叠、滚动、分栏和固定指标区，避免能力堆叠成不可维护的长页面。
+## 对话内自动编排 Leader 与专家
+- 变更：修复专家协作等待链路。Leader 查询到子 Run 仍在运行或等待审批时会进入 `WAITING_AGENT`，子 Run 结束、失败或被拒绝后自动重新排队 Leader，避免轮询消耗 Run 步骤预算；Console 和工作台同步展示该状态，并补充持久化恢复测试。
+- 变更：补齐 local executor 的受限 `write_file` 能力：仅能写入当前 Run 工作区、自动创建目录、以 UTF-8 覆盖写入并限制单次 1 MiB；仍由既有持久化 Approval 边界保护。
+- 变更：协作会话的审批卡片改为汇集 Leader 与直接委派子 Run 的待审批项；Leader 处于 `WAITING_AGENT` 时也会刷新，避免子专家审批在前端被隐藏。
+- 变更：子 Run 的 local/Docker 沙箱与模型运行上下文统一解析到委派树根 Leader 的工作区，子专家可读取并共同维护 Leader 产物，同时仍保留各自独立的 Run、工具调用、审批和审计记录；工作区内 `write_file` 与 `spawn_agent` 不再逐次审批，`execute_command`、MCP 和取消子任务仍需审批。
+- 思路：把“等待异步子任务”建模为持久化状态，而不是继续让模型轮询；保留子任务的独立审批边界和原始工具参数，满足可审计、可恢复要求。
+- 验证：`git diff --check`、`node --check paicli-server/src/main/resources/static/app.js`；`mvn -pl paicli-server -am "-Dtest=RunProcessorTest,SqliteRuntimeStoreTest,LocalSandboxDriverTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过（27 tests）。
+
+- 变更：普通对话不再要求用户先切换“专家协作”模式；服务端会按任务长度、动作数量、步骤连接词和风险词进行保守复杂度评估，复杂任务自动选择启用的 Leader Profile。
+- 变更：自动协作 Run 会持久化协作策略，Leader 按专家目录、角色、工具/Skill 和策略预算调用 `spawn_agent`，简单问题仍走原来的单 Agent 路径。
+- 变更：自动协作会创建当前 Session 可见的根执行计划，并将 Leader Run 绑定为计划进度来源；专家细分任务和结果继续在协作任务看板中实时展示。
+- 思路：把“是否需要组队”的判断放到后端统一入口，避免只有首页按钮能触发；把 Plan 作为 Leader 协作的可恢复进度外壳，实际子任务仍由 Leader 依据上下文动态拆分。
+- 验证：待完成编译和前端语法检查。

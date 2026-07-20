@@ -9,6 +9,7 @@ import com.paicli.platform.server.sse.SseEventService;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
+import com.paicli.platform.server.plan.PlanService;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
 import jakarta.validation.Valid;
@@ -40,10 +41,11 @@ public class RunController {
     private final ProductivityStore productivity;
     private final CompletionNotificationService notifications;
     private final ObjectMapper mapper;
+    private final PlanService plans;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
-                         CompletionNotificationService notifications, ObjectMapper mapper) {
+                         CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -51,6 +53,7 @@ public class RunController {
         this.productivity = productivity;
         this.notifications = notifications;
         this.mapper = mapper;
+        this.plans = plans;
     }
 
     @PostMapping("/sessions/{sessionId}/runs")
@@ -68,16 +71,90 @@ public class RunController {
                 ? agent.modelProfileId() : request.modelProfileId();
         String profileId = productivity.resolveModelProfile(session.projectKey(), requestedModel)
                 .map(ProductivityStore.ModelProfile::id).orElse(null);
-        boolean collaboration = request.collaboration() != null && Boolean.TRUE.equals(request.collaboration().enabled());
+        boolean requestedCollaboration = request.collaboration() != null
+                && Boolean.TRUE.equals(request.collaboration().enabled());
+        boolean automaticCollaboration = !requestedCollaboration && blank(request.agentProfileId())
+                && shouldAutomaticallyOrchestrate(request.input());
+        if (automaticCollaboration) {
+            agent = productivity.agentProfiles(session.projectKey()).stream()
+                    .filter(value -> value.enabled() && "LEADER".equalsIgnoreCase(value.collaborationRole()))
+                    .findFirst().orElse(null);
+        }
+        if (automaticCollaboration && agent != null && blank(request.modelProfileId())) {
+            profileId = productivity.resolveModelProfile(session.projectKey(), agent.modelProfileId())
+                    .map(ProductivityStore.ModelProfile::id).orElse(null);
+        }
+        boolean collaboration = requestedCollaboration || (automaticCollaboration && agent != null);
         if (collaboration && (agent == null || !"LEADER".equalsIgnoreCase(agent.collaborationRole()))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "collaboration runs require a LEADER agent profile");
         }
-        RunRecord run = store.createRun(sessionId, request.input(), request.thinkingMode(), request.reasoningEffort(),
+        String runInput = automaticCollaboration && agent != null
+                ? automaticLeaderInput(request.input()) : request.input();
+        RunRecord run = store.createRun(sessionId, runInput, request.thinkingMode(), request.reasoningEffort(),
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),
                 request.priority() == null ? 0 : request.priority(), 0);
-        if (collaboration) saveCollaborationPolicy(run.id(), session.projectKey(), request.collaboration());
+        if (requestedCollaboration) {
+            saveCollaborationPolicy(run.id(), session.projectKey(), request.collaboration());
+        } else if (automaticCollaboration && agent != null) {
+            ApiDtos.CollaborationOptions options = automaticPolicy(request.input());
+            saveCollaborationPolicy(run.id(), session.projectKey(), options);
+            plans.createAutomaticCollaborationPlan(sessionId, run.id(), session.projectKey(), request.input());
+        }
         return run;
+    }
+
+    private static ApiDtos.CollaborationOptions automaticPolicy(String input) {
+        int complexity = complexityScore(input);
+        String level = complexity >= 5 ? "COMPLEX" : "MEDIUM";
+        int maxExperts = complexity >= 5 ? 5 : 3;
+        return new ApiDtos.CollaborationOptions(true, level, highRisk(input) ? "HIGH" : "MEDIUM",
+                List.of(), maxExperts, 1, maxExperts, 0L, 0D, false,
+                highRisk(input), containsAny(input, "测试", "验证", "test", "verify"));
+    }
+
+    private static String automaticLeaderInput(String input) {
+        return """
+                这是一次由普通对话自动触发的协作任务。请作为 Leader 自主完成以下流程：
+                1. 先在内部形成清晰的执行计划和验收标准，判断任务是否需要拆分。
+                2. 调用 list_agent_profiles 查看当前策略允许的专家，依据任务能力匹配选择专家。
+                3. 对相互独立的工作并行调用 spawn_agent；每个子任务必须包含边界、输入、交付格式和验收标准。
+                4. 使用 list_agents 和 get_agent_result 跟踪子任务；必要时补充验证或审查。
+                5. 最终汇总计划、执行进度、专家结果、风险和未完成项，用中文交付。
+
+                用户目标：
+                %s
+                """.formatted(input);
+    }
+
+    private static boolean shouldAutomaticallyOrchestrate(String input) {
+        if (input == null || input.isBlank() || input.length() < 80) return false;
+        return complexityScore(input) >= 3 && containsAny(input,
+                "并", "然后", "最后", "同时", "以及", "包含", "完整", "多步骤", "一套", "and", "then")
+                && !looksLikeSimpleQuestion(input);
+    }
+
+    private static int complexityScore(String input) {
+        String[] verbs = {"实现", "开发", "重构", "迁移", "优化", "调研", "分析", "测试", "验证", "部署",
+                "设计", "修复", "整理", "接入", "implement", "develop", "refactor", "test", "deploy"};
+        int hits = 0;
+        for (String verb : verbs) if (input.toLowerCase().contains(verb.toLowerCase())) hits++;
+        return hits + (input.length() >= 180 ? 2 : input.length() >= 120 ? 1 : 0);
+    }
+
+    private static boolean highRisk(String input) {
+        return containsAny(input, "生产", "数据库", "删除", "迁移", "权限", "发布", "上线", "production", "delete");
+    }
+
+    private static boolean looksLikeSimpleQuestion(String input) {
+        String value = input.trim();
+        return value.length() < 120 && containsAny(value, "是什么", "怎么做", "为什么", "能不能", "区别", "what is", "how to", "why");
+    }
+
+    private static boolean containsAny(String input, String... values) {
+        String value = input == null ? "" : input.toLowerCase();
+        for (String candidate : values) if (value.contains(candidate.toLowerCase())) return true;
+        return false;
     }
 
     @GetMapping("/runs/{runId}")

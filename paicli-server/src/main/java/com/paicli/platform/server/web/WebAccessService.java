@@ -5,9 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.WebProperties;
 import org.springframework.stereotype.Service;
 
-import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.http.HttpTimeoutException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -90,29 +90,35 @@ public class WebAccessService {
 
     public FetchResult fetch(String url) throws Exception {
         if (!enabled()) throw new IllegalStateException("web access is disabled");
-        URI current = NetworkPolicy.requirePublicHttpUrl(url);
+        GitHubRepo repo = parseGitHubRepoOrNull(url);
+        if (repo != null && parseGitHubBlob(url) == null) {
+            return new FetchResult("https://github.com/" + repo.owner() + "/" + repo.repo(),
+                    "application/json", mapper.writeValueAsString(githubRepo("", repo.owner(), repo.repo())));
+        }
+        URI current = NetworkPolicy.requirePublicHttpUrl(preferReadableUrl(url));
         for (int redirects = 0; redirects <= 3; redirects++) {
             HttpRequest request = HttpRequest.newBuilder(current).GET()
                     .timeout(Duration.ofSeconds(properties.timeoutSeconds()))
                     .header("Accept", "text/html,text/plain,application/json;q=0.9,*/*;q=0.2")
                     .header("User-Agent", "PaiCLI-Platform-Lite/0.7").build();
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            HttpResponse<byte[]> response;
+            try {
+                response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            } catch (HttpTimeoutException e) {
+                throw new IllegalStateException("web fetch timed out after " + properties.timeoutSeconds()
+                        + "s while fetching " + current + "; try web_search results, a raw URL, or github_repo_fetch");
+            }
             int status = response.statusCode();
             if (status >= 300 && status < 400) {
-                response.body().close();
                 String location = response.headers().firstValue("location")
                         .orElseThrow(() -> new IllegalStateException("redirect has no location"));
                 current = NetworkPolicy.requirePublicHttpUrl(current.resolve(location).toString());
                 continue;
             }
             if (status < 200 || status >= 300) {
-                response.body().close();
                 throw new IllegalStateException("web fetch returned HTTP " + status);
             }
-            byte[] bytes;
-            try (InputStream input = response.body()) {
-                bytes = input.readNBytes(properties.maxResponseChars() * 4 + 1);
-            }
+            byte[] bytes = response.body();
             if (bytes.length > properties.maxResponseChars() * 4) {
                 throw new IllegalStateException("web response exceeds configured size limit");
             }
@@ -129,19 +135,47 @@ public class WebAccessService {
         throw new IllegalStateException("too many redirects");
     }
 
+    public GitHubRepoResult githubRepo(String url, String ownerValue, String repoValue) throws Exception {
+        if (!enabled()) throw new IllegalStateException("web access is disabled");
+        GitHubRepo repo = parseGitHubRepo(url, ownerValue, repoValue);
+        JsonNode metadata = readJson(githubApi("/repos/" + repo.owner() + "/" + repo.repo()));
+        String defaultBranch = metadata.path("default_branch").asText("main");
+        String readme = "";
+        String readmeUrl = "";
+        try {
+            JsonNode readmeJson = readJson(githubApi("/repos/" + repo.owner() + "/" + repo.repo() + "/readme"));
+            readmeUrl = readmeJson.path("download_url").asText("");
+            if (!readmeUrl.isBlank()) readme = fetch(readmeUrl).content();
+        } catch (Exception ignored) { }
+        List<FileEntry> files = new ArrayList<>();
+        try {
+            JsonNode tree = readJson(githubApi("/repos/" + repo.owner() + "/" + repo.repo()
+                    + "/contents?ref=" + URLEncoder.encode(defaultBranch, StandardCharsets.UTF_8)));
+            if (tree.isArray()) {
+                for (JsonNode node : tree) {
+                    if (files.size() >= 80) break;
+                    files.add(new FileEntry(node.path("name").asText(""), node.path("type").asText(""),
+                            node.path("html_url").asText("")));
+                }
+            }
+        } catch (Exception ignored) { }
+        return new GitHubRepoResult(repo.owner(), repo.repo(), metadata.path("full_name").asText(repo.owner() + "/" + repo.repo()),
+                metadata.path("description").asText(""), metadata.path("html_url").asText(""),
+                defaultBranch, metadata.path("stargazers_count").asInt(0), metadata.path("forks_count").asInt(0),
+                metadata.path("language").asText(""), metadata.path("license").path("spdx_id").asText(""),
+                metadata.path("updated_at").asText(""), readmeUrl, readme, List.copyOf(files));
+    }
+
     private byte[] sendBounded(HttpRequest request) throws Exception {
-        HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            response.body().close();
             throw new IllegalStateException("search provider returned HTTP " + response.statusCode());
         }
-        try (InputStream input = response.body()) {
-            byte[] bytes = input.readNBytes(properties.maxResponseChars() * 4 + 1);
-            if (bytes.length > properties.maxResponseChars() * 4) {
-                throw new IllegalStateException("search response exceeds configured size limit");
-            }
-            return bytes;
+        byte[] bytes = response.body();
+        if (bytes.length > properties.maxResponseChars() * 4) {
+            throw new IllegalStateException("search response exceeds configured size limit");
         }
+        return bytes;
     }
 
     private static String htmlToText(String html) {
@@ -162,6 +196,82 @@ public class WebAccessService {
         return "";
     }
 
+    private JsonNode readJson(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET()
+                .timeout(Duration.ofSeconds(properties.timeoutSeconds()))
+                .header("Accept", "application/vnd.github+json,application/json")
+                .header("User-Agent", "PaiCLI-Platform-Lite/0.7").build();
+        try {
+            return mapper.readTree(sendBounded(request));
+        } catch (HttpTimeoutException e) {
+            throw new IllegalStateException("GitHub API request timed out after " + properties.timeoutSeconds()
+                    + "s: " + url);
+        }
+    }
+
+    private static String githubApi(String path) {
+        return "https://api.github.com" + path;
+    }
+
+    private static String preferReadableUrl(String url) {
+        GitHubBlob blob = parseGitHubBlob(url);
+        if (blob != null) {
+            return "https://raw.githubusercontent.com/" + blob.owner() + "/" + blob.repo() + "/"
+                    + blob.ref() + "/" + blob.path();
+        }
+        return url;
+    }
+
+    private static GitHubRepo parseGitHubRepo(String url, String ownerValue, String repoValue) {
+        String owner = ownerValue == null ? "" : ownerValue.trim();
+        String repo = repoValue == null ? "" : repoValue.trim();
+        if (!owner.isBlank() && !repo.isBlank()) return new GitHubRepo(owner, stripGitSuffix(repo));
+        URI uri = NetworkPolicy.requirePublicHttpUrl(url);
+        if (!"github.com".equalsIgnoreCase(uri.getHost())) {
+            throw new IllegalArgumentException("github_repo_fetch only supports github.com repository URLs");
+        }
+        String[] parts = uri.getPath().split("/");
+        if (parts.length < 3 || parts[1].isBlank() || parts[2].isBlank()) {
+            throw new IllegalArgumentException("GitHub repository URL must include owner and repo");
+        }
+        return new GitHubRepo(parts[1], stripGitSuffix(parts[2]));
+    }
+
+    private static GitHubRepo parseGitHubRepoOrNull(String url) {
+        try {
+            URI uri = NetworkPolicy.requirePublicHttpUrl(url);
+            if (!"github.com".equalsIgnoreCase(uri.getHost())) return null;
+            String[] parts = uri.getPath().split("/");
+            if (parts.length != 3 || parts[1].isBlank() || parts[2].isBlank()) return null;
+            return new GitHubRepo(parts[1], stripGitSuffix(parts[2]));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static GitHubBlob parseGitHubBlob(String url) {
+        try {
+            URI uri = NetworkPolicy.requirePublicHttpUrl(url);
+            if (!"github.com".equalsIgnoreCase(uri.getHost())) return null;
+            String[] parts = uri.getPath().split("/", 6);
+            if (parts.length < 6 || !"blob".equals(parts[3]) || parts[1].isBlank() || parts[2].isBlank()
+                    || parts[4].isBlank() || parts[5].isBlank()) return null;
+            return new GitHubBlob(parts[1], stripGitSuffix(parts[2]), parts[4], parts[5]);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String stripGitSuffix(String value) {
+        return value.endsWith(".git") ? value.substring(0, value.length() - 4) : value;
+    }
+
     public record SearchResult(int rank, String title, String url, String snippet, String citation) { }
     public record FetchResult(String url, String contentType, String content) { }
+    public record FileEntry(String name, String type, String url) { }
+    public record GitHubRepoResult(String owner, String repo, String fullName, String description, String url,
+                                   String defaultBranch, int stars, int forks, String language, String license,
+                                   String updatedAt, String readmeUrl, String readme, List<FileEntry> files) { }
+    private record GitHubRepo(String owner, String repo) { }
+    private record GitHubBlob(String owner, String repo, String ref, String path) { }
 }

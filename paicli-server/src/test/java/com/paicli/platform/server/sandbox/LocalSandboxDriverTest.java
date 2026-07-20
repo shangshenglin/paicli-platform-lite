@@ -33,9 +33,24 @@ class LocalSandboxDriverTest {
         assertThat(denied.error()).contains("escapes");
     }
 
+    @Test
+    void writesOnlyInsideRunWorkspace() throws Exception {
+        LocalSandboxDriver driver = driver();
+
+        var written = driver.execute(new ToolRequest("tool_1", "run_1", "write_file",
+                Map.of("path", "game/index.html", "content", "<h1>snake</h1>"), "key_1"));
+        var denied = driver.execute(new ToolRequest("tool_2", "run_1", "write_file",
+                Map.of("path", "../../outside.txt", "content", "no"), "key_2"));
+
+        assertThat(written.success()).isTrue();
+        assertThat(tempDir.resolve("workspaces/run_1/game/index.html"))
+                .hasContent("<h1>snake</h1>");
+        assertThat(denied.success()).isFalse();
+        assertThat(denied.error()).contains("escapes");
+    }
+
     private LocalSandboxDriver driver() throws Exception {
         return new LocalSandboxDriver(new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local"));
     }
 }
-

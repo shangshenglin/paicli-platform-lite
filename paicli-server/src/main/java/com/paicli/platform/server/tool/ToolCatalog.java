@@ -52,12 +52,12 @@ public class ToolCatalog {
                                 "limit", Map.of("type", "integer", "minimum", 1, "maximum", 32000)),
                         "required", List.of("artifact_id")))
         ));
-        if (!allow.isEmpty()) definitions.removeIf(definition -> !allow.contains(definition.name()));
+        if (!allow.isEmpty()) definitions.removeIf(definition -> !allowed(allow, definition.name()));
         Set<String> names = new HashSet<>();
         definitions.forEach(definition -> names.add(definition.name()));
         for (ServerToolProvider provider : providers) {
             for (ModelToolDefinition definition : provider.definitions()) {
-                if (!allow.isEmpty() && !allow.contains(definition.name())) continue;
+                if (!allow.isEmpty() && !allowed(allow, definition.name())) continue;
                 if (!names.add(definition.name())) {
                     throw new IllegalStateException("Duplicate tool definition: " + definition.name());
                 }
@@ -69,6 +69,14 @@ public class ToolCatalog {
 
     private static ModelToolDefinition tool(String name, String description, Map<String, Object> parameters) {
         return new ModelToolDefinition(name, description, parameters);
+    }
+
+    private static boolean allowed(Set<String> allowedNames, String name) {
+        if (allowedNames.contains(name)) return true;
+        return allowedNames.stream()
+                .filter(value -> value != null && value.endsWith("*") && value.length() > 1)
+                .map(value -> value.substring(0, value.length() - 1))
+                .anyMatch(name::startsWith);
     }
 
     private static Map<String, Object> stringProperty() {

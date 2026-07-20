@@ -92,7 +92,8 @@ public class ContextManager {
                 ? modelProperties.maxOutputTokens() : Math.min(requestedOutputTokens, contextLimit - 1);
         String system = prompts.systemPrompt();
         String agentInstruction = agentInstruction(agentProfile);
-        String runtime = prompts.runtimeContext(platformProperties.workspaceRoot().resolve(runId));
+        String workspaceRunId = store.workspaceOwnerRunId(runId);
+        String runtime = prompts.runtimeContext(platformProperties.workspaceRoot().resolve(workspaceRunId));
         int fixedTokens = TokenEstimator.estimateText(system) + TokenEstimator.estimateText(agentInstruction)
                 + TokenEstimator.estimateText(runtime);
         var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
@@ -103,7 +104,7 @@ public class ContextManager {
         if (!agentInstruction.isBlank()) messages.add(ModelMessage.system(agentInstruction));
         messages.add(ModelMessage.user(runtime));
         String projectKey = store.findSession(sessionId).orElseThrow().projectKey();
-        String projectRules = prompts.projectRules(projectKey, runId);
+        String projectRules = prompts.projectRules(projectKey, workspaceRunId);
         if (!projectRules.isBlank()) messages.add(ModelMessage.user(projectRules));
         List<String> allowedSkills = parseStringList(agentProfile == null ? "" : agentProfile.skillNamesJson());
         String skillIndex = skillService.indexPrompt(projectKey, allowedSkills);
@@ -117,9 +118,9 @@ public class ContextManager {
                 .sorted(Comparator.comparingLong(MessageRecord::sequence))
                 .forEach(message -> messages.add(ModelMessage.user(
                         "<conversation_summary>\n" + message.content() + "\n</conversation_summary>")));
-        active.stream().filter(message -> !"summary".equals(message.role()))
-                .sorted(Comparator.comparingLong(MessageRecord::sequence))
-                .map(message -> toModelMessage(message, runId)).forEach(messages::add);
+        sanitizedConversation(active.stream().filter(message -> !"summary".equals(message.role()))
+                .sorted(Comparator.comparingLong(MessageRecord::sequence)).toList())
+                .stream().map(message -> toModelMessage(message, runId)).forEach(messages::add);
 
         int estimated = TokenEstimator.estimateMessages(messages);
         int hardInputLimit = contextLimit - outputLimit;
@@ -218,6 +219,46 @@ public class ContextManager {
                 .filter(message -> "user".equals(message.role()) && runId.equals(message.runId()))
                 .map(MessageRecord::content).filter(content -> content != null && !content.isBlank())
                 .reduce((first, second) -> second).orElse("");
+    }
+
+    private List<MessageRecord> sanitizedConversation(List<MessageRecord> records) {
+        List<MessageRecord> values = new ArrayList<>();
+        for (int index = 0; index < records.size(); index++) {
+            MessageRecord message = records.get(index);
+            List<ModelResponse.ToolPlan> calls = toolCalls(message);
+            if ("assistant".equals(message.role()) && !calls.isEmpty()) {
+                Set<String> required = calls.stream().map(ModelResponse.ToolPlan::callId)
+                        .filter(id -> id != null && !id.isBlank()).collect(java.util.stream.Collectors.toSet());
+                Set<String> answered = new java.util.LinkedHashSet<>();
+                int cursor = index + 1;
+                while (cursor < records.size() && "tool".equals(records.get(cursor).role())) {
+                    String toolCallId = records.get(cursor).toolCallId();
+                    if (required.contains(toolCallId)) answered.add(toolCallId);
+                    cursor++;
+                }
+                if (answered.containsAll(required)) {
+                    values.add(message);
+                    for (int toolIndex = index + 1; toolIndex < cursor; toolIndex++) {
+                        MessageRecord tool = records.get(toolIndex);
+                        if (required.contains(tool.toolCallId())) values.add(tool);
+                    }
+                }
+                index = cursor - 1;
+                continue;
+            }
+            if ("tool".equals(message.role())) continue;
+            values.add(message);
+        }
+        return values;
+    }
+
+    private List<ModelResponse.ToolPlan> toolCalls(MessageRecord message) {
+        if (message.toolCallsJson() == null || message.toolCallsJson().isBlank()) return List.of();
+        try {
+            return mapper.readValue(message.toolCallsJson(), TOOL_CALLS);
+        } catch (Exception e) {
+            throw new IllegalStateException("Invalid persisted tool_calls_json for " + message.id(), e);
+        }
     }
 
     private static String escapeAttribute(String value) {

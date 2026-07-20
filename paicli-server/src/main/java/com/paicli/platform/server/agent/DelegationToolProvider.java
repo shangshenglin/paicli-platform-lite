@@ -70,9 +70,7 @@ public class DelegationToolProvider implements ServerToolProvider {
                 || "cancel_agent".equals(toolName);
     }
 
-    @Override public boolean requiresApproval(String toolName) {
-        return "spawn_agent".equals(toolName) || "cancel_agent".equals(toolName);
-    }
+    @Override public boolean requiresApproval(String toolName) { return "cancel_agent".equals(toolName); }
 
     @Override
     public ToolResult execute(ToolRequest request) {

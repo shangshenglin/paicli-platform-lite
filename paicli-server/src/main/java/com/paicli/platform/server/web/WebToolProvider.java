@@ -33,14 +33,20 @@ public class WebToolProvider implements ServerToolProvider {
                                 "required", List.of("query"))),
                 new ModelToolDefinition("web_fetch", "Fetch readable text from a public HTTP(S) URL; private network targets are blocked",
                         Map.of("type", "object", "properties", Map.of("url", Map.of("type", "string")),
-                                "required", List.of("url")))
+                                "required", List.of("url"))),
+                new ModelToolDefinition("github_repo_fetch", "Fetch GitHub repository metadata, README, and top-level file tree without scraping the HTML page",
+                        Map.of("type", "object", "properties", Map.of(
+                                        "url", Map.of("type", "string", "description", "GitHub repository URL, for example https://github.com/owner/repo"),
+                                        "owner", Map.of("type", "string"),
+                                        "repo", Map.of("type", "string"))))
         );
     }
 
     @Override
 
     public boolean supports(String toolName) {
-        return web.enabled() && ("web_search".equals(toolName) || "web_fetch".equals(toolName));
+        return web.enabled() && ("web_search".equals(toolName) || "web_fetch".equals(toolName)
+                || "github_repo_fetch".equals(toolName));
     }
 
     @Override
@@ -51,6 +57,10 @@ public class WebToolProvider implements ServerToolProvider {
                 case "web_search" -> web.search(String.valueOf(request.arguments().getOrDefault("query", "")),
                         integer(request.arguments().get("top_k"), 5));
                 case "web_fetch" -> web.fetch(String.valueOf(request.arguments().getOrDefault("url", "")));
+                case "github_repo_fetch" -> web.githubRepo(
+                        String.valueOf(request.arguments().getOrDefault("url", "")),
+                        String.valueOf(request.arguments().getOrDefault("owner", "")),
+                        String.valueOf(request.arguments().getOrDefault("repo", "")));
                 default -> throw new IllegalArgumentException("unsupported web tool");
             };
             return ToolResult.success(request.toolCallId(), mapper.writeValueAsString(output), elapsed(start));

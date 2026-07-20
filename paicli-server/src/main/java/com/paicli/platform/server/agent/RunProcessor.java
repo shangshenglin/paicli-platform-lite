@@ -169,6 +169,7 @@ public class RunProcessor {
                     catch (Exception e) { store.appendEvent(run.id(), "memory.enqueue_failed", json(Map.of(
                             "error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()))); }
                 }
+                store.requeueWaitingParentRuns(run.id());
                 toolRouter.release(run.id());
                 if (metrics != null) metrics.completed(System.nanoTime() - processStarted);
                 return;
@@ -210,6 +211,7 @@ public class RunProcessor {
                 return;
             }
             store.failRun(run.id(), e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            store.requeueWaitingParentRuns(run.id());
             notify(run, "FAILED", e.getMessage());
             if (metrics != null) metrics.failed(System.nanoTime() - processStarted);
             auditService.record("run.failed", run.id(), null, Map.of("error",
@@ -234,6 +236,7 @@ public class RunProcessor {
             if (status == ApprovalStatus.DENIED) {
                 store.failTool(call.id(), "Tool call denied by user");
                 store.failRun(run.id(), "Tool call denied by user");
+                store.requeueWaitingParentRuns(run.id());
                 notify(run, "FAILED", "工具调用被拒绝");
                 toolRouter.release(run.id());
                 return;
@@ -278,6 +281,10 @@ public class RunProcessor {
                     "artifactId", materialized.artifact() == null ? "" : materialized.artifact().id(),
                     "content", materialized.modelContent())), run.currentStep());
             if (!committed) return;
+            if (isActiveAgentResult(call, materialized.modelContent())) {
+                store.waitForAgent(run.id());
+                return;
+            }
             auditService.record("tool.completed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "result", result.content()));
         } else {
@@ -303,6 +310,16 @@ public class RunProcessor {
             return mapper.writeValueAsString(value);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to encode event", e);
+        }
+    }
+
+    private boolean isActiveAgentResult(ToolCallRecord call, String content) {
+        if (!"get_agent_result".equals(call.toolName())) return false;
+        try {
+            Object status = mapper.readValue(content, MAP_TYPE).get("status");
+            return status != null && !RunStatus.valueOf(String.valueOf(status)).terminal();
+        } catch (Exception ignored) {
+            return false;
         }
     }
 

@@ -1987,6 +1987,72 @@ public class SqliteRuntimeStore {
         return updateRun(runId, status, null, null, false);
     }
 
+    /** Delegated agents share the root leader's workspace while retaining separate Run state. */
+    public String workspaceOwnerRunId(String runId) {
+        try (Connection connection = open()) {
+            return rootRunId(connection, runId);
+        } catch (SQLException e) {
+            throw failure("resolve delegated workspace", e);
+        }
+    }
+
+    /**
+     * Parks a leader after it has observed that a delegated child is still active.
+     * The child terminal transition requeues the leader through
+     * {@link #requeueWaitingParentRuns(String)}.
+     */
+    public boolean waitForAgent(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status=?")) {
+            ps.setString(1, RunStatus.WAITING_AGENT.name());
+            ps.setString(2, runId);
+            ps.setString(3, RunStatus.QUEUED.name());
+            boolean updated = ps.executeUpdate() == 1;
+            if (updated) insertEvent(connection, runId, "run.waiting_agent", "{\"status\":\"WAITING_AGENT\"}");
+            return updated;
+        } catch (SQLException e) {
+            throw failure("wait for delegated agent", e);
+        }
+    }
+
+    /** Requeues direct leaders that were parked awaiting the supplied child run. */
+    public int requeueWaitingParentRuns(String childRunId) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                List<String> parents = new ArrayList<>();
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT parent_run_id FROM run_delegations WHERE child_run_id=?")) {
+                    ps.setString(1, childRunId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) parents.add(rs.getString(1));
+                    }
+                }
+                int resumed = 0;
+                for (String parent : parents) {
+                    try (PreparedStatement ps = connection.prepareStatement(
+                            "UPDATE runs SET status=?,queued_at=?,version=version+1 WHERE id=? AND status=?")) {
+                        ps.setString(1, RunStatus.QUEUED.name());
+                        ps.setString(2, Instant.now().toString());
+                        ps.setString(3, parent);
+                        ps.setString(4, RunStatus.WAITING_AGENT.name());
+                        if (ps.executeUpdate() == 1) {
+                            insertEvent(connection, parent, "run.queued", "{\"reason\":\"delegated_agent_terminal\"}");
+                            resumed++;
+                        }
+                    }
+                }
+                connection.commit();
+                return resumed;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("resume delegated parent runs", e);
+        }
+    }
+
     public boolean completeRun(String runId) {
         return updateRun(runId, RunStatus.COMPLETED, null, null, true);
     }
@@ -2592,13 +2658,14 @@ public class SqliteRuntimeStore {
 
     private static void rejectActiveRuns(Connection connection, String sessionId) throws SQLException {
         try (PreparedStatement active = connection.prepareStatement(
-                "SELECT COUNT(*) FROM runs WHERE session_id=? AND status IN (?,?,?,?,?)")) {
+                "SELECT COUNT(*) FROM runs WHERE session_id=? AND status IN (?,?,?,?,?,?)")) {
             active.setString(1, sessionId);
             active.setString(2, RunStatus.QUEUED.name());
             active.setString(3, RunStatus.RUNNING.name());
             active.setString(4, RunStatus.WAITING_MODEL.name());
             active.setString(5, RunStatus.WAITING_TOOL.name());
             active.setString(6, RunStatus.WAITING_APPROVAL.name());
+            active.setString(7, RunStatus.WAITING_AGENT.name());
             try (ResultSet rs = active.executeQuery()) {
                 if (rs.next() && rs.getInt(1) > 0) {
                     throw new IllegalStateException("Cannot delete a session with an active run");

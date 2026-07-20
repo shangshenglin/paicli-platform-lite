@@ -6,6 +6,7 @@ public enum RunStatus {
     WAITING_MODEL,
     WAITING_TOOL,
     WAITING_APPROVAL,
+    WAITING_AGENT,
     COMPLETED,
     FAILED,
     CANCELED;
@@ -14,4 +15,3 @@ public enum RunStatus {
         return this == COMPLETED || this == FAILED || this == CANCELED;
     }
 }
-
