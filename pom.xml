@@ -23,7 +23,7 @@
         <java.version>17</java.version>
         <sqlite-jdbc.version>3.46.1.0</sqlite-jdbc.version>
         <tika.version>3.3.1</tika.version>
-        <pdfbox.version>3.0.7</pdfbox.version>
+        <pdfbox.version>3.0.8</pdfbox.version>
         <!-- commons-compress 1.28.0 (from Tika 3.3.1) requires this API level. -->
         <commons-lang3.version>3.18.0</commons-lang3.version>
     </properties>
