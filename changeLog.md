@@ -24,6 +24,15 @@
 
 ## 2026-07-23
 
+### Plan Validator Gate 第一阶段落地
+
+- 变更：新增 `PlanValidator`，Run `COMPLETED` 后不再直接完成 Plan Step，而是先进入 `VALIDATING`，按 done criteria 生成 `actual`、`evidence` 和 `error`。
+- 变更：Plan Store 新增 `VALIDATING` 与 `VALIDATION_FAILED` 状态流转；验证通过才完成 Step、Async Job 和 Plan，验证失败会把 Validation Check 标记为 `FAILED` 并让 Plan 失败。
+- 变更：`retryStep` 会清理旧 run/result/failure 和 Validation Check 结果，并在失败 Plan 中重新激活可重试步骤，避免旧验证失败证据污染下一次执行。
+- 变更：当前内置 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>` 和普通文字证据匹配，为后续命令/API/截图/文件断言和 Reviewer Agent 证据包预留验证接口。
+- 思路：把“执行链路成功结束”和“任务验收标准满足”拆开，避免 Plan 只因为 Run 终态成功就误判完成，同时继续复用现有 SQLite Validation Check 表，不引入新的迁移风险。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，7 个 Plan 测试通过，覆盖验证通过、验证失败、Async Job 与 DAG 批次。
+
 ### Kafka / Redis / MinIO 改造接口预留
 
 - 变更：新增 Run Dispatch Queue、Run Execution Registry 和 Object Storage Port 三类端口，分别为后续 Kafka 队列、Redis 分布式执行注册/锁和 MinIO 对象存储适配器预留接口；当前默认实现仍是 SQLite claim、本进程 in-flight 集合和本地文件。

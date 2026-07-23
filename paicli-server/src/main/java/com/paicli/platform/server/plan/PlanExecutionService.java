@@ -17,10 +17,12 @@ public class PlanExecutionService {
 
     private final PlanStore plans;
     private final SqliteRuntimeStore runtime;
+    private final PlanValidator validator;
 
-    public PlanExecutionService(PlanStore plans, SqliteRuntimeStore runtime) {
+    public PlanExecutionService(PlanStore plans, SqliteRuntimeStore runtime, PlanValidator validator) {
         this.plans = plans;
         this.runtime = runtime;
+        this.validator = validator;
     }
 
     public DispatchReport dispatchAll(int planLimit, int stepLimit) {
@@ -71,7 +73,7 @@ public class PlanExecutionService {
         int changed = 0;
         for (PlanStore.PlanStep step : plans.steps(planId)) {
             if (step.runId() == null || step.runId().isBlank()) continue;
-            if (!List.of("RUNNING", "WAITING_APPROVAL", "WAITING_JOB").contains(step.status())) continue;
+            if (!List.of("RUNNING", "WAITING_APPROVAL", "WAITING_JOB", "VALIDATING").contains(step.status())) continue;
             RunRecord run = runtime.findRun(step.runId()).orElse(null);
             if (run == null) continue;
             if (run.status() == RunStatus.WAITING_APPROVAL && !"WAITING_APPROVAL".equals(step.status())) {
@@ -87,8 +89,17 @@ public class PlanExecutionService {
             }
             if (!run.status().terminal()) continue;
             if (run.status() == RunStatus.COMPLETED) {
-                plans.completeStep(step.id(), "Run " + run.id() + " completed");
-                completeJobForStep(step, run);
+                plans.markStepValidating(step.id());
+                PlanStore.PlanStep validatingStep = plans.findStep(step.id()).orElse(step);
+                PlanValidator.ValidationResult validation = validator.validate(validatingStep, run);
+                if (validation.passed()) {
+                    plans.completeStepValidation(step.id(), "Run " + run.id() + " completed and validated",
+                            validation.actual(), validation.evidence());
+                    completeJobForStep(step, run);
+                } else {
+                    plans.failStepValidation(step.id(), validation.error(), validation.actual(), validation.evidence());
+                    failJobForStep(step, validation.error());
+                }
             } else if (run.status() == RunStatus.CANCELED) {
                 plans.cancelStep(step.id(), "Run " + run.id() + " canceled");
                 failJobForStep(step, "Run canceled");

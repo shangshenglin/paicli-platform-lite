@@ -132,6 +132,7 @@
 
 - [x] `plan_steps` 增加 `run_id`，新增 `async_jobs` 与 `validation_checks`；Schema 迁移 16
 - [x] 新增 `PlanExecutionService` 与 Plan Worker，自动领取 `READY` Step，创建普通 ReAct Run，并在 Run 终态后回写 Step、Plan、Async Job 和 Validation Check
+- [x] 新增 `PlanValidator` 验证闸口，Run `COMPLETED` 后先进入 `VALIDATING`，按 done criteria 写入 `actual/evidence/error`，验证通过才完成 Step，验证失败进入 `VALIDATION_FAILED`
 - [x] 支持 `REACT`、`ASYNC`/`ASYNC_JOB`、`NONE`、`MANUAL`/`USER_APPROVAL` 的基础 Step 状态推进
 - [x] 新增 `/dispatch`、`/dag/batches`、`/jobs`、`/validation-checks` 和通用 `/v1/async-jobs` API
 - [x] 新增 Read-only DAG 批次分析；当前先做保守调度，不绕过同一 Session 的活跃 Run 限制

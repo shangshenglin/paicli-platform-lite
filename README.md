@@ -25,7 +25,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 可靠 Runtime | SQLite WAL、持久化状态机、可恢复 Worker、ToolCall 幂等、SSE 重放、取消与失败恢复 |
 | 执行安全 | Local/Docker Sandbox、危险工具审批、持久化审批策略、路径/资源/密钥边界、JSONL 审计 |
 | 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、摘要、Token 预算、Artifact、项目规则 |
-| Plan Runtime | 持久化 Plan/Step/Edge、JSON 计划解析校验、DAG 合法性检查、审批/启动/取消/Replan API、Step 调度复用普通 ReAct Run、Async Job 记录、Validation Check 与 DAG 批次分析 |
+| Plan Runtime | 持久化 Plan/Step/Edge、JSON 计划解析校验、DAG 合法性检查、审批/启动/取消/Replan API、Step 调度复用普通 ReAct Run、Async Job 记录、Plan Validator Gate、Validation Check 与 DAG 批次分析 |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
 | 质量闭环 | 官方入门评测集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
@@ -41,7 +41,7 @@ paicli-server（Agent Runtime / 脑）
   ├─ Session / Run / Message / Event / ToolCall / Approval
   ├─ RunWorkerCoordinator + RunProcessor（可恢复 ReAct Loop）
   ├─ PlanService（Plan JSON / DAG / Revision）
-  ├─ PlanExecutionService（Step 调度 / Run 绑定 / Async Job / Validation Check）
+  ├─ PlanExecutionService + PlanValidator（Step 调度 / Run 绑定 / Async Job / Validation Gate）
   ├─ ModelClient（Demo / OpenAI-compatible）
   ├─ ContextManager（规则 / Memory / RAG / 摘要 / Token 预算）
   ├─ Server Tool Provider（Skill / Knowledge / Web / MCP / Delegation）
@@ -485,7 +485,9 @@ GET                         /v1/async-jobs/{jobId}
 POST                        /v1/async-jobs/{jobId}/cancel
 ```
 
-Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会领取 `READY` Step，创建普通 ReAct Run 执行，并在 Run 终态后回写 Step、Async Job、Validation Check 和 Plan 状态。
+Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会领取 `READY` Step，创建普通 ReAct Run 执行；Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。
+
+当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>` 以及普通文字验收标准的最终回答证据匹配。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续文件断言、API 断言、截图断言和 Reviewer Agent 证据包预留扩展位置。
 
 新增 API 包括 `/v1/sessions/{sessionId}/plans`、`/v1/plans/{id}/dispatch`、`/v1/plans/{id}/dag/batches`、`/v1/plans/{id}/jobs`、`/v1/plans/{id}/validation-checks`、`/v1/async-jobs` 和 `/v1/async-jobs/{id}/cancel`。Console 普通消息区会在当前 Session 顶部展示已关联 Plan 的目标、状态、步骤进度和当前步骤，并保留打开工作台、详情和调度动作。Read-only 并行 DAG 当前先提供批次分析和保守调度，不会绕过同一 Session 的活跃 Run 限制；真正的并行执行仍需资源锁与会话隔离策略进一步完善。
 

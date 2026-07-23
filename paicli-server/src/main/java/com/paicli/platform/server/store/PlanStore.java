@@ -291,7 +291,8 @@ public class PlanStore {
                 }
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status='CANCELED',updated_at=? " +
-                                "WHERE plan_id=? AND status IN ('PENDING','READY','RUNNING','WAITING_APPROVAL','WAITING_JOB')")) {
+                                "WHERE plan_id=? AND status IN " +
+                                "('PENDING','READY','RUNNING','WAITING_APPROVAL','WAITING_JOB','VALIDATING')")) {
                     ps.setString(1, now);
                     ps.setString(2, planId);
                     ps.executeUpdate();
@@ -375,12 +376,26 @@ public class PlanStore {
         setStepRuntimeStatus(stepId, "RUNNING", null, "plan_step.resumed");
     }
 
+    public void markStepValidating(String stepId) {
+        setStepRuntimeStatus(stepId, "VALIDATING", null, "plan_step.validating");
+    }
+
     public void completeStep(String stepId, String resultSummary) {
         setStepTerminal(stepId, "COMPLETED", resultSummary, null, "plan_step.completed");
     }
 
+    public void completeStepValidation(String stepId, String resultSummary, String actual, String evidence) {
+        setStepTerminalWithValidation(stepId, "COMPLETED", resultSummary, null, "PASSED", actual, evidence,
+                null, "plan_step.validated");
+    }
+
     public void failStep(String stepId, String reason) {
         setStepTerminal(stepId, "FAILED", null, reason, "plan_step.failed");
+    }
+
+    public void failStepValidation(String stepId, String reason, String actual, String evidence) {
+        setStepTerminalWithValidation(stepId, "VALIDATION_FAILED", null, reason, "FAILED", actual, evidence,
+                reason, "plan_step.validation_failed");
     }
 
     public void cancelStep(String stepId, String reason) {
@@ -504,7 +519,43 @@ public class PlanStore {
     }
 
     public PlanStep retryStep(String stepId) {
-        return updateStepStatus(stepId, "PENDING", null, "plan_step.retry");
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() -> new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status='PENDING',run_id=NULL,result_summary=NULL,failure_reason=NULL," +
+                                "started_at=NULL,completed_at=NULL,updated_at=? WHERE id=?")) {
+                    ps.setString(1, now);
+                    ps.setString(2, stepId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE validation_checks SET status='PENDING',actual='',evidence='',error=NULL," +
+                                "completed_at=NULL,updated_at=? WHERE step_id=?")) {
+                    ps.setString(1, now);
+                    ps.setString(2, stepId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plans SET status='ACTIVE',failure_reason=NULL,completed_at=NULL,updated_at=? " +
+                                "WHERE id=? AND status='FAILED'")) {
+                    ps.setString(1, now);
+                    ps.setString(2, current.planId());
+                    ps.executeUpdate();
+                }
+                appendEvent(c, current.planId(), stepId, "plan_step.retry", "{\"status\":\"PENDING\"}", now);
+                markReadySteps(c, current.planId(), now);
+                c.commit();
+                return findStep(stepId).orElseThrow();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("retry plan step", e);
+        }
     }
 
     public PlanStep skipStep(String stepId, String reason) {
@@ -644,7 +695,8 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,failure_reason=?,updated_at=?,completed_at=CASE WHEN ? IN " +
-                                "('COMPLETED','FAILED','SKIPPED','CANCELED') THEN ? ELSE completed_at END WHERE id=?")) {
+                                "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED') " +
+                                "THEN ? ELSE completed_at END WHERE id=?")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(reason));
                     ps.setString(3, now);
@@ -674,7 +726,7 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,failure_reason=?,updated_at=? WHERE id=? " +
-                                "AND status IN ('RUNNING','WAITING_APPROVAL','WAITING_JOB')")) {
+                                "AND status IN ('RUNNING','WAITING_APPROVAL','WAITING_JOB','VALIDATING')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(reason));
                     ps.setString(3, now);
@@ -701,7 +753,8 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
-                                "updated_at=? WHERE id=? AND status NOT IN ('COMPLETED','FAILED','SKIPPED','CANCELED')")) {
+                                "updated_at=? WHERE id=? AND status NOT IN " +
+                                "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(resultSummary));
                     ps.setString(3, nullable(reason));
@@ -726,6 +779,41 @@ public class PlanStore {
             }
         } catch (SQLException e) {
             throw failure("finish plan step", e);
+        }
+    }
+
+    private void setStepTerminalWithValidation(String stepId, String status, String resultSummary, String reason,
+                                               String checkStatus, String actual, String evidence, String checkError,
+                                               String eventType) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
+                                "updated_at=? WHERE id=? AND status NOT IN " +
+                                "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
+                    ps.setString(1, status);
+                    ps.setString(2, nullable(resultSummary));
+                    ps.setString(3, nullable(reason));
+                    ps.setString(4, now);
+                    ps.setString(5, now);
+                    ps.setString(6, stepId);
+                    ps.executeUpdate();
+                }
+                finishStepChecks(c, stepId, checkStatus, checkError, evidence, actual, now);
+                appendEvent(c, current.planId(), stepId, eventType, "{\"status\":\"" + status + "\"}", now);
+                markReadySteps(c, current.planId(), now);
+                finishPlanIfTerminal(c, current.planId(), now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("finish validated plan step", e);
         }
     }
 
@@ -761,11 +849,17 @@ public class PlanStore {
 
     private void finishStepChecks(Connection c, String stepId, String status, String error, String evidence, String now)
             throws SQLException {
+        finishStepChecks(c, stepId, status, error, evidence, status, now);
+    }
+
+    private void finishStepChecks(Connection c, String stepId, String status, String error, String evidence,
+                                  String actual, String now)
+            throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "UPDATE validation_checks SET status=?,actual=?,evidence=?,error=?,completed_at=?,updated_at=? " +
                         "WHERE step_id=? AND status='PENDING'")) {
             ps.setString(1, status);
-            ps.setString(2, status);
+            ps.setString(2, value(actual, 4_000));
             ps.setString(3, value(evidence, 4_000));
             ps.setString(4, nullable(error));
             ps.setString(5, now);
@@ -862,7 +956,8 @@ public class PlanStore {
 
     private void finishPlanIfTerminal(Connection c, String planId, String now) throws SQLException {
         try (PreparedStatement failed = c.prepareStatement(
-                "SELECT failure_reason FROM plan_steps WHERE plan_id=? AND status='FAILED' ORDER BY updated_at DESC LIMIT 1")) {
+                "SELECT failure_reason FROM plan_steps WHERE plan_id=? " +
+                        "AND status IN ('FAILED','VALIDATION_FAILED') ORDER BY updated_at DESC LIMIT 1")) {
             failed.setString(1, planId);
             try (ResultSet rs = failed.executeQuery()) {
                 if (rs.next()) {
@@ -883,7 +978,7 @@ public class PlanStore {
         }
         try (PreparedStatement open = c.prepareStatement(
                 "SELECT COUNT(*) FROM plan_steps WHERE plan_id=? " +
-                        "AND status NOT IN ('COMPLETED','SKIPPED','CANCELED')")) {
+                        "AND status NOT IN ('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
             open.setString(1, planId);
             try (ResultSet rs = open.executeQuery()) {
                 if (rs.next() && rs.getLong(1) == 0) {

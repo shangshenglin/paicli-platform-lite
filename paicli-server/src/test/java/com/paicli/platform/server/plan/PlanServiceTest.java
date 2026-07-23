@@ -72,7 +72,7 @@ class PlanServiceTest {
         PlanStore store = new PlanStore(properties());
         PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
                 new JsonModelClient(oneStepPlan()), mapper);
-        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
         var session = runtime.createSession("plan-run", "project-a");
 
         var plan = service.generate(session.id(), null, "summarize");
@@ -84,6 +84,8 @@ class PlanServiceTest {
         assertThat(running.status()).isEqualTo("RUNNING");
         assertThat(running.runId()).isNotBlank();
 
+        runtime.appendMessage(session.id(), running.runId(), "assistant",
+                "The requested summary exists and includes concise evidence.");
         runtime.completeRun(running.runId());
         execution.dispatchPlan(plan.id(), 1);
 
@@ -92,7 +94,54 @@ class PlanServiceTest {
         assertThat(finished.steps()).singleElement()
                 .satisfies(step -> assertThat(step.status()).isEqualTo("COMPLETED"));
         assertThat(store.validationChecks(plan.id(), 10)).singleElement()
-                .satisfies(check -> assertThat(check.status()).isEqualTo("PASSED"));
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo("PASSED");
+                    assertThat(check.actual()).contains("All done criteria passed");
+                    assertThat(check.evidence()).contains("answer_contains:summary");
+                });
+    }
+
+    @Test
+    void runCompletionDoesNotCompleteStepWhenValidationFails() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
+        var session = runtime.createSession("plan-validation-failure", "project-a");
+
+        var plan = service.generate(session.id(), null, "summarize");
+        service.start(plan.id());
+        execution.dispatchPlan(plan.id(), 1);
+
+        var running = service.view(plan.id()).steps().get(0);
+        runtime.appendMessage(session.id(), running.runId(), "assistant", "The result is unrelated.");
+        runtime.completeRun(running.runId());
+        execution.dispatchPlan(plan.id(), 1);
+
+        var failed = service.view(plan.id());
+        assertThat(failed.plan().status()).isEqualTo("FAILED");
+        assertThat(failed.steps()).singleElement()
+                .satisfies(step -> {
+                    assertThat(step.status()).isEqualTo("VALIDATION_FAILED");
+                    assertThat(step.failureReason()).contains("Validation failed");
+                });
+        assertThat(store.validationChecks(plan.id(), 10)).singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo("FAILED");
+                    assertThat(check.actual()).contains("summary");
+                    assertThat(check.error()).contains("Validation failed");
+                });
+
+        var retried = store.retryStep(running.id());
+        assertThat(retried.status()).isEqualTo("READY");
+        assertThat(service.view(plan.id()).plan().status()).isEqualTo("ACTIVE");
+        assertThat(store.validationChecks(plan.id(), 10)).singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo("PENDING");
+                    assertThat(check.actual()).isBlank();
+                    assertThat(check.error()).isNull();
+                });
     }
 
     @Test
@@ -101,7 +150,7 @@ class PlanServiceTest {
         PlanStore store = new PlanStore(properties());
         PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
                 new JsonModelClient(asyncPlan()), mapper);
-        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
         var session = runtime.createSession("plan-async", "project-a");
 
         var plan = service.generate(session.id(), null, "long task");
@@ -127,7 +176,7 @@ class PlanServiceTest {
         PlanStore store = new PlanStore(properties());
         PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
                 new JsonModelClient(validPlan()), mapper);
-        PlanExecutionService execution = new PlanExecutionService(store, runtime);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
 
         var plan = service.generate(null, "default", "inspect project");
         var batches = execution.parallelBatches(plan.id());
@@ -185,7 +234,7 @@ class PlanServiceTest {
                   "objective": "first",
                   "summary": "One step.",
                   "steps": [
-                    {"client_id":"s","title":"Summarize","description":"Summarize only","type":"SYNTHESIS","dependencies":[],"done_criteria":["summary exists"]}
+                    {"client_id":"s","title":"Summarize","description":"Summarize only","type":"SYNTHESIS","dependencies":[],"done_criteria":["answer_contains:summary"]}
                   ]
                 }
                 """;
@@ -197,7 +246,7 @@ class PlanServiceTest {
                   "objective": "long task",
                   "summary": "One async step.",
                   "steps": [
-                    {"client_id":"async","title":"Long task","description":"Run a long task","type":"ASYNC_JOB","execution_mode":"ASYNC","dependencies":[],"done_criteria":["job completed"]}
+                    {"client_id":"async","title":"Long task","description":"Run a long task","type":"ASYNC_JOB","execution_mode":"ASYNC","dependencies":[],"done_criteria":["run_status:COMPLETED"]}
                   ]
                 }
                 """;
