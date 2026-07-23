@@ -28,6 +28,10 @@ paicli:
   worker-count: ${PAICLI_WORKER_COUNT:1}
   worker-poll-millis: ${PAICLI_WORKER_POLL_MILLIS:300}
   sandbox-mode: local
+  infrastructure:
+    run-queue: ${PAICLI_RUN_QUEUE_BACKEND:local}
+    coordination: ${PAICLI_COORDINATION_BACKEND:local}
+    artifact-storage: ${PAICLI_ARTIFACT_STORAGE_BACKEND:local}
   security:
     api-key: ${PAICLI_API_KEY:}
     require-api-key: ${PAICLI_SECURITY_REQUIRE_API_KEY:false}

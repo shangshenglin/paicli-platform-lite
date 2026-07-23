@@ -1,6 +1,6 @@
 package com.paicli.platform.server.api;
 
-import com.paicli.platform.server.artifact.LocalArtifactStore;
+import com.paicli.platform.server.artifact.ArtifactStore;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,9 +26,9 @@ import java.util.Map;
 @RestController
 @RequestMapping("/v1/artifacts")
 public class ArtifactController {
-    private final LocalArtifactStore artifactStore;
+    private final ArtifactStore artifactStore;
 
-    public ArtifactController(LocalArtifactStore artifactStore) {
+    public ArtifactController(ArtifactStore artifactStore) {
         this.artifactStore = artifactStore;
     }
 

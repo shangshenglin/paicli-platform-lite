@@ -6,7 +6,7 @@ import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.common.ToolEffect;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
-import com.paicli.platform.server.artifact.LocalArtifactStore;
+import com.paicli.platform.server.artifact.ArtifactStore;
 
 import java.util.Map;
 import java.util.Comparator;
@@ -16,7 +16,7 @@ import java.util.Set;
 @Component
 public class ToolRouter {
     private final SandboxDriver sandboxDriver;
-    private final LocalArtifactStore artifactStore;
+    private final ArtifactStore artifactStore;
     private final List<ServerToolProvider> providers;
     private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("execute_command");
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
@@ -25,7 +25,7 @@ public class ToolRouter {
             "get_agent_result", "list_agents", "list_agent_profiles");
 
     @Autowired
-    public ToolRouter(SandboxDriver sandboxDriver, LocalArtifactStore artifactStore,
+    public ToolRouter(SandboxDriver sandboxDriver, ArtifactStore artifactStore,
                       List<ServerToolProvider> providers) {
         this.sandboxDriver = sandboxDriver;
         this.artifactStore = artifactStore;
@@ -40,7 +40,7 @@ public class ToolRouter {
         this.providers = List.of();
     }
 
-    public ToolRouter(SandboxDriver sandboxDriver, LocalArtifactStore artifactStore) {
+    public ToolRouter(SandboxDriver sandboxDriver, ArtifactStore artifactStore) {
         this(sandboxDriver, artifactStore, List.of());
     }
 

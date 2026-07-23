@@ -22,6 +22,16 @@
 - 验证：运行了哪些测试、构建或人工检查。
 ```
 
+## 2026-07-23
+
+### Kafka / Redis / MinIO 改造接口预留
+
+- 变更：新增 Run Dispatch Queue、Run Execution Registry 和 Object Storage Port 三类端口，分别为后续 Kafka 队列、Redis 分布式执行注册/锁和 MinIO 对象存储适配器预留接口；当前默认实现仍是 SQLite claim、本进程 in-flight 集合和本地文件。
+- 变更：Run Worker 改为依赖队列与执行注册端口；Artifact Controller、ToolRouter 和 ToolResultMaterializer 改为依赖 `ArtifactStore` 接口；本地 Artifact 写入改为经由对象存储端口落盘，元数据仍由 SQLite 管理。
+- 变更：新增 `paicli.infrastructure.run-queue`、`paicli.infrastructure.coordination`、`paicli.infrastructure.artifact-storage` 配置项，当前只允许 `local`，显式配置 Kafka、Redis 或 MinIO 会报错说明“接口已预留但适配器未实现”。
+- 思路：先把替换边界切清楚，但不引入外部中间件、不改变 Lite 单机运行语义，避免为了未来优化提前承担 Kafka/Redis/MinIO 的部署、事务和运维复杂度。
+- 验证：运行 `git diff --check` 通过，仅有 Windows 换行提示；运行 `.\mvnw.cmd test` 通过，共 89 个测试；运行 `.\mvnw.cmd package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；尝试运行 `.\mvnw.cmd clean test` 时，Windows 仍锁定 `paicli-server-0.6.0-SNAPSHOT.jar` 导致 clean 阶段删除失败，非代码编译或测试失败。
+
 ## 2026-07-19
 
 ### 效率工作台检索与 Run 队列布局调整

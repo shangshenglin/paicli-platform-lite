@@ -150,6 +150,7 @@
 
 - Kubernetes、MicroVM、多地域和多租户
 - Kafka、Redis、PostgreSQL、MinIO
+- 已为 Kafka/Redis/MinIO 预留替换端口：Run Dispatch Queue、Run Execution Registry 和 Object Storage Port；当前默认和唯一可用实现仍是 SQLite/进程内注册/本地文件，配置为外部后端会明确失败，避免误判为已接入。
 - 跨项目 Memory 联想图谱
 - 自治 Planner/Reviewer Agent Team 和复杂团队 Console；当前只做单 Agent 的持久化 Plan Runtime
 - 默认 Lite 配置中的外部向量数据库

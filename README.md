@@ -593,6 +593,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 | `PAICLI_WEB_*` | 可选 SearXNG 搜索和 Server 侧 Web 工具 |
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
+| `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
 
 项目模型方案、预算、模板、队列、定时任务和通知可在 Console“效率工作台”维护；智能体专家由首页左侧“专家创建”维护；评测套件、运行报告与基线由首页独立“Agent 评测中心”维护；Skill 和 MCP 位于“能力管理”。

@@ -7,10 +7,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class ToolResultMaterializer {
     private static final int PREVIEW_CHARS = 1_000;
-    private final LocalArtifactStore artifactStore;
+    private final ArtifactStore artifactStore;
     private final int inlineLimit;
 
-    public ToolResultMaterializer(LocalArtifactStore artifactStore, ModelProperties properties) {
+    public ToolResultMaterializer(ArtifactStore artifactStore, ModelProperties properties) {
         this.artifactStore = artifactStore;
         this.inlineLimit = properties.toolResultInlineChars();
     }

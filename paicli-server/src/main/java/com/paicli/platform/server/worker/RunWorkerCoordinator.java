@@ -2,7 +2,8 @@ package com.paicli.platform.server.worker;
 
 import com.paicli.platform.server.agent.RunProcessor;
 import com.paicli.platform.server.domain.RunRecord;
-import com.paicli.platform.server.store.SqliteRuntimeStore;
+import com.paicli.platform.server.infrastructure.RunDispatchQueue;
+import com.paicli.platform.server.infrastructure.RunExecutionRegistry;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -13,22 +14,20 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 @Component
 public class RunWorkerCoordinator {
     private static final Logger log = LoggerFactory.getLogger(RunWorkerCoordinator.class);
 
-    private final SqliteRuntimeStore store;
+    private final RunDispatchQueue queue;
+    private final RunExecutionRegistry executionRegistry;
     private final RunProcessor processor;
     private final ThreadPoolTaskExecutor executor;
-    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
-    public RunWorkerCoordinator(SqliteRuntimeStore store, RunProcessor processor,
+    public RunWorkerCoordinator(RunDispatchQueue queue, RunExecutionRegistry executionRegistry, RunProcessor processor,
                                 @Qualifier("runTaskExecutor") ThreadPoolTaskExecutor executor,
                                 MeterRegistry registry) {
-        this.store = store;
+        this.queue = queue;
+        this.executionRegistry = executionRegistry;
         this.processor = processor;
         this.executor = executor;
         Gauge.builder("paicli.worker.active", executor, ThreadPoolTaskExecutor::getActiveCount).register(registry);
@@ -41,19 +40,19 @@ public class RunWorkerCoordinator {
         if (executor.getActiveCount() >= executor.getMaxPoolSize()) return;
         var claimed = tryClaimNextRun();
         claimed.ifPresent(run -> {
-            if (!inFlight.add(run.id())) return;
+            if (!executionRegistry.tryEnter(run.id())) return;
             try {
                 executor.execute(() -> execute(run));
             } catch (TaskRejectedException e) {
-                inFlight.remove(run.id());
-                store.releaseClaim(run.id(), "run worker executor rejected dispatch");
+                executionRegistry.leave(run.id());
+                queue.releaseClaim(run.id(), "run worker executor rejected dispatch");
             }
         });
     }
 
     private java.util.Optional<RunRecord> tryClaimNextRun() {
         try {
-            return store.claimNextRun();
+            return queue.claimNextRun();
         } catch (IllegalStateException e) {
             if (isSqliteBusy(e)) {
                 log.debug("SQLite busy while claiming next run; retrying on the next worker poll");
@@ -78,7 +77,7 @@ public class RunWorkerCoordinator {
         try {
             processor.process(run);
         } finally {
-            inFlight.remove(run.id());
+            executionRegistry.leave(run.id());
         }
     }
 }
