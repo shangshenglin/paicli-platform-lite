@@ -24,13 +24,13 @@
 
 ## 2026-07-23
 
-### Plan / Multi-Agent / Agent Harness 深度文档补全
+### Plan / Multi-Agent / Agent Harness 深度说明合并去重
 
-- 变更：新增 `docs/plan-multi-agent-harness.md`，系统说明 Plan Runtime、Step 状态机、资源读写集、隔离策略、Validation Gate、Agent Feedback、过程型 Memory、Multi-Agent 委派信封、Plan 与子 Agent 协同、当前边界和代码阅读路线。
-- 变更：更新《PaiCLI Platform Lite 技术架构与面试讲解.md》，把 Plan 数据模型、迁移版本、阶段 5/6 受控并行、Agent Feedback 闭环、Multi-Agent Harness 和代码阅读路线补充到当前实现状态。
-- 变更：更新 `README.md` 与 `docs/architecture.md`，移除旧的“真正并行仍需资源锁与会话隔离”表述，改为当前 Lite 已具备资源冲突控制、内部 Session 隔离和 workspace 引用，同时明确真实 Git worktree merge 仍是后续工具层边界。
-- 思路：把刚完成的阶段 5/6 从“阶段做法清单”升级为可交接、可面试、可按代码追踪的技术说明，避免后续只知道做了字段和测试，却说不清 Plan、Multi-Agent 与反馈闭环的运行语义。
-- 验证：运行 Markdown 内容检索，确认不再残留“版本 1–16”“82 项测试”“真正并行仍需资源锁”等旧表述；运行 `git diff --check` 通过，仅有 Windows 换行提示。此次为文档补全，未运行 Maven 测试。
+- 变更：将原独立 Plan/Multi-Agent/Harness 深度说明合并进《PaiCLI Platform Lite 技术架构与面试讲解.md》7.4 节，集中说明 Plan Runtime、Step 状态机、资源读写集、隔离策略、Validation Gate、Agent Feedback、过程型 Memory、Multi-Agent 委派信封、Plan 与子 Agent 协同、当前边界和代码阅读路线。
+- 变更：删除独立深度说明文档，`README.md` 与 `docs/architecture.md` 的入口统一指回主技术讲解文档，避免同一套架构解释维护两份。
+- 变更：精简主技术讲解文档 8.7 节，只保留 Multi-Agent 工具入口说明，并引用 7.4 的统一深度章节，消除重复展开。
+- 思路：主技术文档是面试讲解和长期交接入口，Plan、Multi-Agent、Agent Harness 的字段、链路和边界应集中维护；README 和 architecture 只做导航与概要，避免后续阶段升级时漏改其中一份。
+- 验证：运行 Markdown 内容检索，确认公开文档不再引用独立深度说明文件，且主文档只保留一个完整深度章节；运行 `git diff --check` 通过。此次为文档整理，未运行 Maven 测试。
 
 ### Memory/RAG/Plan-Agent 阶段 5/6 受控并行与闭环生产加固
 

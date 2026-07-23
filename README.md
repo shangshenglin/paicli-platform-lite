@@ -493,7 +493,7 @@ Plan Runtime 已从“持久化计划对象”推进到受控执行闭环：`pla
 
 阶段 5/6 增量把上述基础执行闭环推进到受控并行和反馈闭环：Plan JSON 可声明 `resource_read_set`、`resource_write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；调度器会按关键路径优先级领取 Step，并用资源读写集阻止同一计划内的活跃写写或读写冲突。需要隔离的 Step 会创建内部 Session，`GIT_WORKTREE` 当前落为 Lite 受控 workspace 引用和目录边界；真实 Git worktree 的 add/merge 仍预留在后续工具层，不在当前版本自动执行。Plan 验证结果会写入 `agent_feedback`，验证通过时生成可追溯的过程型 Memory，失败时记录 validation/failure class，供后续专家评分、调度策略和人工复盘使用；Actuator 指标同步记录 Plan 验证成功/失败、资源冲突、Agent Feedback 和验证 Memory 写入次数。
 
-更完整的 Plan、Multi-Agent、Agent Harness 和阶段 5/6 闭环说明见 [docs/plan-multi-agent-harness.md](docs/plan-multi-agent-harness.md)。
+更完整的 Plan、Multi-Agent、Agent Harness 和阶段 5/6 闭环说明已合并到 [技术架构与面试讲解](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md) 的“Plan Runtime、Multi-Agent 与 Agent Harness”章节。
 
 ### Approval、附件与 Artifact
 
@@ -653,7 +653,6 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 
 - [技术架构与面试讲解](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md)
 - [架构说明](docs/architecture.md)
-- [Plan Runtime、Multi-Agent 与 Agent Harness 深度说明](docs/plan-multi-agent-harness.md)
 - [阶段状态](docs/phases.md)
 - [变更日志与优化复盘](changeLog.md)
 - [Docker Sandbox](docs/docker-sandbox.md)
