@@ -24,6 +24,15 @@
 
 ## 2026-07-23
 
+### Memory/RAG/Plan-Agent 阶段 5/6 受控并行与闭环生产加固
+
+- 变更：新增 Schema 迁移 21，`plan_steps` 增加资源读集、资源写集、隔离策略、最大并行度、关键路径权重和 workspace 引用；新增 `agent_feedback` 表，用于记录 Plan Step 关联 Run 的验证状态、得分、失败分类和证据质量。
+- 变更：Plan JSON 解析支持 `resource_read_set`/`read_set`、`resource_write_set`/`write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；Plan 调度按关键路径权重、下游数量和 ordinal 排序，并在领取 Step 前检查活跃 Step 的资源读写冲突。
+- 变更：冲突 Step 不直接失败，而是写入 `RESOURCE_CONFLICT` 并短暂延后；需要隔离的 Step 创建内部 Session 和受控 workspace 引用，`GIT_WORKTREE` 当前作为 Lite 目录隔离与后续真实 git worktree 工具层的预留边界，不自动执行 merge。
+- 变更：Plan 验证通过/失败都会写入 Agent Feedback；验证通过会沉淀过程型 Memory；Runtime Metrics 增加 Plan 验证、资源冲突、Agent Feedback 和验证 Memory 写入计数。
+- 思路：把用户方案阶段 5/6 的受控并行、独立会话、关键路径调度、评分反馈、验证结果入 Memory 和全链路观测先落在单机 SQLite Lite 语义里；真实 Git worktree add/merge、Kafka/Redis/MinIO 和跨节点调度继续保持预留边界，不提前引入外部运维复杂度。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-DskipTests" compile` 通过；运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，38 个定向测试通过，覆盖迁移 1-21、资源冲突推迟、隔离 workspace 引用、workspace owner 映射、Agent Feedback 幂等写入和验证 Memory 生成；运行 `.\mvnw.cmd test` 通过，Common 2 个、Server 99 个、Sandbox Agent 2 个测试均通过；运行 `.\mvnw.cmd package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；运行 `git diff --check` 通过，仅有 Windows 换行提示。
+
 ### Memory/RAG/Plan-Agent 阶段 2/3/4 增量闭环
 
 - 变更：新增 Schema 迁移 20，Memory 增加结构化 payload、生命周期状态、来源修订、有效期、supersedes 和 checksum；新增 `memory_sources` 与 `memory_conflicts`，自动 Memory 同 key 内容变化会保留 revision、来源摘录和冲突审计。

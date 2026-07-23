@@ -105,6 +105,70 @@ class PlanServiceTest {
     }
 
     @Test
+    void dispatchesControlledParallelStepsWithResourceIsolationAndConflictDeferral() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(controlledParallelPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime,
+                new PlanValidator(runtime, mapper), mapper, tempDir.resolve("workspaces"), null);
+
+        var plan = service.generate(null, "project-a", "edit same file carefully");
+        service.start(plan.id());
+        var report = execution.dispatchPlan(plan.id(), 5);
+
+        assertThat(report.startedSteps()).isEqualTo(1);
+        var view = service.view(plan.id());
+        assertThat(view.steps()).filteredOn(step -> step.status().equals("RUNNING"))
+                .singleElement().satisfies(step -> {
+                    assertThat(step.title()).isEqualTo("Patch first");
+                    assertThat(step.resourceWriteSetJson()).contains("src/App.java");
+                    assertThat(step.isolationStrategy()).isEqualTo("GIT_WORKTREE");
+                    assertThat(step.workspaceRef()).startsWith("plan-worktrees/");
+                    assertThat(runtime.workspaceOwnerRunId(step.runId())).isEqualTo(step.workspaceRef());
+                    assertThat(Files.exists(tempDir.resolve("workspaces").resolve(step.workspaceRef()))).isTrue();
+                });
+        assertThat(view.steps()).filteredOn(step -> step.title().equals("Patch second"))
+                .singleElement().satisfies(step -> {
+                    assertThat(step.status()).isEqualTo("READY");
+                    assertThat(step.lastFailureClass()).isEqualTo("RESOURCE_CONFLICT");
+                    assertThat(step.notBefore()).isNotNull();
+                });
+    }
+
+    @Test
+    void validationResultCreatesFeedbackAndMemory() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime,
+                new PlanValidator(runtime, mapper), mapper, tempDir.resolve("workspaces"), null);
+        var session = runtime.createSession("plan-feedback", "project-a");
+
+        var plan = service.generate(session.id(), null, "summarize");
+        service.start(plan.id());
+        execution.dispatchPlan(plan.id(), 1);
+        var running = service.view(plan.id()).steps().get(0);
+        runtime.appendMessage(session.id(), running.runId(), "assistant", "summary with evidence");
+        runtime.completeRun(running.runId());
+        execution.dispatchPlan(plan.id(), 1);
+
+        assertThat(runtime.agentFeedback(running.runId(), running.id())).get().satisfies(feedback -> {
+            assertThat(feedback.planId()).isEqualTo(plan.id());
+            assertThat(feedback.validationStatus()).isEqualTo("PASSED");
+            assertThat(feedback.score()).isEqualTo(1.0);
+            assertThat(feedback.evidenceQuality()).isEqualTo(1.0);
+        });
+        assertThat(runtime.memoryUnits("project-a", 20))
+                .anySatisfy(memory -> {
+                    assertThat(memory.memoryKey()).isEqualTo("plan.validation." + running.id());
+                    assertThat(memory.memoryType()).isEqualTo("PROCEDURAL");
+                    assertThat(memory.content()).contains("Plan step validated");
+                });
+    }
+
+    @Test
     void claimsAndHeartbeatsReadyStepLease() throws Exception {
         SqliteRuntimeStore runtime = runtime();
         PlanStore store = new PlanStore(properties());
@@ -448,6 +512,19 @@ class PlanServiceTest {
                   "steps": [
                     {"client_id":"first","title":"First","description":"Finish first","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["answer_contains:first"]},
                     {"client_id":"second","title":"Second","description":"Finish second","type":"SYNTHESIS","execution_mode":"REACT","dependencies":["first"],"done_criteria":["answer_contains:second"]}
+                  ]
+                }
+                """;
+    }
+
+    private static String controlledParallelPlan() {
+        return """
+                {
+                  "objective": "edit same file carefully",
+                  "summary": "Two independent writes target the same resource.",
+                  "steps": [
+                    {"client_id":"patch_a","title":"Patch first","description":"Patch first section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":10},
+                    {"client_id":"patch_b","title":"Patch second","description":"Patch second section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":1}
                   ]
                 }
                 """;

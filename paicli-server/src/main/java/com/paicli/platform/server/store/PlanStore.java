@@ -362,6 +362,10 @@ public class PlanStore {
     }
 
     public PlanStep bindStepRun(String stepId, String runId, boolean asyncJob) {
+        return bindStepRun(stepId, runId, asyncJob, null);
+    }
+
+    public PlanStep bindStepRun(String stepId, String runId, boolean asyncJob, String workspaceRef) {
         try (Connection c = open()) {
             c.setAutoCommit(false);
             try {
@@ -370,16 +374,18 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,run_id=?,lease_expires_at=NULL,heartbeat_at=NULL," +
-                                "updated_at=? WHERE id=? " +
+                                "workspace_ref=COALESCE(?,workspace_ref),updated_at=? WHERE id=? " +
                                 "AND status IN ('RUNNING','WAITING_JOB')")) {
                     ps.setString(1, asyncJob ? "WAITING_JOB" : "RUNNING");
                     ps.setString(2, runId);
-                    ps.setString(3, now);
-                    ps.setString(4, stepId);
+                    ps.setString(3, nullable(workspaceRef));
+                    ps.setString(4, now);
+                    ps.setString(5, stepId);
                     if (ps.executeUpdate() != 1) throw new IllegalStateException("plan step is not claimed");
                 }
                 appendEvent(c, current.planId(), stepId, asyncJob ? "plan_step.job_bound" : "plan_step.run_bound",
-                        "{\"runId\":\"" + escape(runId) + "\"}", now);
+                        "{\"runId\":\"" + escape(runId) + "\",\"workspaceRef\":\""
+                                + escape(workspaceRef) + "\"}", now);
                 c.commit();
                 return findStep(stepId).orElseThrow();
             } catch (Exception e) {
@@ -388,6 +394,59 @@ public class PlanStore {
             }
         } catch (SQLException e) {
             throw failure("bind plan step run", e);
+        }
+    }
+
+    public PlanStep configureStepExecutionControls(String stepId, String readSetJson, String writeSetJson,
+                                                   String isolationStrategy, int maxParallelism,
+                                                   int criticalPathWeight) {
+        try (Connection c = open()) {
+            String now = Instant.now().toString();
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plan_steps SET resource_read_set_json=?,resource_write_set_json=?," +
+                            "isolation_strategy=?,max_parallelism=?,critical_path_weight=?,updated_at=? WHERE id=?")) {
+                ps.setString(1, listJson(readSetJson));
+                ps.setString(2, listJson(writeSetJson));
+                ps.setString(3, isolation(isolationStrategy));
+                ps.setInt(4, Math.max(1, Math.min(maxParallelism, 16)));
+                ps.setInt(5, Math.max(0, criticalPathWeight));
+                ps.setString(6, now);
+                ps.setString(7, stepId);
+                if (ps.executeUpdate() != 1) throw new IllegalArgumentException("plan step not found");
+            }
+            return findStep(stepId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("configure plan step execution controls", e);
+        }
+    }
+
+    public void deferStep(String stepId, String reason, int delaySeconds) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                Instant nowInstant = Instant.now();
+                String now = nowInstant.toString();
+                String notBefore = nowInstant.plusSeconds(Math.max(1, Math.min(delaySeconds, 3600))).toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET not_before=?,last_failure_class=?,updated_at=? " +
+                                "WHERE id=? AND status='READY'")) {
+                    ps.setString(1, notBefore);
+                    ps.setString(2, "RESOURCE_CONFLICT");
+                    ps.setString(3, now);
+                    ps.setString(4, stepId);
+                    ps.executeUpdate();
+                }
+                appendEvent(c, current.planId(), stepId, "plan_step.deferred",
+                        "{\"reason\":\"" + escape(reason) + "\",\"notBefore\":\"" + notBefore + "\"}", now);
+                c.commit();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("defer plan step", e);
         }
     }
 
@@ -1002,7 +1061,9 @@ public class PlanStore {
     private void insertSteps(Connection c, String planId, List<StepDraft> steps, String now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO plan_steps(id,plan_id,client_id,ordinal,title,description,type,status,execution_mode," +
-                        "done_criteria_json,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'PENDING',?,?,NULL,?,?)")) {
+                        "done_criteria_json,resource_read_set_json,resource_write_set_json,isolation_strategy," +
+                        "max_parallelism,critical_path_weight,run_id,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,'PENDING',?,?,?,?,?,?,?,NULL,?,?)")) {
             for (StepDraft step : steps) {
                 ps.setString(1, step.id());
                 ps.setString(2, planId);
@@ -1013,8 +1074,13 @@ public class PlanStore {
                 ps.setString(7, step.type());
                 ps.setString(8, step.executionMode());
                 ps.setString(9, step.doneCriteriaJson());
-                ps.setString(10, now);
-                ps.setString(11, now);
+                ps.setString(10, listJson(step.resourceReadSetJson()));
+                ps.setString(11, listJson(step.resourceWriteSetJson()));
+                ps.setString(12, isolation(step.isolationStrategy()));
+                ps.setInt(13, Math.max(1, Math.min(step.maxParallelism(), 16)));
+                ps.setInt(14, Math.max(0, step.criticalPathWeight()));
+                ps.setString(15, now);
+                ps.setString(16, now);
                 ps.addBatch();
             }
             ps.executeBatch();
@@ -1075,7 +1141,8 @@ public class PlanStore {
                 .map(step -> new StepDraft(step.id(), "replan_" + (ordinalOffset + step.ordinal()),
                         ordinalOffset + step.ordinal(),
                         step.title(), step.description(), step.type(), step.executionMode(),
-                        step.doneCriteriaJson()))
+                        step.doneCriteriaJson(), step.resourceReadSetJson(), step.resourceWriteSetJson(),
+                        step.isolationStrategy(), step.maxParallelism(), step.criticalPathWeight()))
                 .toList();
         insertSteps(c, planId, shiftedSteps, now);
         insertEdges(c, planId, edges, now);
@@ -1251,6 +1318,9 @@ public class PlanStore {
                 instant(r.getString("lease_expires_at")), instant(r.getString("heartbeat_at")),
                 r.getInt("attempt"), instant(r.getString("not_before")),
                 r.getString("last_failure_class"), r.getString("dispatch_idempotency_key"),
+                r.getString("resource_read_set_json"), r.getString("resource_write_set_json"),
+                r.getString("isolation_strategy"), r.getInt("max_parallelism"),
+                r.getInt("critical_path_weight"), r.getString("workspace_ref"),
                 instant(r.getString("started_at")),
                 instant(r.getString("completed_at")), instant(r.getString("created_at")),
                 instant(r.getString("updated_at")));
@@ -1303,6 +1373,13 @@ public class PlanStore {
         if (x.length() > 16_000) throw new IllegalArgumentException("json is too long");
         return x;
     }
+    private static String isolation(String v) {
+        String x = blank(v) ? "SHARED_SESSION" : v.trim().toUpperCase();
+        if (!List.of("SHARED_SESSION", "INTERNAL_SESSION", "GIT_WORKTREE").contains(x)) {
+            throw new IllegalArgumentException("unsupported isolation strategy: " + v);
+        }
+        return x;
+    }
     private static String nullable(String v) { return blank(v) ? null : v.trim(); }
     private static boolean blank(String v) { return v == null || v.isBlank(); }
     private static String escape(String v) {
@@ -1324,6 +1401,8 @@ public class PlanStore {
                            String doneCriteriaJson, String runId, String resultSummary, String failureReason,
                            String claimOwner, Instant leaseExpiresAt, Instant heartbeatAt, int attempt,
                            Instant notBefore, String lastFailureClass, String dispatchIdempotencyKey,
+                           String resourceReadSetJson, String resourceWriteSetJson, String isolationStrategy,
+                           int maxParallelism, int criticalPathWeight, String workspaceRef,
                            Instant startedAt, Instant completedAt, Instant createdAt, Instant updatedAt) { }
     public record PlanEdge(String planId, String fromStepId, String toStepId, Instant createdAt) { }
     public record PlanEvent(long id, String planId, String stepId, String type, String data,
@@ -1336,6 +1415,14 @@ public class PlanStore {
                                   String status, String expected, String actual, String evidence,
                                   String error, Instant createdAt, Instant updatedAt, Instant completedAt) { }
     public record StepDraft(String id, String clientId, int ordinal, String title, String description,
-                            String type, String executionMode, String doneCriteriaJson) { }
+                            String type, String executionMode, String doneCriteriaJson,
+                            String resourceReadSetJson, String resourceWriteSetJson, String isolationStrategy,
+                            int maxParallelism, int criticalPathWeight) {
+        public StepDraft(String id, String clientId, int ordinal, String title, String description,
+                         String type, String executionMode, String doneCriteriaJson) {
+            this(id, clientId, ordinal, title, description, type, executionMode, doneCriteriaJson,
+                    "[]", "[]", "SHARED_SESSION", 1, 0);
+        }
+    }
     public record EdgeDraft(String fromStepId, String toStepId) { }
 }

@@ -87,7 +87,7 @@ class SqliteRuntimeStoreTest {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20);
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21);
         }
     }
 
@@ -178,6 +178,29 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void persistsAgentFeedbackRecordsIdempotently() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("feedback", "project-a");
+        var run = store.createRun(session.id(), "validate");
+
+        var feedback = store.recordAgentFeedback("project-a", "agent-a", "plan-a", "step-a", run.id(),
+                "COMPLETED", "PASSED", 1.0, "", 0.75);
+        var updated = store.recordAgentFeedback("project-a", "agent-a", "plan-a", "step-a", run.id(),
+                "COMPLETED", "FAILED", 0.0, "VALIDATION_FAILED", 0.25);
+
+        assertThat(updated.id()).isEqualTo(feedback.id());
+        assertThat(store.agentFeedback(run.id(), "step-a")).get().satisfies(value -> {
+            assertThat(value.projectKey()).isEqualTo("project-a");
+            assertThat(value.agentProfileId()).isEqualTo("agent-a");
+            assertThat(value.planId()).isEqualTo("plan-a");
+            assertThat(value.validationStatus()).isEqualTo("FAILED");
+            assertThat(value.score()).isZero();
+            assertThat(value.failureClass()).isEqualTo("VALIDATION_FAILED");
+            assertThat(value.evidenceQuality()).isEqualTo(0.25);
+        });
+    }
+
+    @Test
     void persistsTypedMemorySourcesConflictsAndPlanBoundDelegationMetadata() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("phase-234", "project-a");
@@ -242,11 +265,14 @@ class SqliteRuntimeStoreTest {
                 .hasMessageContaining("active run");
 
         store.completeRun(run.id());
+        store.recordAgentFeedback("default", null, "plan-delete", "step-delete", run.id(),
+                "COMPLETED", "PASSED", 1.0, "", 1.0);
         assertThat(store.deleteSession(session.id())).isTrue();
         assertThat(store.findSession(session.id())).isEmpty();
         assertThat(store.findRun(run.id())).isEmpty();
         assertThat(store.findApproval(approval.id())).isEmpty();
         assertThat(store.findArtifact(artifact.id())).isEmpty();
+        assertThat(store.agentFeedback(run.id(), "step-delete")).isEmpty();
 
         var remaining = store.createSession("remaining", "default", group.id());
         assertThat(store.deleteSessionGroup(group.id())).isTrue();

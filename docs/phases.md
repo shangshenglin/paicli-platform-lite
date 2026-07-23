@@ -154,6 +154,17 @@
 - [x] Kafka/Redis/MinIO 仍保持预留接口，不实现外部适配器；当前 Lite 运行语义仍是 SQLite、进程内协调和本地文件。
 - [x] 补充 Store 与 RAG 回归测试，覆盖迁移 20、Memory source/conflict/revision、Plan 绑定委派 metadata 和 citation metadata。
 
+## 阶段 17：受控并行与闭环生产加固
+
+- [x] `plan_steps` 增加资源读集、资源写集、隔离策略、最大并行度、关键路径权重和 workspace 引用；新增 `agent_feedback` 闭环表，Schema 迁移 21。
+- [x] Plan JSON 解析支持 `resource_read_set`/`read_set`、`resource_write_set`/`write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`。
+- [x] Plan 调度按关键路径权重、下游数量和 ordinal 排序，调度前检查活跃 Step 的资源读写集，阻止同一计划内写写和读写冲突。
+- [x] 冲突 Step 写入 `RESOURCE_CONFLICT` 并短暂延后；下一轮调度可自动恢复，避免永久失败。
+- [x] `INTERNAL_SESSION` 和 `GIT_WORKTREE` 隔离策略会创建内部 Session 与受控 workspace 引用；`GIT_WORKTREE` 当前是 Lite 目录边界和后续真实 worktree 工具层预留，不自动执行 git merge。
+- [x] Plan 验证通过/失败都会写入 Agent Feedback；验证通过会生成过程型 Memory，验证失败会保留 failure class 和证据质量。
+- [x] 新增 Plan 验证、资源冲突、Agent Feedback 和验证 Memory Micrometer 指标，便于 Actuator/Prometheus 观测闭环效果。
+- [x] 补充回归测试，覆盖资源冲突推迟、隔离 workspace 引用、workspace owner 映射、Agent Feedback 幂等写入和验证 Memory 生成。
+
 ### 阶段 16 后续工作
 
 - [ ] Memory conflict 的人工解决 API 与 Console 审计入口。
@@ -163,7 +174,7 @@
 
 ### 阶段 15 后续工作
 
-- [ ] Read-only DAG 真正并行执行、资源锁和会话隔离策略
+- [x] Read-only DAG 资源锁和会话隔离策略已落为阶段 17 的 Lite 受控并行；真实 Git worktree merge 仍保留为后续工具层。
 - [ ] Async Job 接入可审批的长命令、下载、OCR、CI 查询等真实后台执行器
 - [ ] Validation Check 继续扩展命令/API/截图/数据库/安全扫描断言
 

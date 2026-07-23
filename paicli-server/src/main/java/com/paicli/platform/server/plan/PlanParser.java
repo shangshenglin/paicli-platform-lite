@@ -56,7 +56,14 @@ public class PlanParser {
                     if (!EXECUTION_MODES.contains(mode)) errors.add(clientId + " has unsupported execution_mode: " + mode);
                     List<String> criteria = stringList(node.path("done_criteria"), 20, 500);
                     List<String> deps = stringList(node.path("dependencies"), 20, 120);
-                    parsed.add(new ParsedStep(clientId, original, index + 1, title, description, type, mode, criteria, deps));
+                    List<String> readSet = stringList(firstArray(node, "resource_read_set", "read_set"), 50, 240);
+                    List<String> writeSet = stringList(firstArray(node, "resource_write_set", "write_set"), 50, 240);
+                    String isolation = text(node.path("isolation_strategy").asText("SHARED_SESSION"),
+                            "SHARED_SESSION", 40).toUpperCase();
+                    int maxParallelism = Math.max(1, Math.min(node.path("max_parallelism").asInt(1), 16));
+                    int criticalPathWeight = Math.max(0, node.path("critical_path_weight").asInt(0));
+                    parsed.add(new ParsedStep(clientId, original, index + 1, title, description, type, mode,
+                            criteria, deps, readSet, writeSet, isolation, maxParallelism, criticalPathWeight));
                 }
             }
 
@@ -69,7 +76,10 @@ public class PlanParser {
                 String stepId = clientToStepId.get(step.clientId());
                 stepDrafts.add(new PlanStore.StepDraft(stepId, step.clientId(), step.ordinal(), step.title(),
                         step.description(), step.type(), step.executionMode(),
-                        mapper.writeValueAsString(step.doneCriteria())));
+                        mapper.writeValueAsString(step.doneCriteria()),
+                        mapper.writeValueAsString(step.resourceReadSet()),
+                        mapper.writeValueAsString(step.resourceWriteSet()),
+                        step.isolationStrategy(), step.maxParallelism(), step.criticalPathWeight()));
                 graph.put(step.clientId(), new ArrayList<>());
                 for (String dep : step.dependencies()) {
                     String depClient = sourceToClient.getOrDefault(dep, dep);
@@ -127,6 +137,11 @@ public class PlanParser {
         return values;
     }
 
+    private static JsonNode firstArray(JsonNode node, String first, String second) {
+        JsonNode value = node.path(first);
+        return value.isArray() ? value : node.path(second);
+    }
+
     private static String value(JsonNode root, String name, String fallback, int max) {
         return text(root.path(name).asText(fallback == null ? "" : fallback), fallback == null ? "" : fallback, max);
     }
@@ -153,7 +168,9 @@ public class PlanParser {
 
     private record ParsedStep(String clientId, String originalId, int ordinal, String title, String description,
                               String type, String executionMode, List<String> doneCriteria,
-                              List<String> dependencies) { }
+                              List<String> dependencies, List<String> resourceReadSet,
+                              List<String> resourceWriteSet, String isolationStrategy, int maxParallelism,
+                              int criticalPathWeight) { }
 
     public record ParsedPlan(String objective, String summary, String rawJson,
                              List<PlanStore.StepDraft> steps, List<PlanStore.EdgeDraft> edges) { }

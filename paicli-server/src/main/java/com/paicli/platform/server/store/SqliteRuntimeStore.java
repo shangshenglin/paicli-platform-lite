@@ -364,6 +364,11 @@ public class SqliteRuntimeStore {
                     "run_id TEXT, result_summary TEXT, failure_reason TEXT, claim_owner TEXT, " +
                     "lease_expires_at TEXT, heartbeat_at TEXT, attempt INTEGER NOT NULL DEFAULT 0, " +
                     "not_before TEXT, last_failure_class TEXT, dispatch_idempotency_key TEXT, " +
+                    "resource_read_set_json TEXT NOT NULL DEFAULT '[]', " +
+                    "resource_write_set_json TEXT NOT NULL DEFAULT '[]', " +
+                    "isolation_strategy TEXT NOT NULL DEFAULT 'SHARED_SESSION', " +
+                    "max_parallelism INTEGER NOT NULL DEFAULT 1, critical_path_weight INTEGER NOT NULL DEFAULT 0, " +
+                    "workspace_ref TEXT, " +
                     "started_at TEXT, completed_at TEXT, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(plan_id, client_id), " +
                     "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
@@ -377,12 +382,25 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "not_before", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "last_failure_class", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "dispatch_idempotency_key", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "resource_read_set_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "resource_write_set_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "isolation_strategy",
+                    "TEXT NOT NULL DEFAULT 'SHARED_SESSION'");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "max_parallelism",
+                    "INTEGER NOT NULL DEFAULT 1");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "critical_path_weight",
+                    "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "workspace_ref", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_status " +
                     "ON plan_steps(plan_id, status, ordinal)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_run " +
                     "ON plan_steps(run_id)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_lease " +
                     "ON plan_steps(status, lease_expires_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_workspace " +
+                    "ON plan_steps(run_id, workspace_ref)");
             statement.execute("CREATE TABLE IF NOT EXISTS plan_edges (" +
                     "plan_id TEXT NOT NULL, from_step_id TEXT NOT NULL, to_step_id TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, PRIMARY KEY(plan_id, from_step_id, to_step_id), " +
@@ -427,6 +445,14 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE SET NULL)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_validation_checks_plan " +
                     "ON validation_checks(plan_id, step_id, status)");
+            statement.execute("CREATE TABLE IF NOT EXISTS agent_feedback (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, agent_profile_id TEXT, plan_id TEXT, " +
+                    "step_id TEXT, run_id TEXT NOT NULL, status TEXT NOT NULL, validation_status TEXT NOT NULL, " +
+                    "score REAL NOT NULL, failure_class TEXT NOT NULL DEFAULT '', " +
+                    "evidence_quality REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, " +
+                    "UNIQUE(run_id, step_id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_feedback_agent " +
+                    "ON agent_feedback(project_key,agent_profile_id,created_at)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
             statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
@@ -620,6 +646,7 @@ public class SqliteRuntimeStore {
                     deleteBySessionRuns(connection, "tool_calls", currentSession);
                     deleteBySessionRuns(connection, "run_events", currentSession);
                     deleteBySessionRuns(connection, "artifacts", currentSession);
+                    deleteBySessionRuns(connection, "agent_feedback", currentSession);
                     deletePlansForSession(connection, currentSession);
                     try (PreparedStatement attachments = connection.prepareStatement(
                             "DELETE FROM input_attachments WHERE session_id=?")) {
@@ -2087,6 +2114,14 @@ public class SqliteRuntimeStore {
     /** Delegated agents share the root leader's workspace while retaining separate Run state. */
     public String workspaceOwnerRunId(String runId) {
         try (Connection connection = open()) {
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT workspace_ref FROM plan_steps WHERE run_id=? " +
+                            "AND workspace_ref IS NOT NULL AND workspace_ref<>'' ORDER BY updated_at DESC LIMIT 1")) {
+                ps.setString(1, runId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getString(1);
+                }
+            }
             return rootRunId(connection, runId);
         } catch (SQLException e) {
             throw failure("resolve delegated workspace", e);
@@ -2216,6 +2251,54 @@ public class SqliteRuntimeStore {
             }
         } catch (SQLException e) {
             throw failure("read model usage", e);
+        }
+    }
+
+    public AgentFeedback recordAgentFeedback(String projectKey, String agentProfileId, String planId, String stepId,
+                                             String runId, String status, String validationStatus, double score,
+                                             String failureClass, double evidenceQuality) {
+        String project = normalizeProjectKey(projectKey);
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO agent_feedback(id,project_key,agent_profile_id,plan_id,step_id,run_id,status," +
+                        "validation_status,score,failure_class,evidence_quality,created_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,step_id) DO UPDATE SET " +
+                        "status=excluded.status,validation_status=excluded.validation_status,score=excluded.score," +
+                        "failure_class=excluded.failure_class,evidence_quality=excluded.evidence_quality")) {
+            ps.setString(1, id("agent_feedback"));
+            ps.setString(2, project);
+            ps.setString(3, nullableText(agentProfileId));
+            ps.setString(4, nullableText(planId));
+            ps.setString(5, nullableText(stepId));
+            ps.setString(6, requireText(runId, "runId", 120));
+            ps.setString(7, status == null || status.isBlank() ? "UNKNOWN" : status.trim().toUpperCase());
+            ps.setString(8, validationStatus == null || validationStatus.isBlank()
+                    ? "UNKNOWN" : validationStatus.trim().toUpperCase());
+            ps.setDouble(9, Math.max(0, Math.min(1, score)));
+            ps.setString(10, failureClass == null ? "" : failureClass.trim());
+            ps.setDouble(11, Math.max(0, Math.min(1, evidenceQuality)));
+            ps.setString(12, now);
+            ps.executeUpdate();
+            return agentFeedback(runId, stepId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("record agent feedback", e);
+        }
+    }
+
+    public Optional<AgentFeedback> agentFeedback(String runId, String stepId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM agent_feedback WHERE run_id=? AND step_id=?")) {
+            ps.setString(1, runId);
+            ps.setString(2, nullableText(stepId));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new AgentFeedback(rs.getString("id"), rs.getString("project_key"),
+                        rs.getString("agent_profile_id"), rs.getString("plan_id"), rs.getString("step_id"),
+                        rs.getString("run_id"), rs.getString("status"), rs.getString("validation_status"),
+                        rs.getDouble("score"), rs.getString("failure_class"),
+                        rs.getDouble("evidence_quality"), instant(rs.getString("created_at")))) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read agent feedback", e);
         }
     }
 
@@ -3191,6 +3274,10 @@ public class SqliteRuntimeStore {
     public record ModelTokenUsage(int inputTokens, int outputTokens) {
         public int totalTokens() { return inputTokens + outputTokens; }
     }
+
+    public record AgentFeedback(String id, String projectKey, String agentProfileId, String planId, String stepId,
+                                String runId, String status, String validationStatus, double score,
+                                String failureClass, double evidenceQuality, Instant createdAt) { }
 
     public record MemoryUnit(String id, String projectKey, String memoryKey, String content, String tags,
                              String layer, String memoryType, double confidence, String origin,
