@@ -92,6 +92,18 @@ Planner 调用现有 `ModelClient` 生成结构化 JSON。Server 会清理 Markd
 
 本阶段已提供 `/v1/plans`、`/v1/plans/generate`、`/v1/plans/{id}/approve|start|dispatch|cancel|replan`、`/v1/plans/{id}/steps|events|jobs|validation-checks`、`/v1/plans/{id}/dag/batches`、`/v1/plan-steps/{id}/retry|skip` 和 `/v1/async-jobs`。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
 
+## Plan 与 Multi-Agent 协同
+
+Plan 负责“任务如何拆、依赖如何排、每步如何验收”；Multi-Agent 负责“某个步骤是否需要委派给专家 Run”。二者之间通过持久化字段衔接，而不是靠对话文本约定。
+
+`spawn_agent` 是普通 ToolCall，必须先落库并按需要审批。执行时 `DelegationToolProvider` 会根据父 ToolCall 幂等创建或复用内部子 Session/Run，并把 `plan_id`、`plan_step_id`、scope、允许文件/工具、输入 artifact、期望输出、done criteria、预算、deadline、依赖和禁止操作写入 `run_delegations.envelope_json`。子 Agent 仍由普通 `RunProcessor` 执行，因此继续复用正式模型方案、ToolCall 持久化、Approval、Artifact、Event、预算和恢复链路。
+
+Leader 通过 `get_agent_result` 读取子 Run 结果。该工具会把子 Run 终态、摘要、Artifact、Token 用量、失败分类和证据写回 `run_delegations.result_json`，供 Leader 汇总、Plan Step 验证和后续审计使用。Plan Step 最终仍由 `PlanValidator` 验收；子 Agent 声称完成不等于 Step 自动完成，必须有 `validation_checks`、必要 Artifact 或可匹配证据。
+
+阶段 5/6 增加的 `agent_feedback` 是 Plan 与 Agent Harness 的反馈层：每个绑定 Step 的 Run 终态都会记录验证状态、得分、失败分类和证据质量；验证通过时还会写过程型 Memory。这样后续调度、专家评分和人工复盘可以基于结构化事实，而不是翻聊天记录。
+
+更完整的链路、字段、状态机和边界见 [Plan Runtime、Multi-Agent 与 Agent Harness 深度说明](plan-multi-agent-harness.md)。
+
 ## Memory 与上下文
 
 Run 完成后先创建持久化 `memory_extractions` 任务，再由 Worker 提取带类型、层级、置信度和来源的 L1/L2/L3 Memory。同 key 变化和人工编辑都先写入 `memory_revisions`。当前 Memory 还保存结构化 payload、生命周期状态、来源类型/ID/修订、有效期、supersedes 和 checksum；自动提取写入 `memory_sources`，同 canonical key 内容变化记录 `memory_conflicts` 供人工审计。召回综合词法/语义相关性、置信度、时间衰减、置顶和稳定 L3 偏好；显式 REST CRUD 是人工纠错边界。

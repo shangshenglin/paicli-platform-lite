@@ -24,6 +24,14 @@
 
 ## 2026-07-23
 
+### Plan / Multi-Agent / Agent Harness 深度文档补全
+
+- 变更：新增 `docs/plan-multi-agent-harness.md`，系统说明 Plan Runtime、Step 状态机、资源读写集、隔离策略、Validation Gate、Agent Feedback、过程型 Memory、Multi-Agent 委派信封、Plan 与子 Agent 协同、当前边界和代码阅读路线。
+- 变更：更新《PaiCLI Platform Lite 技术架构与面试讲解.md》，把 Plan 数据模型、迁移版本、阶段 5/6 受控并行、Agent Feedback 闭环、Multi-Agent Harness 和代码阅读路线补充到当前实现状态。
+- 变更：更新 `README.md` 与 `docs/architecture.md`，移除旧的“真正并行仍需资源锁与会话隔离”表述，改为当前 Lite 已具备资源冲突控制、内部 Session 隔离和 workspace 引用，同时明确真实 Git worktree merge 仍是后续工具层边界。
+- 思路：把刚完成的阶段 5/6 从“阶段做法清单”升级为可交接、可面试、可按代码追踪的技术说明，避免后续只知道做了字段和测试，却说不清 Plan、Multi-Agent 与反馈闭环的运行语义。
+- 验证：运行 Markdown 内容检索，确认不再残留“版本 1–16”“82 项测试”“真正并行仍需资源锁”等旧表述；运行 `git diff --check` 通过，仅有 Windows 换行提示。此次为文档补全，未运行 Maven 测试。
+
 ### Memory/RAG/Plan-Agent 阶段 5/6 受控并行与闭环生产加固
 
 - 变更：新增 Schema 迁移 21，`plan_steps` 增加资源读集、资源写集、隔离策略、最大并行度、关键路径权重和 workspace 引用；新增 `agent_feedback` 表，用于记录 Plan Step 关联 Run 的验证状态、得分、失败分类和证据质量。
