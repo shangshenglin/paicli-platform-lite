@@ -24,6 +24,14 @@
 
 ## 2026-07-23
 
+### Plan 确定性验证器与局部 Replan
+
+- 变更：`PlanValidator` 扩展为 EvidenceBundle 结构，单条 done criteria 会记录 `validatorType`、`expected`、`actual`、`status`、`sourceRefs`、`startedAt` 和 `finishedAt`。
+- 变更：新增 `file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>` 和 `test_report:<path>` 验证规则；文件与测试报告验证只读取 `paicli.workspace-root` 下相对路径，拒绝绝对路径和越界路径。
+- 变更：`replacePlan` 支持 FAILED/ACTIVE Plan 的局部尾部 Replan；当不存在运行中、等待审批、等待 Job 或验证中的 Step 时，保留已完成/跳过/取消步骤及其 Validation Check，删除未完成尾部并插入新步骤，新 Plan 版本重新进入 ACTIVE。
+- 思路：先把方案里的确定性验证和失败恢复落地到现有 SQLite 结构中，不额外引入迁移；局部 Replan 只替换未完成尾部，避免无理由重做已经验证通过的工作。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，10 个 Plan 测试通过，覆盖最终回答验证、文件验证、测试报告验证、路径越界拒绝、验证失败重试和失败尾部局部 Replan；运行 `.\mvnw.cmd test` 通过，paicli-server 91 个测试、sandbox-agent 2 个测试均通过；运行 `.\mvnw.cmd package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；尝试运行 `.\mvnw.cmd clean test` 时仍在 clean 阶段因 Windows 锁定 `paicli-server-0.6.0-SNAPSHOT.jar` 删除失败，非编译或测试失败。
+
 ### Plan Validator Gate 第一阶段落地
 
 - 变更：新增 `PlanValidator`，Run `COMPLETED` 后不再直接完成 Plan Step，而是先进入 `VALIDATING`，按 done criteria 生成 `actual`、`evidence` 和 `error`。

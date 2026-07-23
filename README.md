@@ -485,9 +485,9 @@ GET                         /v1/async-jobs/{jobId}
 POST                        /v1/async-jobs/{jobId}/cancel
 ```
 
-Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会领取 `READY` Step，创建普通 ReAct Run 执行；Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。
+Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会领取 `READY` Step，创建普通 ReAct Run 执行；Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部 Replan：保留已完成/跳过/取消步骤及其证据，只替换未完成尾部并重新激活 Plan。
 
-当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>` 以及普通文字验收标准的最终回答证据匹配。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续文件断言、API 断言、截图断言和 Reviewer Agent 证据包预留扩展位置。
+当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>`、`file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>`、`test_report:<path>` 以及普通文字验收标准的最终回答证据匹配。文件与测试报告验证只读取 `paicli.workspace-root` 下的相对路径，拒绝绝对路径和越界路径。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续命令/API/截图断言和 Reviewer Agent 证据包预留扩展位置。
 
 新增 API 包括 `/v1/sessions/{sessionId}/plans`、`/v1/plans/{id}/dispatch`、`/v1/plans/{id}/dag/batches`、`/v1/plans/{id}/jobs`、`/v1/plans/{id}/validation-checks`、`/v1/async-jobs` 和 `/v1/async-jobs/{id}/cancel`。Console 普通消息区会在当前 Session 顶部展示已关联 Plan 的目标、状态、步骤进度和当前步骤，并保留打开工作台、详情和调度动作。Read-only 并行 DAG 当前先提供批次分析和保守调度，不会绕过同一 Session 的活跃 Run 限制；真正的并行执行仍需资源锁与会话隔离策略进一步完善。
 

@@ -134,6 +134,8 @@
 - [x] 新增 `PlanExecutionService` 与 Plan Worker，自动领取 `READY` Step，创建普通 ReAct Run，并在 Run 终态后回写 Step、Plan、Async Job 和 Validation Check
 - [x] 新增 `PlanValidator` 验证闸口，Run `COMPLETED` 后先进入 `VALIDATING`，按 done criteria 写入 `actual/evidence/error`，验证通过才完成 Step，验证失败进入 `VALIDATION_FAILED`
 - [x] 支持 `REACT`、`ASYNC`/`ASYNC_JOB`、`NONE`、`MANUAL`/`USER_APPROVAL` 的基础 Step 状态推进
+- [x] Validation Check 支持最终回答、受控文件存在/内容和 JUnit XML 测试报告验证，并沉淀 EvidenceBundle 字段
+- [x] Replan 支持 FAILED/ACTIVE Plan 的局部尾部替换，保留已完成步骤及验证证据
 - [x] 新增 `/dispatch`、`/dag/batches`、`/jobs`、`/validation-checks` 和通用 `/v1/async-jobs` API
 - [x] 新增 Read-only DAG 批次分析；当前先做保守调度，不绕过同一 Session 的活跃 Run 限制
 - [x] Console 效率工作台新增 Plan 工作台，展示计划、调度、Async Job、Validation Check 和 DAG 批次
@@ -142,10 +144,9 @@
 
 ### 阶段 15 后续工作
 
-- [ ] Replan 支持 ACTIVE Plan 的局部下游替换
 - [ ] Read-only DAG 真正并行执行、资源锁和会话隔离策略
 - [ ] Async Job 接入可审批的长命令、下载、OCR、CI 查询等真实后台执行器
-- [ ] Validation Check 拆分为命令/API/截图/文件断言，并沉淀最终回答证据包
+- [ ] Validation Check 继续扩展命令/API/截图/数据库/安全扫描断言
 
 ## 明确不做
 

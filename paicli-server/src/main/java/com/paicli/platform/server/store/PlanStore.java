@@ -477,9 +477,6 @@ public class PlanStore {
             c.setAutoCommit(false);
             try {
                 Plan plan = findPlan(c, planId).orElseThrow(() -> new IllegalArgumentException("plan not found"));
-                if ("ACTIVE".equals(plan.status())) {
-                    throw new IllegalStateException("active plan replan is not implemented in this phase");
-                }
                 int nextVersion = plan.version() + 1;
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
@@ -492,19 +489,35 @@ public class PlanStore {
                     ps.setString(6, now);
                     ps.executeUpdate();
                 }
-                deletePlanChildren(c, planId);
-                insertSteps(c, planId, steps, now);
-                insertEdges(c, planId, edges, now);
-                insertValidationChecks(c, planId, steps, now);
-                try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plans SET summary=?,status='WAITING_APPROVAL',version=?,raw_plan_json=?," +
-                                "validation_errors_json='[]',updated_at=?,failure_reason=NULL WHERE id=?")) {
-                    ps.setString(1, value(summary, 2_000));
-                    ps.setInt(2, nextVersion);
-                    ps.setString(3, json(rawPlanJson, 128_000));
-                    ps.setString(4, now);
-                    ps.setString(5, planId);
-                    ps.executeUpdate();
+                if (List.of("ACTIVE", "FAILED").contains(plan.status())) {
+                    replaceUnfinishedPlanTail(c, planId, steps, edges, now);
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE plans SET summary=?,status='ACTIVE',version=?,raw_plan_json=?," +
+                                    "validation_errors_json='[]',updated_at=?,completed_at=NULL," +
+                                    "failure_reason=NULL WHERE id=?")) {
+                        ps.setString(1, value(summary, 2_000));
+                        ps.setInt(2, nextVersion);
+                        ps.setString(3, json(rawPlanJson, 128_000));
+                        ps.setString(4, now);
+                        ps.setString(5, planId);
+                        ps.executeUpdate();
+                    }
+                    markReadySteps(c, planId, now);
+                } else {
+                    deletePlanChildren(c, planId);
+                    insertSteps(c, planId, steps, now);
+                    insertEdges(c, planId, edges, now);
+                    insertValidationChecks(c, planId, steps, now);
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE plans SET summary=?,status='WAITING_APPROVAL',version=?,raw_plan_json=?," +
+                                    "validation_errors_json='[]',updated_at=?,failure_reason=NULL WHERE id=?")) {
+                        ps.setString(1, value(summary, 2_000));
+                        ps.setInt(2, nextVersion);
+                        ps.setString(3, json(rawPlanJson, 128_000));
+                        ps.setString(4, now);
+                        ps.setString(5, planId);
+                        ps.executeUpdate();
+                    }
                 }
                 appendEvent(c, planId, null, "plan.replanned", "{\"version\":" + nextVersion + "}", now);
                 c.commit();
@@ -938,6 +951,79 @@ public class PlanStore {
             try (PreparedStatement ps = c.prepareStatement("DELETE FROM " + table + " WHERE plan_id=?")) {
                 ps.setString(1, planId);
                 ps.executeUpdate();
+            }
+        }
+    }
+
+    private void replaceUnfinishedPlanTail(Connection c, String planId, List<StepDraft> steps,
+                                           List<EdgeDraft> edges, String now) throws SQLException {
+        if (countSteps(c, planId, "RUNNING", "WAITING_APPROVAL", "WAITING_JOB", "VALIDATING") > 0) {
+            throw new IllegalStateException("cannot replan while plan steps are still executing");
+        }
+        int ordinalOffset = maxOrdinal(c, planId);
+        deleteUnfinishedPlanChildren(c, planId);
+        List<StepDraft> shiftedSteps = steps.stream()
+                .map(step -> new StepDraft(step.id(), "replan_" + (ordinalOffset + step.ordinal()),
+                        ordinalOffset + step.ordinal(),
+                        step.title(), step.description(), step.type(), step.executionMode(),
+                        step.doneCriteriaJson()))
+                .toList();
+        insertSteps(c, planId, shiftedSteps, now);
+        insertEdges(c, planId, edges, now);
+        insertValidationChecks(c, planId, shiftedSteps, now);
+        appendEvent(c, planId, null, "plan.tail_replanned",
+                "{\"preservedSteps\":" + countSteps(c, planId, "COMPLETED", "SKIPPED", "CANCELED") +
+                        ",\"newSteps\":" + shiftedSteps.size() + "}", now);
+    }
+
+    private void deleteUnfinishedPlanChildren(Connection c, String planId) throws SQLException {
+        String unfinished = "SELECT id FROM plan_steps WHERE plan_id=? " +
+                "AND status NOT IN ('COMPLETED','SKIPPED','CANCELED')";
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM async_jobs WHERE plan_id=? AND step_id IN (" + unfinished + ")")) {
+            ps.setString(1, planId);
+            ps.setString(2, planId);
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM validation_checks WHERE plan_id=? AND step_id IN (" + unfinished + ")")) {
+            ps.setString(1, planId);
+            ps.setString(2, planId);
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM plan_edges WHERE plan_id=? AND (from_step_id IN (" + unfinished +
+                        ") OR to_step_id IN (" + unfinished + "))")) {
+            ps.setString(1, planId);
+            ps.setString(2, planId);
+            ps.setString(3, planId);
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM plan_steps WHERE plan_id=? AND status NOT IN ('COMPLETED','SKIPPED','CANCELED')")) {
+            ps.setString(1, planId);
+            ps.executeUpdate();
+        }
+    }
+
+    private int maxOrdinal(Connection c, String planId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT COALESCE(MAX(ordinal),0) FROM plan_steps WHERE plan_id=?")) {
+            ps.setString(1, planId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    private int countSteps(Connection c, String planId, String... statuses) throws SQLException {
+        String placeholders = String.join(",", java.util.Collections.nCopies(statuses.length, "?"));
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT COUNT(*) FROM plan_steps WHERE plan_id=? AND status IN (" + placeholders + ")")) {
+            ps.setString(1, planId);
+            for (int i = 0; i < statuses.length; i++) ps.setString(i + 2, statuses[i]);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
             }
         }
     }
