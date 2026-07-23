@@ -64,6 +64,34 @@ class KnowledgeServiceTest {
         assertThat(service.search("material-system", "库存调整必须经过审批", 3)).isNotEmpty();
     }
 
+    @Test
+    void plansQueriesAndReturnsCitationMetadata() {
+        KnowledgeService service = new KnowledgeService(properties());
+        service.upsert("codebase", "PaymentService.java",
+                """
+                package demo;
+
+                public class PaymentService {
+                    public void charge() {
+                        throw new IllegalStateException("card declined");
+                    }
+                }
+                """);
+
+        var hits = service.search("codebase", "PaymentService.java charge exception", 3);
+
+        assertThat(hits).isNotEmpty();
+        assertThat(hits.get(0)).satisfies(hit -> {
+            assertThat(hit.document()).isEqualTo("PaymentService.java");
+            assertThat(hit.queryType()).isEqualTo("CODE");
+            assertThat(hit.retrievalStrategy()).contains("PATH_SYMBOL");
+            assertThat(hit.citation()).contains("PaymentService.java#chunk-").contains("@v1");
+            assertThat(hit.documentVersion()).isEqualTo(1);
+            assertThat(hit.matchReasons()).contains("PATH_EXACT", "SYMBOL_EXACT");
+            assertThat(hit.lexicalScore()).isPositive();
+        });
+    }
+
     private PlatformProperties properties() {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
     }

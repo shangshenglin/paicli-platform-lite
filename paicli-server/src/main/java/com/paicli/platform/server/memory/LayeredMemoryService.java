@@ -31,7 +31,8 @@ public class LayeredMemoryService {
     private static final Pattern SECRET = Pattern.compile(
             "(?i)(api[_-]?key|access[_-]?token|password|secret)\\s*[:=]\\s*\\S+");
     private static final Set<String> LAYERS = Set.of("L1", "L2", "L3");
-    private static final Set<String> TYPES = Set.of("PREFERENCE", "FACT", "DECISION", "CONSTRAINT", "LESSON");
+    private static final Set<String> TYPES = Set.of("EPISODIC", "SEMANTIC", "PROCEDURAL", "PREFERENCE",
+            "DECISION", "ENTITY_RELATION", "FACT", "CONSTRAINT", "LESSON");
     private final SqliteRuntimeStore store;
     private final ModelClient modelClient;
     private final KnowledgeEmbeddingService embeddings;
@@ -100,8 +101,13 @@ public class LayeredMemoryService {
         List<String> ids = new ArrayList<>();
         for (ScoredMemory value : selected) {
             var unit = value.unit();
-            String line = "- [" + unit.layer() + "/" + unit.memoryType() + "/" + unit.memoryKey() + "] "
-                    + unit.content() + "\n";
+            String conflict = "CONFLICTED".equals(unit.status()) ? " conflicted=true" : "";
+            String source = unit.sourceType() == null || unit.sourceType().isBlank()
+                    ? "" : " source=" + unit.sourceType() + ":" + (unit.sourceId() == null ? "" : unit.sourceId());
+            String supersedes = unit.supersedesId() == null || unit.supersedesId().isBlank()
+                    ? "" : " supersedes=" + unit.supersedesId();
+            String line = "- [" + unit.layer() + "/" + unit.memoryType() + "/" + unit.memoryKey()
+                    + source + conflict + supersedes + "] " + unit.content() + "\n";
             if (out.length() + line.length() > properties.maxContextChars()) break;
             out.append(line);
             ids.add(unit.id());
@@ -132,7 +138,7 @@ public class LayeredMemoryService {
                     同一事实发生变化时使用与旧记忆相同的 key，让系统保留修订历史并以新值生效。
                     layer: L1=当前话题事实，L2=项目级经验/决策，L3=长期稳定用户偏好。
                     confidence 必须在 0 到 1 之间。只输出 JSON：
-                    {"memories":[{"key":"stable-key","content":"...","type":"PREFERENCE|FACT|DECISION|CONSTRAINT|LESSON","layer":"L1|L2|L3","confidence":0.9,"tags":["..."]}]}
+                    {"memories":[{"key":"stable-key","content":"...","type":"EPISODIC|SEMANTIC|PROCEDURAL|PREFERENCE|DECISION|ENTITY_RELATION|FACT|CONSTRAINT|LESSON","layer":"L1|L2|L3","confidence":0.9,"tags":["..."]}]}
 
                     已有记忆：
                     """ + existing + "\n\n对话窗口：\n" + transcript;

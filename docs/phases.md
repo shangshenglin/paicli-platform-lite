@@ -144,6 +144,23 @@
 - [x] 评测 Starter Pack 增加默认关闭的 Plan/DAG/验证模板用例
 - [x] 补充 Plan 调度、Async Job、Validation Check 和迁移回归测试
 
+## 阶段 16：Memory/RAG/Plan-Agent 阶段 2/3/4 增量闭环
+
+- [x] Memory 增加结构化 payload、生命周期状态、来源修订、有效期、supersedes 和 checksum 字段；新增 `memory_sources` 与 `memory_conflicts` 审计表，Schema 迁移 20。
+- [x] 自动 Memory 同 key 内容变化保留 revision、来源摘录和 OPEN conflict，召回只使用启用且 ACTIVE、未过期的 Memory。
+- [x] RAG 检索增加 Query Plan，识别代码路径、符号、排障、决策和架构查询，并在 SearchHit 中返回 citation、文档版本、BM25 分、检索策略和命中原因。
+- [x] Agent Harness 的 `spawn_agent` 支持 PlanStep 绑定和执行 envelope，持久化 scope、允许文件/工具、输入 artifact、输出契约、验收标准、预算、deadline、依赖和禁止操作。
+- [x] `get_agent_result` 写回结构化 Agent Result，包含子 Run 状态、摘要、Artifact、Token 用量、失败分类和证据，供 Leader 汇总、恢复和审计使用。
+- [x] Kafka/Redis/MinIO 仍保持预留接口，不实现外部适配器；当前 Lite 运行语义仍是 SQLite、进程内协调和本地文件。
+- [x] 补充 Store 与 RAG 回归测试，覆盖迁移 20、Memory source/conflict/revision、Plan 绑定委派 metadata 和 citation metadata。
+
+### 阶段 16 后续工作
+
+- [ ] Memory conflict 的人工解决 API 与 Console 审计入口。
+- [ ] RAG citation 在 Console 搜索结果中完整展示查询计划、命中原因和反馈闭环。
+- [ ] Agent Result 中的 `files_changed`、`commands_executed`、`tests` 由工具事件自动归集，而不是仅预留结构字段。
+- [ ] PlanStep 委派与 PlanExecutionService 的状态联动继续细化，例如子 Agent 终态自动触发 Step 验证。
+
 ### 阶段 15 后续工作
 
 - [ ] Read-only DAG 真正并行执行、资源锁和会话隔离策略

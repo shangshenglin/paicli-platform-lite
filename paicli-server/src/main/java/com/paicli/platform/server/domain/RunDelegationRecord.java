@@ -11,5 +11,12 @@ public record RunDelegationRecord(
         String agentProfileId,
         String agentName,
         String task,
+        String planId,
+        String planStepId,
+        String envelopeJson,
+        String resultJson,
+        String status,
+        String failureClass,
+        Instant completedAt,
         Instant createdAt
 ) { }

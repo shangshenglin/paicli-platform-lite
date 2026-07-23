@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–15，包含 98 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–15，并补齐 Memory/RAG/Plan/Agent Harness 阶段 2/3/4 增量闭环；包含 100 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -432,7 +432,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–19：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run，以及 Plan Step 领取租约与恢复元数据。
+SQLite `schema_migrations` 当前记录版本 1–20：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据，以及类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -570,6 +570,14 @@ PUT/DELETE                  /v1/productivity/schedules/{id}
 GET/POST                    /v1/productivity/notifications
 PUT/DELETE                  /v1/productivity/notifications/{id}
 ```
+
+#### Memory/RAG/Plan-Agent 阶段 2/3/4 增量
+
+- Memory：`memories` 增加 `structured_payload`、`status`、`source_type/source_id/source_revision`、有效期、`supersedes_id` 和 checksum；新增 `memory_sources` 与 `memory_conflicts`，自动 Memory 同 key 内容变化会保留 revision、记录来源并打开冲突审计。
+- RAG：检索入口增加轻量 Query Plan，识别代码路径、符号、排障、决策和架构类查询；SearchHit 返回 BM25 分、查询类型、检索策略、文档版本、citation 和命中原因，便于后续 UI 解释与排序调参。
+- Plan-Agent：`spawn_agent` 在保持旧字段兼容的同时支持 `plan_id`、`plan_step_id`、scope、允许文件/工具、输入 artifact、期望输出契约、验收标准、预算、deadline、依赖和禁止操作；这些执行信封会持久化到 `run_delegations.envelope_json`。
+- Agent Result：`get_agent_result` 会把子 Run 的终态、摘要、Artifact、Token 用量、失败分类和证据写回 `run_delegations.result_json/status/completed_at`，后续恢复、审计和 Reviewer 聚合可直接读取结构化结果。
+- 外部中间件：Kafka、Redis、MinIO 仍只保留端口边界和配置失败提示，当前没有实现外部适配器，Lite 默认仍是 SQLite、进程内协调和本地文件。
 
 ### Agent 评测
 

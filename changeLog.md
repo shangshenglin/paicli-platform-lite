@@ -24,6 +24,14 @@
 
 ## 2026-07-23
 
+### Memory/RAG/Plan-Agent 阶段 2/3/4 增量闭环
+
+- 变更：新增 Schema 迁移 20，Memory 增加结构化 payload、生命周期状态、来源修订、有效期、supersedes 和 checksum；新增 `memory_sources` 与 `memory_conflicts`，自动 Memory 同 key 内容变化会保留 revision、来源摘录和冲突审计。
+- 变更：RAG 检索增加 Query Plan，识别代码路径、符号、排障、决策和架构查询；SearchHit 返回 citation、文档版本、BM25 分、检索策略和命中原因。
+- 变更：`spawn_agent` 支持 PlanStep 绑定和执行 envelope，持久化 scope、允许文件/工具、输入 artifact、期望输出契约、验收标准、预算、deadline、依赖和禁止操作；`get_agent_result` 将子 Run 的结构化结果、Artifact、Token 用量、失败分类和证据写回 delegation。
+- 思路：把用户方案中阶段 2/3/4 的核心工程闭环先落到现有 SQLite Lite 架构里，保持旧 API 兼容，继续复用 ReAct Run、ToolCall、Approval、Artifact 和预算边界；Kafka、Redis、MinIO 仍只作为预留端口，不引入外部适配器。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-DskipTests" compile` 通过；运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=SqliteRuntimeStoreTest,KnowledgeServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，27 个定向测试通过，覆盖迁移 1-20、Memory source/conflict/revision、Plan 绑定委派 metadata 和 RAG citation metadata；运行 `.\mvnw.cmd test` 通过，Common 2 个、Server 96 个、Sandbox Agent 2 个测试均通过；运行 `.\mvnw.cmd package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；运行 `git diff --check` 通过，仅有 Windows 换行提示。
+
 ### Plan Step 租约、心跳与过期恢复
 
 - 变更：`plan_steps` 新增 `claim_owner`、`lease_expires_at`、`heartbeat_at`、`attempt`、`not_before`、`last_failure_class` 和 `dispatch_idempotency_key`，登记 Schema 迁移 19，并补齐旧库列迁移。

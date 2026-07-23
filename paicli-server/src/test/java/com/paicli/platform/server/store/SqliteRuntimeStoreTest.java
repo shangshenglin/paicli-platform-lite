@@ -86,7 +86,8 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20);
         }
     }
 
@@ -174,6 +175,54 @@ class SqliteRuntimeStoreTest {
 
         store.completeRun(run.id());
         assertThat(store.deleteSession(session.id())).isTrue();
+    }
+
+    @Test
+    void persistsTypedMemorySourcesConflictsAndPlanBoundDelegationMetadata() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("phase-234", "project-a");
+        var run = store.createRun(session.id(), "coordinate");
+
+        store.upsertAutomaticMemory("project-a", "decision.storage", "Use sqlite runtime store",
+                "decision,storage", "L2", "DECISION", 0.8, session.id(), run.id(), null);
+        store.upsertAutomaticMemory("project-a", "decision.storage", "Use sqlite with WAL for runtime store",
+                "decision,storage", "L2", "DECISION", 0.9, session.id(), run.id(), "{\"v\":[1]}");
+
+        var unit = store.memoryUnits("project-a", 10).stream()
+                .filter(memory -> memory.memoryKey().equals("decision.storage"))
+                .findFirst().orElseThrow();
+        assertThat(unit).satisfies(memory -> {
+            assertThat(memory.memoryType()).isEqualTo("DECISION");
+            assertThat(memory.status()).isEqualTo("ACTIVE");
+            assertThat(memory.sourceType()).isEqualTo("run");
+            assertThat(memory.sourceId()).isEqualTo(run.id());
+            assertThat(memory.supersedesId()).isEqualTo(memory.id());
+            assertThat(memory.checksum()).isNotBlank();
+        });
+        assertThat(store.memoryRevisions(unit.id())).singleElement()
+                .satisfies(revision -> assertThat(revision.content()).isEqualTo("Use sqlite runtime store"));
+        assertThat(store.memorySources(unit.id())).hasSize(2)
+                .allSatisfy(source -> assertThat(source.sourceType()).isEqualTo("run"));
+        assertThat(store.memoryConflicts("project-a", "OPEN", 10)).singleElement()
+                .satisfies(conflict -> {
+                    assertThat(conflict.memoryId()).isEqualTo(unit.id());
+                    assertThat(conflict.reason()).contains("same canonical key");
+                });
+
+        var tool = store.createToolCall(run.id(), "provider-agent", "spawn_agent", "{}", "phase-234-agent");
+        var delegation = store.createOrGetDelegation(run.id(), tool.id(), "rag-worker", "refresh citations",
+                "agent-profile-a", "model-profile-a", "plan-a", "step-a",
+                "{\"scope\":\"docs only\",\"done_criteria\":[\"citations\"]}");
+        assertThat(delegation.planId()).isEqualTo("plan-a");
+        assertThat(delegation.planStepId()).isEqualTo("step-a");
+        assertThat(delegation.envelopeJson()).contains("docs only");
+
+        store.createArtifact(delegation.childRunId(), "report", "result.json", "runs/result.json", 42, "sha");
+        var completed = store.completeDelegationResult(delegation.id(), "COMPLETED",
+                "{\"summary\":\"ok\",\"artifacts\":[\"result.json\"]}", "");
+        assertThat(completed.status()).isEqualTo("COMPLETED");
+        assertThat(completed.resultJson()).contains("result.json");
+        assertThat(completed.completedAt()).isNotNull();
     }
 
     @Test

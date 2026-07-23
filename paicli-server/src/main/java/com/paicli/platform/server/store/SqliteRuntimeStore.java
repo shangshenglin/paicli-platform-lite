@@ -148,13 +148,37 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "pinned", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "enabled", "INTEGER NOT NULL DEFAULT 1");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "confirmed_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "structured_payload", "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "source_type", "TEXT NOT NULL DEFAULT 'manual'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "source_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "source_revision", "TEXT NOT NULL DEFAULT '1'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "valid_from", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "valid_to", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "supersedes_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "checksum", "TEXT NOT NULL DEFAULT ''");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_key, updated_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_status " +
+                    "ON memories(project_key,status,enabled,updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_revisions (" +
                     "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, " +
                     "layer TEXT NOT NULL, memory_type TEXT NOT NULL, confidence REAL NOT NULL, " +
                     "replaced_at TEXT NOT NULL, source_run_id TEXT, FOREIGN KEY(memory_id) REFERENCES memories(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_revisions_memory " +
                     "ON memory_revisions(memory_id, replaced_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS memory_sources (" +
+                    "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT, " +
+                    "source_revision TEXT NOT NULL DEFAULT '1', excerpt TEXT NOT NULL DEFAULT '', " +
+                    "created_at TEXT NOT NULL, FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_sources_memory " +
+                    "ON memory_sources(memory_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS memory_conflicts (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, memory_id TEXT NOT NULL, conflicting_memory_id TEXT NOT NULL, " +
+                    "reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN', created_at TEXT NOT NULL, resolved_at TEXT, " +
+                    "FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(conflicting_memory_id) REFERENCES memories(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_conflicts_project " +
+                    "ON memory_conflicts(project_key,status,created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_extractions (" +
                     "run_id TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, " +
                     "error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
@@ -198,13 +222,23 @@ public class SqliteRuntimeStore {
             statement.execute("CREATE TABLE IF NOT EXISTS run_delegations (" +
                     "id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, parent_tool_call_id TEXT NOT NULL UNIQUE, " +
                     "child_session_id TEXT NOT NULL, child_run_id TEXT NOT NULL UNIQUE, agent_name TEXT NOT NULL, " +
-                    "agent_profile_id TEXT, task TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "agent_profile_id TEXT, task TEXT NOT NULL, plan_id TEXT, plan_step_id TEXT, " +
+                    "envelope_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}', " +
+                    "status TEXT NOT NULL DEFAULT 'QUEUED', failure_class TEXT, completed_at TEXT, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(parent_run_id) REFERENCES runs(id), " +
                     "FOREIGN KEY(parent_tool_call_id) REFERENCES tool_calls(id), " +
                     "FOREIGN KEY(child_session_id) REFERENCES sessions(id), " +
                     "FOREIGN KEY(child_run_id) REFERENCES runs(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "agent_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "plan_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "plan_step_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "envelope_json", "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "result_json", "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "status", "TEXT NOT NULL DEFAULT 'QUEUED'");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "failure_class", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "completed_at", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_parent ON run_delegations(parent_run_id, created_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_plan_step ON run_delegations(plan_step_id, status)");
             statement.execute("CREATE TABLE IF NOT EXISTS run_collaboration_policies (" +
                     "run_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, complexity TEXT NOT NULL DEFAULT 'MEDIUM', " +
                     "risk TEXT NOT NULL DEFAULT 'MEDIUM', allowed_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]', " +
@@ -869,7 +903,7 @@ public class SqliteRuntimeStore {
     }
 
     public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
-                                                       String agentName, String task) {
+                                                        String agentName, String task) {
         return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, null, null);
     }
 
@@ -968,12 +1002,22 @@ public class SqliteRuntimeStore {
     }
 
     public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
-                                                       String agentName, String task, String agentProfileId,
-                                                       String modelProfileId) {
+                                                        String agentName, String task, String agentProfileId,
+                                                        String modelProfileId) {
+        return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, agentProfileId, modelProfileId,
+                null, null, "{}");
+    }
+
+    public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
+                                                        String agentName, String task, String agentProfileId,
+                                                        String modelProfileId, String planId, String planStepId,
+                                                        String envelopeJson) {
         String name = requireText(agentName, "agentName", 80);
         String input = requireText(task, "task", 32_000);
         String childAgentProfileId = nullableText(agentProfileId);
         String childModelProfileId = nullableText(modelProfileId);
+        String normalizedEnvelope = envelopeJson == null || envelopeJson.isBlank() ? "{}" : envelopeJson.trim();
+        if (normalizedEnvelope.length() > 64_000) throw new IllegalArgumentException("delegation envelope is too large");
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -1045,7 +1089,8 @@ public class SqliteRuntimeStore {
                 String delegationId = id("delegation");
                 try (PreparedStatement delegation = connection.prepareStatement(
                         "INSERT INTO run_delegations(id,parent_run_id,parent_tool_call_id,child_session_id," +
-                                "child_run_id,agent_profile_id,agent_name,task,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
+                                "child_run_id,agent_profile_id,agent_name,task,plan_id,plan_step_id,envelope_json," +
+                                "status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
                     delegation.setString(1, delegationId);
                     delegation.setString(2, parentRunId);
                     delegation.setString(3, parentToolCallId);
@@ -1054,14 +1099,20 @@ public class SqliteRuntimeStore {
                     delegation.setString(6, resolvedAgentProfileId);
                     delegation.setString(7, name);
                     delegation.setString(8, input);
-                    delegation.setString(9, now.toString());
+                    delegation.setString(9, nullableText(planId));
+                    delegation.setString(10, nullableText(planStepId));
+                    delegation.setString(11, normalizedEnvelope);
+                    delegation.setString(12, RunStatus.QUEUED.name());
+                    delegation.setString(13, now.toString());
                     delegation.executeUpdate();
                 }
                 insertEvent(connection, parentRunId, "agent.delegated", "{\"childRunId\":\""
                         + childRunId + "\",\"agentName\":\"" + escape(name) + "\"}");
                 connection.commit();
                 return new RunDelegationRecord(delegationId, parentRunId, parentToolCallId,
-                        childSessionId, childRunId, resolvedAgentProfileId, name, input, now);
+                        childSessionId, childRunId, resolvedAgentProfileId, name, input,
+                        nullableText(planId), nullableText(planStepId), normalizedEnvelope, "{}",
+                        RunStatus.QUEUED.name(), null, null, now);
             } catch (Exception e) {
                 rollback(connection);
                 throw e;
@@ -1095,6 +1146,33 @@ public class SqliteRuntimeStore {
             }
         } catch (SQLException e) {
             throw failure("find delegated run", e);
+        }
+    }
+
+    public RunDelegationRecord completeDelegationResult(String delegationId, String status,
+                                                        String resultJson, String failureClass) {
+        String normalizedStatus = status == null || status.isBlank() ? "UNKNOWN" : status.trim().toUpperCase();
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE run_delegations SET status=?,result_json=?,failure_class=?," +
+                        "completed_at=CASE WHEN ? IN ('COMPLETED','FAILED','CANCELED') THEN ? ELSE completed_at END " +
+                        "WHERE id=?")) {
+            ps.setString(1, normalizedStatus);
+            ps.setString(2, resultJson == null || resultJson.isBlank() ? "{}" : resultJson);
+            ps.setString(3, failureClass);
+            ps.setString(4, normalizedStatus);
+            ps.setString(5, now);
+            ps.setString(6, delegationId);
+            if (ps.executeUpdate() == 0) throw new IllegalArgumentException("delegation not found: " + delegationId);
+            try (PreparedStatement find = connection.prepareStatement("SELECT * FROM run_delegations WHERE id=?")) {
+                find.setString(1, delegationId);
+                try (ResultSet rs = find.executeQuery()) {
+                    if (rs.next()) return mapDelegation(rs);
+                }
+            }
+            throw new IllegalStateException("delegation result was not persisted");
+        } catch (SQLException e) {
+            throw failure("complete delegated run result", e);
         }
     }
 
@@ -1614,30 +1692,24 @@ public class SqliteRuntimeStore {
             try {
                 MemoryUnit existing = findMemoryUnit(connection, project, key).orElse(null);
                 if (existing != null && !existing.content().equals(value)) {
-                    try (PreparedStatement revision = connection.prepareStatement(
-                            "INSERT INTO memory_revisions(id,memory_id,content,tags,layer,memory_type,confidence," +
-                                    "replaced_at,source_run_id) VALUES(?,?,?,?,?,?,?,?,?)")) {
-                        revision.setString(1, id("memory_revision"));
-                        revision.setString(2, existing.id());
-                        revision.setString(3, existing.content());
-                        revision.setString(4, existing.tags());
-                        revision.setString(5, existing.layer());
-                        revision.setString(6, existing.memoryType());
-                        revision.setDouble(7, existing.confidence());
-                        revision.setString(8, now.toString());
-                        revision.setString(9, runId);
-                        revision.executeUpdate();
-                    }
+                    insertMemoryRevision(connection, existing, runId);
+                    recordMemoryConflict(connection, project, existing.id(), existing.id(),
+                            "same canonical key changed from a different extraction");
                 }
                 String memoryId = existing == null ? id("memory") : existing.id();
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO memories(id,project_key,memory_key,content,tags,created_at,updated_at," +
-                                "layer,memory_type,confidence,origin,source_session_id,source_run_id,embedding_json) " +
-                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_key,memory_key) DO UPDATE SET " +
+                                "layer,memory_type,confidence,origin,source_session_id,source_run_id,embedding_json," +
+                                "structured_payload,status,source_type,source_id,source_revision,valid_from,supersedes_id,checksum) " +
+                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_key,memory_key) DO UPDATE SET " +
                                 "content=excluded.content,tags=excluded.tags,updated_at=excluded.updated_at," +
                                 "layer=excluded.layer,memory_type=excluded.memory_type,confidence=excluded.confidence," +
                                 "origin='automatic',source_session_id=excluded.source_session_id," +
-                                "source_run_id=excluded.source_run_id,embedding_json=excluded.embedding_json")) {
+                                "source_run_id=excluded.source_run_id,embedding_json=excluded.embedding_json," +
+                                "structured_payload=excluded.structured_payload,status=excluded.status," +
+                                "source_type=excluded.source_type,source_id=excluded.source_id," +
+                                "source_revision=excluded.source_revision,valid_from=COALESCE(memories.valid_from,excluded.valid_from)," +
+                                "supersedes_id=excluded.supersedes_id,checksum=excluded.checksum")) {
                     ps.setString(1, memoryId);
                     ps.setString(2, project);
                     ps.setString(3, key);
@@ -1652,8 +1724,19 @@ public class SqliteRuntimeStore {
                     ps.setString(12, sessionId);
                     ps.setString(13, runId);
                     ps.setString(14, embeddingJson);
+                    ps.setString(15, "{}");
+                    ps.setString(16, "ACTIVE");
+                    ps.setString(17, "run");
+                    ps.setString(18, runId);
+                    ps.setString(19, runId == null ? "1" : runId);
+                    ps.setString(20, existing == null ? now.toString() : existing.validFrom() == null
+                            ? existing.createdAt().toString() : existing.validFrom().toString());
+                    ps.setString(21, existing == null || existing.content().equals(value) ? null : existing.id());
+                    ps.setString(22, checksum(key + "\n" + value));
                     ps.executeUpdate();
                 }
+                insertMemorySource(connection, memoryId, "run", runId, runId == null ? "1" : runId,
+                        excerpt(value));
                 connection.commit();
                 return findMemory(memoryId).orElseThrow();
             } catch (Exception e) {
@@ -1669,10 +1752,11 @@ public class SqliteRuntimeStore {
     public List<MemoryUnit> memoryUnits(String projectKey, int limit) {
         List<MemoryUnit> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "SELECT * FROM memories WHERE project_key=? AND enabled=1 " +
-                        "ORDER BY pinned DESC, updated_at DESC LIMIT ?")) {
+                "SELECT * FROM memories WHERE project_key=? AND enabled=1 AND status='ACTIVE' " +
+                        "AND (valid_to IS NULL OR valid_to>?) ORDER BY pinned DESC, updated_at DESC LIMIT ?")) {
             ps.setString(1, normalizeProjectKey(projectKey));
-            ps.setInt(2, Math.max(1, Math.min(limit, 500)));
+            ps.setString(2, Instant.now().toString());
+            ps.setInt(3, Math.max(1, Math.min(limit, 500)));
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) values.add(mapMemoryUnit(rs));
             }
@@ -2388,6 +2472,39 @@ public class SqliteRuntimeStore {
         } catch (SQLException e) { throw failure("list memory revisions", e); }
     }
 
+    public List<MemorySource> memorySources(String memoryId) {
+        List<MemorySource> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM memory_sources WHERE memory_id=? ORDER BY created_at DESC")) {
+            ps.setString(1, memoryId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(new MemorySource(rs.getString("id"), rs.getString("memory_id"),
+                        rs.getString("source_type"), rs.getString("source_id"), rs.getString("source_revision"),
+                        rs.getString("excerpt"), instant(rs.getString("created_at"))));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list memory sources", e); }
+    }
+
+    public List<MemoryConflict> memoryConflicts(String projectKey, String status, int limit) {
+        List<MemoryConflict> values = new ArrayList<>();
+        String normalizedStatus = status == null || status.isBlank() ? "OPEN" : status.trim().toUpperCase();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM memory_conflicts WHERE project_key=? AND status=? " +
+                        "ORDER BY created_at DESC LIMIT ?")) {
+            ps.setString(1, normalizeProjectKey(projectKey));
+            ps.setString(2, normalizedStatus);
+            ps.setInt(3, Math.max(1, Math.min(limit, 200)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(new MemoryConflict(rs.getString("id"), rs.getString("project_key"),
+                        rs.getString("memory_id"), rs.getString("conflicting_memory_id"),
+                        rs.getString("reason"), rs.getString("status"), instant(rs.getString("created_at")),
+                        instant(rs.getString("resolved_at"))));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list memory conflicts", e); }
+    }
+
     public MemoryUnit restoreMemoryRevision(String memoryId, String revisionId) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
@@ -2490,6 +2607,15 @@ public class SqliteRuntimeStore {
         for (String value : tags.split(",")) if (!value.isBlank()) values.add(value.trim());
     }
 
+    private static String checksum(String value) {
+        return Integer.toUnsignedString((value == null ? "" : value).hashCode(), 36);
+    }
+
+    private static String excerpt(String value) {
+        String text = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return text.length() > 500 ? text.substring(0, 500) : text;
+    }
+
     private void insertMemoryRevision(Connection connection, MemoryUnit value, String sourceRunId)
             throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
@@ -2500,6 +2626,47 @@ public class SqliteRuntimeStore {
             ps.setString(5, value.layer()); ps.setString(6, value.memoryType());
             ps.setDouble(7, value.confidence()); ps.setString(8, Instant.now().toString());
             ps.setString(9, sourceRunId); ps.executeUpdate();
+        }
+    }
+
+    private void insertMemorySource(Connection connection, String memoryId, String sourceType, String sourceId,
+                                    String sourceRevision, String excerpt) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO memory_sources(id,memory_id,source_type,source_id,source_revision,excerpt,created_at) " +
+                        "VALUES(?,?,?,?,?,?,?)")) {
+            ps.setString(1, id("memory_source"));
+            ps.setString(2, memoryId);
+            ps.setString(3, sourceType == null || sourceType.isBlank() ? "manual" : sourceType);
+            ps.setString(4, sourceId);
+            ps.setString(5, sourceRevision == null || sourceRevision.isBlank() ? "1" : sourceRevision);
+            ps.setString(6, excerpt == null ? "" : excerpt);
+            ps.setString(7, Instant.now().toString());
+            ps.executeUpdate();
+        }
+    }
+
+    private void recordMemoryConflict(Connection connection, String projectKey, String memoryId,
+                                      String conflictingMemoryId, String reason) throws SQLException {
+        try (PreparedStatement existing = connection.prepareStatement(
+                "SELECT 1 FROM memory_conflicts WHERE project_key=? AND memory_id=? " +
+                        "AND conflicting_memory_id=? AND status='OPEN'")) {
+            existing.setString(1, projectKey);
+            existing.setString(2, memoryId);
+            existing.setString(3, conflictingMemoryId);
+            try (ResultSet rs = existing.executeQuery()) {
+                if (rs.next()) return;
+            }
+        }
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO memory_conflicts(id,project_key,memory_id,conflicting_memory_id,reason,status,created_at) " +
+                        "VALUES(?,?,?,?,?,'OPEN',?)")) {
+            ps.setString(1, id("memory_conflict"));
+            ps.setString(2, projectKey);
+            ps.setString(3, memoryId);
+            ps.setString(4, conflictingMemoryId);
+            ps.setString(5, reason);
+            ps.setString(6, Instant.now().toString());
+            ps.executeUpdate();
         }
     }
 
@@ -2995,7 +3162,10 @@ public class SqliteRuntimeStore {
         return new RunDelegationRecord(rs.getString("id"), rs.getString("parent_run_id"),
                 rs.getString("parent_tool_call_id"), rs.getString("child_session_id"),
                 rs.getString("child_run_id"), rs.getString("agent_profile_id"),
-                rs.getString("agent_name"), rs.getString("task"), instant(rs.getString("created_at")));
+                rs.getString("agent_name"), rs.getString("task"), rs.getString("plan_id"),
+                rs.getString("plan_step_id"), rs.getString("envelope_json"), rs.getString("result_json"),
+                rs.getString("status"), rs.getString("failure_class"), instant(rs.getString("completed_at")),
+                instant(rs.getString("created_at")));
     }
 
     private static CollaborationPolicy mapCollaborationPolicy(ResultSet rs) throws SQLException {
@@ -3026,11 +3196,18 @@ public class SqliteRuntimeStore {
                              String layer, String memoryType, double confidence, String origin,
                              String sourceSessionId, String sourceRunId, String embeddingJson,
                              Instant createdAt, Instant updatedAt, Instant lastAccessedAt, int accessCount,
-                             boolean pinned, boolean enabled, Instant confirmedAt) { }
+                             boolean pinned, boolean enabled, Instant confirmedAt,
+                             String structuredPayload, String status, String sourceType, String sourceId,
+                             String sourceRevision, Instant validFrom, Instant validTo, String supersedesId,
+                             String checksum) { }
 
     public record MemoryRevision(String id, String memoryId, String content, String tags, String layer,
-                                 String memoryType, double confidence, Instant replacedAt,
-                                 String sourceRunId) { }
+                                  String memoryType, double confidence, Instant replacedAt,
+                                  String sourceRunId) { }
+    public record MemorySource(String id, String memoryId, String sourceType, String sourceId,
+                               String sourceRevision, String excerpt, Instant createdAt) { }
+    public record MemoryConflict(String id, String projectKey, String memoryId, String conflictingMemoryId,
+                                 String reason, String status, Instant createdAt, Instant resolvedAt) { }
 
     public record ApprovalPolicy(String id, String scope, String sessionId, String projectKey,
                                  String toolName, String argumentsSha256, Instant createdAt) { }
@@ -3086,7 +3263,10 @@ public class SqliteRuntimeStore {
                 Instant.parse(rs.getString("updated_at")),
                 lastAccessed == null || lastAccessed.isBlank() ? null : Instant.parse(lastAccessed),
                 rs.getInt("access_count"), rs.getInt("pinned") != 0, rs.getInt("enabled") != 0,
-                confirmedAt == null || confirmedAt.isBlank() ? null : Instant.parse(confirmedAt));
+                confirmedAt == null || confirmedAt.isBlank() ? null : Instant.parse(confirmedAt),
+                rs.getString("structured_payload"), rs.getString("status"), rs.getString("source_type"),
+                rs.getString("source_id"), rs.getString("source_revision"), instant(rs.getString("valid_from")),
+                instant(rs.getString("valid_to")), rs.getString("supersedes_id"), rs.getString("checksum"));
     }
 
     private static ApprovalPolicy mapApprovalPolicy(ResultSet rs) throws SQLException {

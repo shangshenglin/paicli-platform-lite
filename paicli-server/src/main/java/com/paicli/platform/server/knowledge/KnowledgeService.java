@@ -153,7 +153,8 @@ public class KnowledgeService {
         String normalized = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         if (normalized.isBlank()) throw new IllegalArgumentException("query must not be blank");
         int limit = Math.max(1, Math.min(requestedLimit, 10));
-        Set<String> terms = terms(normalized);
+        QueryPlan plan = plan(query);
+        Set<String> terms = terms(plan.queryText());
         float[] queryVector = embeddings.semanticEnabled() ? embeddings.embed(normalized) : new float[0];
         List<Candidate> candidates = new ArrayList<>();
         int consumed = 0;
@@ -162,6 +163,8 @@ public class KnowledgeService {
             if (consumed >= MAX_TOTAL_CHARS) break;
             try {
                 IndexedDocument indexed = readOrCreateIndex(document.path());
+                DocumentMetadata metadata = readMetadata(document.path());
+                int documentVersion = metadata == null ? 1 : metadata.version();
                 for (int index = 0; index < indexed.chunks().size(); index++) {
                     IndexedChunk chunk = indexed.chunks().get(index);
                     consumed += chunk.text().length();
@@ -171,7 +174,7 @@ public class KnowledgeService {
                     for (String token : tokens) frequencies.merge(token, 1, Integer::sum);
                     candidates.add(new Candidate(candidates.size(), document.name(), index + 1,
                             chunk.start(), chunk.end(), chunk.heading(), chunk.kind(), chunk.text(),
-                            frequencies, Math.max(1, tokens.size()), similarity, 0));
+                            frequencies, Math.max(1, tokens.size()), similarity, 0, documentVersion));
                 }
             } catch (Exception e) {
                 throw new IllegalStateException("failed to search " + document.name(), e);
@@ -187,7 +190,7 @@ public class KnowledgeService {
         double averageLength = candidates.stream().mapToInt(Candidate::length).average().orElse(1);
         List<Candidate> scored = candidates.stream().map(candidate -> candidate.withLexical(
                 bm25(candidate, terms, documentFrequency, candidates.size(), averageLength)
-                        + phraseBoost(candidate, normalized))).toList();
+                        + phraseBoost(candidate, normalized) + exactBoost(candidate, plan))).toList();
 
         Map<Integer, Double> fused = new HashMap<>();
         rank(scored.stream().filter(candidate -> candidate.lexical() > 0)
@@ -210,8 +213,12 @@ public class KnowledgeService {
             if (perDocument.getOrDefault(candidate.document(), 0) >= 3 || overlapsExisting(hits, candidate)) continue;
             double finalScore = fused.getOrDefault(candidate.id(), 0.0) + candidate.lexical() * 0.01
                     + Math.max(0, candidate.similarity()) * 0.02;
+            String citation = candidate.document() + "#chunk-" + candidate.chunk() + ":"
+                    + candidate.start() + "-" + candidate.end() + "@v" + candidate.documentVersion();
             hits.add(new SearchHit(candidate.document(), candidate.chunk(), candidate.start(), candidate.end(),
-                    finalScore, candidate.similarity(), candidate.heading(), candidate.kind(), candidate.text()));
+                    finalScore, candidate.similarity(), candidate.lexical(), plan.queryType(), plan.strategy(),
+                    citation, candidate.documentVersion(), false,
+                    matchReasons(candidate, plan, normalized), candidate.heading(), candidate.kind(), candidate.text()));
             perDocument.merge(candidate.document(), 1, Integer::sum);
             if (hits.size() >= limit) break;
         }
@@ -254,6 +261,65 @@ public class KnowledgeService {
         String text = (candidate.heading() + " " + candidate.text()).toLowerCase(Locale.ROOT);
         if (text.contains(query)) return 3.0;
         return candidate.heading() != null && candidate.heading().toLowerCase(Locale.ROOT).contains(query) ? 2.0 : 0;
+    }
+
+    private static double exactBoost(Candidate candidate, QueryPlan plan) {
+        double boost = 0;
+        String haystack = (candidate.document() + "\n" + candidate.heading() + "\n" + candidate.text())
+                .toLowerCase(Locale.ROOT);
+        for (String path : plan.paths()) {
+            if (!path.isBlank() && candidate.document().toLowerCase(Locale.ROOT).contains(path.toLowerCase(Locale.ROOT))) {
+                boost += 4.0;
+            }
+        }
+        for (String symbol : plan.symbols()) {
+            if (!symbol.isBlank() && haystack.contains(symbol.toLowerCase(Locale.ROOT))) boost += 3.0;
+        }
+        return boost;
+    }
+
+    private static List<String> matchReasons(Candidate candidate, QueryPlan plan, String normalizedQuery) {
+        List<String> reasons = new ArrayList<>();
+        if (candidate.lexical() > 0) reasons.add("BM25");
+        if (candidate.similarity() >= 0.05) reasons.add("VECTOR");
+        if (candidate.heading() != null && candidate.heading().toLowerCase(Locale.ROOT).contains(normalizedQuery)) {
+            reasons.add("HEADING_PHRASE");
+        }
+        for (String path : plan.paths()) {
+            if (candidate.document().toLowerCase(Locale.ROOT).contains(path.toLowerCase(Locale.ROOT))) {
+                reasons.add("PATH_EXACT");
+                break;
+            }
+        }
+        String text = (candidate.document() + "\n" + candidate.heading() + "\n" + candidate.text())
+                .toLowerCase(Locale.ROOT);
+        for (String symbol : plan.symbols()) {
+            if (text.contains(symbol.toLowerCase(Locale.ROOT))) {
+                reasons.add("SYMBOL_EXACT");
+                break;
+            }
+        }
+        return reasons.stream().distinct().limit(6).toList();
+    }
+
+    private static QueryPlan plan(String query) {
+        String value = query == null ? "" : query.trim();
+        String lower = value.toLowerCase(Locale.ROOT);
+        List<String> rawTokens = rawTokens(value);
+        List<String> paths = rawTokens.stream()
+                .filter(token -> token.toLowerCase(Locale.ROOT).matches(".*\\.(java|md|xml|ya?ml|json)$"))
+                .distinct().limit(8).toList();
+        List<String> symbols = rawTokens.stream()
+                .filter(token -> token.length() >= 3 && Character.isUpperCase(token.charAt(0)))
+                .distinct().limit(8).toList();
+        String type;
+        if (!paths.isEmpty() || lower.contains("class") || lower.contains("method") || lower.contains("java")) type = "CODE";
+        else if (lower.contains("error") || lower.contains("exception") || lower.contains("失败")) type = "TROUBLESHOOTING";
+        else if (lower.contains("decision") || lower.contains("why") || lower.contains("为什么") || lower.contains("决策")) type = "DECISION";
+        else if (lower.contains("architecture") || lower.contains("架构")) type = "ARCHITECTURE";
+        else type = "FACT";
+        String strategy = "BM25+VECTOR+PATH_SYMBOL+RRF";
+        return new QueryPlan(type, value, paths, symbols, strategy);
     }
 
     private static void rank(List<Candidate> values, Map<Integer, Double> fused, double weight) {
@@ -363,6 +429,14 @@ public class KnowledgeService {
         return result;
     }
 
+    private static List<String> rawTokens(String value) {
+        List<String> result = new ArrayList<>();
+        for (String token : value.split("[^\\p{L}\\p{N}_.$/#-]+")) {
+            if (!token.isBlank()) result.add(token);
+        }
+        return result;
+    }
+
     private static String boundedCollection(String value) {
         String collection = value == null || value.isBlank() ? "默认" : value.trim();
         return collection.length() > 80 ? collection.substring(0, 80) : collection;
@@ -417,17 +491,21 @@ public class KnowledgeService {
     private record DocumentMetadata(int version, String collection, List<String> tags) { }
     private record IndexedChunk(int start, int end, String heading, String kind,
                                 String text, float[] embedding) { }
+    public record QueryPlan(String queryType, String queryText, List<String> paths, List<String> symbols,
+                            String strategy) { }
     private record Candidate(int id, String document, int chunk, int start, int end,
                              String heading, String kind, String text, Map<String, Integer> frequencies,
-                             int length, double similarity, double lexical) {
+                             int length, double similarity, double lexical, int documentVersion) {
         Candidate withLexical(double value) {
             return new Candidate(id, document, chunk, start, end, heading == null ? "" : heading,
-                    kind == null ? "paragraph" : kind, text, frequencies, length, similarity, value);
+                    kind == null ? "paragraph" : kind, text, frequencies, length, similarity, value, documentVersion);
         }
     }
     public record KnowledgeDocument(String name, long size, Instant updatedAt, @JsonIgnore Path path,
                                     int version, String collection, List<String> tags, String indexStatus,
                                     int indexedChunks, String embeddingProvider) { }
     public record SearchHit(String document, int chunk, int startChar, int endChar,
-                            double score, double vectorSimilarity, String heading, String kind, String content) { }
+                            double score, double vectorSimilarity, double lexicalScore, String queryType,
+                            String retrievalStrategy, String citation, int documentVersion, boolean stale,
+                            List<String> matchReasons, String heading, String kind, String content) { }
 }
