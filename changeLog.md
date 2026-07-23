@@ -24,6 +24,14 @@
 
 ## 2026-07-23
 
+### Plan Step 租约、心跳与过期恢复
+
+- 变更：`plan_steps` 新增 `claim_owner`、`lease_expires_at`、`heartbeat_at`、`attempt`、`not_before`、`last_failure_class` 和 `dispatch_idempotency_key`，登记 Schema 迁移 19，并补齐旧库列迁移。
+- 变更：Plan Worker 领取 `READY` Step 时写入 owner、60 秒租约、心跳和调度幂等键；Run 绑定、完成、失败、取消、跳过、重试和人工等待等状态出口会清理租约字段。
+- 变更：新增 Step 租约心跳与过期恢复逻辑；每轮 Plan 调度前会把已过期且尚未绑定 Run 的 `RUNNING` Step 恢复为 `READY`，记录 `LEASE_EXPIRED` 和 `plan_step.lease_recovered` 事件。
+- 思路：补齐方案里的 Agent Harness 恢复边界，重点解决“Worker 领取 Step 后、创建 Run 前中断，Step 永久卡在 RUNNING”的失败场景，同时仍保持 SQLite 单机 Lite 语义，不提前引入 Kafka/Redis。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest,SqliteRuntimeStoreTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，34 个定向测试通过，覆盖 Plan Step 领取租约、心跳 owner 校验、过期恢复事件、迁移 1–19 和既有 Plan 执行闭环；运行 `.\mvnw.cmd test` 通过，common 2 个、paicli-server 94 个、sandbox-agent 2 个测试均通过；运行 `.\mvnw.cmd package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；运行 `git diff --check` 通过，仅有 Windows 换行提示。
+
 ### Plan 确定性验证器与局部 Replan
 
 - 变更：`PlanValidator` 扩展为 EvidenceBundle 结构，单条 done criteria 会记录 `validatorType`、`expected`、`actual`、`status`、`sourceRefs`、`startedAt` 和 `finishedAt`。

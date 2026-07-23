@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–15，包含 82 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–15，包含 98 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -432,7 +432,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–18：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录，以及可按专家 Profile 派发 delegated child Run。
+SQLite `schema_migrations` 当前记录版本 1–19：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run，以及 Plan Step 领取租约与恢复元数据。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -485,7 +485,7 @@ GET                         /v1/async-jobs/{jobId}
 POST                        /v1/async-jobs/{jobId}/cancel
 ```
 
-Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会领取 `READY` Step，创建普通 ReAct Run 执行；Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部 Replan：保留已完成/跳过/取消步骤及其证据，只替换未完成尾部并重新激活 Plan。
+Plan Runtime 已从“持久化计划对象”推进到基础执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、状态、领取 owner、租约、心跳、尝试次数、调度幂等键和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会先回收过期且尚未绑定 Run 的 Step 租约，再领取 `READY` Step 并创建普通 ReAct Run 执行；Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部 Replan：保留已完成/跳过/取消步骤及其证据，只替换未完成尾部并重新激活 Plan。
 
 当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>`、`file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>`、`test_report:<path>` 以及普通文字验收标准的最终回答证据匹配。文件与测试报告验证只读取 `paicli.workspace-root` 下的相对路径，拒绝绝对路径和越界路径。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续命令/API/截图断言和 Reviewer Agent 证据包预留扩展位置。
 

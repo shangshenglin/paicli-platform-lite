@@ -136,6 +136,8 @@
 - [x] 支持 `REACT`、`ASYNC`/`ASYNC_JOB`、`NONE`、`MANUAL`/`USER_APPROVAL` 的基础 Step 状态推进
 - [x] Validation Check 支持最终回答、受控文件存在/内容和 JUnit XML 测试报告验证，并沉淀 EvidenceBundle 字段
 - [x] Replan 支持 FAILED/ACTIVE Plan 的局部尾部替换，保留已完成步骤及验证证据
+- [x] `plan_steps` 增加领取 owner、租约过期时间、心跳、尝试次数、恢复原因和调度幂等键；Schema 迁移 19
+- [x] Plan Worker 每轮调度前回收过期且尚未绑定 Run 的 `RUNNING` Step，避免领取后崩溃造成步骤永久卡住
 - [x] 新增 `/dispatch`、`/dag/batches`、`/jobs`、`/validation-checks` 和通用 `/v1/async-jobs` API
 - [x] 新增 Read-only DAG 批次分析；当前先做保守调度，不绕过同一 Session 的活跃 Run 限制
 - [x] Console 效率工作台新增 Plan 工作台，展示计划、调度、Async Job、Validation Check 和 DAG 批次

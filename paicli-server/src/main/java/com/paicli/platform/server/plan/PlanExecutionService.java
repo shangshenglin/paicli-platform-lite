@@ -10,14 +10,17 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class PlanExecutionService {
     private static final Set<String> READ_ONLY_TYPES = Set.of("INFORMATION_GATHERING", "FILE_READ", "ANALYSIS");
+    private static final int STEP_LEASE_SECONDS = 60;
 
     private final PlanStore plans;
     private final SqliteRuntimeStore runtime;
     private final PlanValidator validator;
+    private final String claimOwner = "plan-execution-" + UUID.randomUUID().toString().substring(0, 8);
 
     public PlanExecutionService(PlanStore plans, SqliteRuntimeStore runtime, PlanValidator validator) {
         this.plans = plans;
@@ -27,7 +30,7 @@ public class PlanExecutionService {
 
     public DispatchReport dispatchAll(int planLimit, int stepLimit) {
         int started = 0;
-        int refreshed = 0;
+        int refreshed = plans.recoverExpiredStepLeases();
         List<String> errors = new ArrayList<>();
         for (PlanStore.Plan plan : plans.activePlans(planLimit)) {
             try {
@@ -43,7 +46,7 @@ public class PlanExecutionService {
     public DispatchReport dispatchPlan(String planId, int stepLimit) {
         PlanStore.Plan plan = plans.findPlan(planId)
                 .orElseThrow(() -> new IllegalArgumentException("plan not found"));
-        int refreshed = refresh(plan.id());
+        int refreshed = plans.recoverExpiredStepLeases() + refresh(plan.id());
         int started = "ACTIVE".equals(plan.status()) ? dispatchReady(plan, stepLimit) : 0;
         return new DispatchReport(started, refreshed, List.of());
     }
@@ -117,33 +120,38 @@ public class PlanExecutionService {
         int started = 0;
         for (PlanStore.PlanStep step : plans.readySteps(plan.id(), limit)) {
             if (started >= limit) break;
-            if (plans.claimReadyStep(step.id()).isEmpty()) continue;
+            PlanStore.PlanStep claimed = plans.claimReadyStep(step.id(), claimOwner, STEP_LEASE_SECONDS)
+                    .orElse(null);
+            if (claimed == null) continue;
             try {
-                if ("NONE".equals(step.executionMode())) {
-                    plans.completeStep(step.id(), "Step has no runtime execution mode");
+                if ("NONE".equals(claimed.executionMode())) {
+                    plans.completeStep(claimed.id(), "Step has no runtime execution mode");
                     started++;
                     continue;
                 }
-                if ("MANUAL".equals(step.executionMode()) || "USER_APPROVAL".equals(step.type())) {
-                    plans.markStepWaitingApproval(step.id());
+                if ("MANUAL".equals(claimed.executionMode()) || "USER_APPROVAL".equals(claimed.type())) {
+                    plans.markStepWaitingApproval(claimed.id());
                     started++;
                     continue;
                 }
-                String sessionId = sessionForStep(plan, step);
-                RunRecord run = runtime.createRun(sessionId, promptFor(plan, step), "auto", "", List.of(),
-                        null, readOnlyCandidate(step) ? 1 : 0, 0);
-                if ("ASYNC".equals(step.executionMode()) || "ASYNC_JOB".equals(step.type())) {
-                    PlanStore.AsyncJob job = plans.createAsyncJob(plan.id(), step.id(), null, plan.projectKey(),
-                            "PLAN_STEP_REACT", payloadFor(step), "plan-step:" + step.id() + ":run");
+                String sessionId = sessionForStep(plan, claimed);
+                RunRecord run = runtime.createRun(sessionId, promptFor(plan, claimed), "auto", "", List.of(),
+                        null, readOnlyCandidate(claimed) ? 1 : 0, 0);
+                if ("ASYNC".equals(claimed.executionMode()) || "ASYNC_JOB".equals(claimed.type())) {
+                    String jobKey = claimed.dispatchIdempotencyKey() == null
+                            ? "plan-step:" + claimed.id() + ":job"
+                            : claimed.dispatchIdempotencyKey() + ":job";
+                    PlanStore.AsyncJob job = plans.createAsyncJob(plan.id(), claimed.id(), null, plan.projectKey(),
+                            "PLAN_STEP_REACT", payloadFor(claimed), jobKey);
                     plans.bindAsyncJobRun(job.id(), run.id());
-                    plans.bindStepRun(step.id(), run.id(), true);
+                    plans.bindStepRun(claimed.id(), run.id(), true);
                 } else {
-                    plans.bindStepRun(step.id(), run.id(), false);
+                    plans.bindStepRun(claimed.id(), run.id(), false);
                 }
                 started++;
             } catch (Exception e) {
-                if (message(e).contains("active run")) plans.releaseStep(step.id(), "session has an active run");
-                else plans.failStep(step.id(), message(e));
+                if (message(e).contains("active run")) plans.releaseStep(claimed.id(), "session has an active run");
+                else plans.failStep(claimed.id(), message(e));
             }
         }
         return started;

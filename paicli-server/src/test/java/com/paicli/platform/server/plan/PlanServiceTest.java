@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.DriverManager;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -101,6 +102,62 @@ class PlanServiceTest {
                     assertThat(check.actual()).contains("All done criteria passed");
                     assertThat(check.evidence()).contains("answer_contains:summary");
                 });
+    }
+
+    @Test
+    void claimsAndHeartbeatsReadyStepLease() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+
+        var plan = service.generate(null, "default", "summarize");
+        service.start(plan.id());
+        var ready = service.view(plan.id()).steps().get(0);
+
+        var claimed = store.claimReadyStep(ready.id(), "worker-a", 30).orElseThrow();
+
+        assertThat(claimed.status()).isEqualTo("RUNNING");
+        assertThat(claimed.claimOwner()).isEqualTo("worker-a");
+        assertThat(claimed.leaseExpiresAt()).isNotNull();
+        assertThat(claimed.heartbeatAt()).isNotNull();
+        assertThat(claimed.attempt()).isEqualTo(1);
+        assertThat(claimed.dispatchIdempotencyKey()).contains(claimed.id()).contains("attempt:1");
+
+        assertThat(store.heartbeatStepLease(claimed.id(), "worker-b", 30)).isFalse();
+        assertThat(store.heartbeatStepLease(claimed.id(), "worker-a", 30)).isTrue();
+        assertThat(store.findStep(claimed.id()).orElseThrow().claimOwner()).isEqualTo("worker-a");
+        assertThat(store.events(plan.id(), 0, 20)).extracting("type")
+                .contains("plan_step.claimed", "plan_step.heartbeat");
+    }
+
+    @Test
+    void recoversExpiredClaimWithoutBoundRun() throws Exception {
+        PlatformProperties props = properties();
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(props);
+        runtime.initialize();
+        PlanStore store = new PlanStore(props);
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+
+        var plan = service.generate(null, "default", "recover claim");
+        service.start(plan.id());
+        var ready = service.view(plan.id()).steps().get(0);
+        var claimed = store.claimReadyStep(ready.id(), "worker-a", 30).orElseThrow();
+        expireStepLease(props, claimed.id());
+
+        assertThat(store.recoverExpiredStepLeases()).isEqualTo(1);
+
+        var recovered = store.findStep(claimed.id()).orElseThrow();
+        assertThat(recovered.status()).isEqualTo("READY");
+        assertThat(recovered.claimOwner()).isNull();
+        assertThat(recovered.leaseExpiresAt()).isNull();
+        assertThat(recovered.heartbeatAt()).isNull();
+        assertThat(recovered.attempt()).isEqualTo(1);
+        assertThat(recovered.failureReason()).contains("lease expired");
+        assertThat(recovered.lastFailureClass()).isEqualTo("LEASE_EXPIRED");
+        assertThat(store.events(plan.id(), 0, 20)).extracting("type")
+                .contains("plan_step.lease_recovered");
     }
 
     @Test
@@ -320,6 +377,16 @@ class PlanServiceTest {
 
     private PlatformProperties properties() {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+    }
+
+    private static void expireStepLease(PlatformProperties props, String stepId) throws Exception {
+        String url = "jdbc:sqlite:" + props.dataDir().resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url);
+             var statement = connection.prepareStatement(
+                     "UPDATE plan_steps SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?")) {
+            statement.setString(1, stepId);
+            statement.executeUpdate();
+        }
     }
 
     private static String validPlan() {

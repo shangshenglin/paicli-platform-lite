@@ -86,7 +86,22 @@ class SqliteRuntimeStoreTest {
              var versions = statement.executeQuery("SELECT version FROM schema_migrations ORDER BY version")) {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
-            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
+            assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+        }
+    }
+
+    @Test
+    void migratesPlanStepLeaseMetadataColumns() throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+
+        new SqliteRuntimeStore(properties()).initialize();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement();
+             var columns = statement.executeQuery("PRAGMA table_info(plan_steps)")) {
+            var names = new java.util.ArrayList<String>();
+            while (columns.next()) names.add(columns.getString("name"));
+            assertThat(names).contains("claim_owner", "lease_expires_at", "heartbeat_at", "attempt",
+                    "not_before", "last_failure_class", "dispatch_idempotency_key");
         }
     }
 

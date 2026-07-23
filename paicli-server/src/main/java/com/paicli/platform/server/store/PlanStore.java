@@ -172,10 +172,13 @@ public class PlanStore {
 
     public List<PlanStep> readySteps(String planId, int limit) {
         List<PlanStep> values = new ArrayList<>();
+        String now = Instant.now().toString();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
-                "SELECT * FROM plan_steps WHERE plan_id=? AND status='READY' ORDER BY ordinal LIMIT ?")) {
+                "SELECT * FROM plan_steps WHERE plan_id=? AND status='READY' " +
+                        "AND (not_before IS NULL OR not_before<=?) ORDER BY ordinal LIMIT ?")) {
             ps.setString(1, planId);
-            ps.setInt(2, Math.max(1, Math.min(limit, 20)));
+            ps.setString(2, now);
+            ps.setInt(3, Math.max(1, Math.min(limit, 20)));
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) values.add(step(rs));
             }
@@ -290,7 +293,8 @@ public class PlanStore {
                     ps.executeUpdate();
                 }
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status='CANCELED',updated_at=? " +
+                        "UPDATE plan_steps SET status='CANCELED',claim_owner=NULL,lease_expires_at=NULL," +
+                                "heartbeat_at=NULL,updated_at=? " +
                                 "WHERE plan_id=? AND status IN " +
                                 "('PENDING','READY','RUNNING','WAITING_APPROVAL','WAITING_JOB','VALIDATING')")) {
                     ps.setString(1, now);
@@ -310,24 +314,42 @@ public class PlanStore {
     }
 
     public Optional<PlanStep> claimReadyStep(String stepId) {
+        return claimReadyStep(stepId, "local-plan-worker", 60);
+    }
+
+    public Optional<PlanStep> claimReadyStep(String stepId, String claimOwner, int leaseSeconds) {
         try (Connection c = open()) {
             c.setAutoCommit(false);
             try {
                 PlanStep current = findStep(c, stepId).orElseThrow(() ->
                         new IllegalArgumentException("plan step not found"));
-                String now = Instant.now().toString();
+                Instant currentTime = Instant.now();
+                String now = currentTime.toString();
+                String leaseUntil = currentTime.plusSeconds(Math.max(5, Math.min(leaseSeconds, 3600))).toString();
+                String owner = text(claimOwner == null ? "local-plan-worker" : claimOwner, "claimOwner", 120);
+                String dispatchKey = current.dispatchIdempotencyKey() == null || current.dispatchIdempotencyKey().isBlank()
+                        ? "plan-step:" + current.id() + ":attempt:" + (current.attempt() + 1)
+                        : current.dispatchIdempotencyKey();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status='RUNNING',started_at=COALESCE(started_at,?),updated_at=? " +
-                                "WHERE id=? AND status='READY'")) {
-                    ps.setString(1, now);
-                    ps.setString(2, now);
-                    ps.setString(3, stepId);
+                        "UPDATE plan_steps SET status='RUNNING',claim_owner=?,lease_expires_at=?,heartbeat_at=?," +
+                                "attempt=attempt+1,dispatch_idempotency_key=?,started_at=COALESCE(started_at,?)," +
+                                "updated_at=? WHERE id=? AND status='READY' " +
+                                "AND (not_before IS NULL OR not_before<=?)")) {
+                    ps.setString(1, owner);
+                    ps.setString(2, leaseUntil);
+                    ps.setString(3, now);
+                    ps.setString(4, dispatchKey);
+                    ps.setString(5, now);
+                    ps.setString(6, now);
+                    ps.setString(7, stepId);
+                    ps.setString(8, now);
                     if (ps.executeUpdate() != 1) {
                         rollback(c);
                         return Optional.empty();
                     }
                 }
-                appendEvent(c, current.planId(), stepId, "plan_step.claimed", "{}", now);
+                appendEvent(c, current.planId(), stepId, "plan_step.claimed",
+                        "{\"owner\":\"" + escape(owner) + "\",\"leaseExpiresAt\":\"" + leaseUntil + "\"}", now);
                 c.commit();
                 return findStep(stepId);
             } catch (Exception e) {
@@ -347,7 +369,8 @@ public class PlanStore {
                         new IllegalArgumentException("plan step not found"));
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status=?,run_id=?,updated_at=? WHERE id=? " +
+                        "UPDATE plan_steps SET status=?,run_id=?,lease_expires_at=NULL,heartbeat_at=NULL," +
+                                "updated_at=? WHERE id=? " +
                                 "AND status IN ('RUNNING','WAITING_JOB')")) {
                     ps.setString(1, asyncJob ? "WAITING_JOB" : "RUNNING");
                     ps.setString(2, runId);
@@ -410,7 +433,8 @@ public class PlanStore {
                         new IllegalArgumentException("plan step not found"));
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status='READY',failure_reason=?,updated_at=? " +
+                        "UPDATE plan_steps SET status='READY',failure_reason=?,claim_owner=NULL," +
+                                "lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? " +
                                 "WHERE id=? AND status='RUNNING' AND run_id IS NULL")) {
                     ps.setString(1, nullable(reason));
                     ps.setString(2, now);
@@ -426,6 +450,85 @@ public class PlanStore {
             }
         } catch (SQLException e) {
             throw failure("release plan step", e);
+        }
+    }
+
+    public boolean heartbeatStepLease(String stepId, String claimOwner, int leaseSeconds) {
+        Instant currentTime = Instant.now();
+        String now = currentTime.toString();
+        String leaseUntil = currentTime.plusSeconds(Math.max(5, Math.min(leaseSeconds, 3600))).toString();
+        String owner = text(claimOwner == null ? "local-plan-worker" : claimOwner, "claimOwner", 120);
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId).orElseThrow(() ->
+                        new IllegalArgumentException("plan step not found"));
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET heartbeat_at=?,lease_expires_at=?,updated_at=? " +
+                                "WHERE id=? AND status='RUNNING' AND run_id IS NULL AND claim_owner=?")) {
+                    ps.setString(1, now);
+                    ps.setString(2, leaseUntil);
+                    ps.setString(3, now);
+                    ps.setString(4, stepId);
+                    ps.setString(5, owner);
+                    if (ps.executeUpdate() != 1) {
+                        rollback(c);
+                        return false;
+                    }
+                }
+                appendEvent(c, current.planId(), stepId, "plan_step.heartbeat",
+                        "{\"owner\":\"" + escape(owner) + "\",\"leaseExpiresAt\":\"" + leaseUntil + "\"}", now);
+                c.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("heartbeat plan step lease", e);
+        }
+    }
+
+    public int recoverExpiredStepLeases() {
+        String now = Instant.now().toString();
+        List<PlanStep> expired = new ArrayList<>();
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT * FROM plan_steps WHERE status='RUNNING' AND run_id IS NULL " +
+                                "AND lease_expires_at IS NOT NULL AND lease_expires_at<? ORDER BY lease_expires_at")) {
+                    ps.setString(1, now);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) expired.add(step(rs));
+                    }
+                }
+                int recovered = 0;
+                for (PlanStep step : expired) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE plan_steps SET status='READY',claim_owner=NULL,lease_expires_at=NULL," +
+                                    "heartbeat_at=NULL,failure_reason=?,last_failure_class='LEASE_EXPIRED'," +
+                                    "updated_at=? WHERE id=? AND status='RUNNING' AND run_id IS NULL " +
+                                    "AND lease_expires_at IS NOT NULL AND lease_expires_at<?")) {
+                        ps.setString(1, "plan step lease expired before run binding");
+                        ps.setString(2, now);
+                        ps.setString(3, step.id());
+                        ps.setString(4, now);
+                        if (ps.executeUpdate() == 1) {
+                            recovered++;
+                            appendEvent(c, step.planId(), step.id(), "plan_step.lease_recovered",
+                                    "{\"owner\":\"" + escape(step.claimOwner()) + "\"}", now);
+                        }
+                    }
+                }
+                c.commit();
+                return recovered;
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("recover expired plan step leases", e);
         }
     }
 
@@ -539,6 +642,8 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status='PENDING',run_id=NULL,result_summary=NULL,failure_reason=NULL," +
+                                "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,not_before=NULL," +
+                                "last_failure_class=NULL,dispatch_idempotency_key=NULL," +
                                 "started_at=NULL,completed_at=NULL,updated_at=? WHERE id=?")) {
                     ps.setString(1, now);
                     ps.setString(2, stepId);
@@ -707,7 +812,8 @@ public class PlanStore {
                 PlanStep current = findStep(c, stepId).orElseThrow(() -> new IllegalArgumentException("plan step not found"));
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status=?,failure_reason=?,updated_at=?,completed_at=CASE WHEN ? IN " +
+                        "UPDATE plan_steps SET status=?,failure_reason=?,claim_owner=NULL,lease_expires_at=NULL," +
+                                "heartbeat_at=NULL,updated_at=?,completed_at=CASE WHEN ? IN " +
                                 "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED') " +
                                 "THEN ? ELSE completed_at END WHERE id=?")) {
                     ps.setString(1, status);
@@ -738,7 +844,8 @@ public class PlanStore {
                         new IllegalArgumentException("plan step not found"));
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
-                        "UPDATE plan_steps SET status=?,failure_reason=?,updated_at=? WHERE id=? " +
+                        "UPDATE plan_steps SET status=?,failure_reason=?,lease_expires_at=NULL,heartbeat_at=NULL," +
+                                "updated_at=? WHERE id=? " +
                                 "AND status IN ('RUNNING','WAITING_APPROVAL','WAITING_JOB','VALIDATING')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(reason));
@@ -766,7 +873,8 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
-                                "updated_at=? WHERE id=? AND status NOT IN " +
+                                "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? " +
+                                "WHERE id=? AND status NOT IN " +
                                 "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(resultSummary));
@@ -806,7 +914,8 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
-                                "updated_at=? WHERE id=? AND status NOT IN " +
+                                "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? " +
+                                "WHERE id=? AND status NOT IN " +
                                 "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(resultSummary));
@@ -1138,7 +1247,11 @@ public class PlanStore {
                 r.getInt("ordinal"), r.getString("title"), r.getString("description"),
                 r.getString("type"), r.getString("status"), r.getString("execution_mode"),
                 r.getString("done_criteria_json"), r.getString("run_id"), r.getString("result_summary"),
-                r.getString("failure_reason"), instant(r.getString("started_at")),
+                r.getString("failure_reason"), r.getString("claim_owner"),
+                instant(r.getString("lease_expires_at")), instant(r.getString("heartbeat_at")),
+                r.getInt("attempt"), instant(r.getString("not_before")),
+                r.getString("last_failure_class"), r.getString("dispatch_idempotency_key"),
+                instant(r.getString("started_at")),
                 instant(r.getString("completed_at")), instant(r.getString("created_at")),
                 instant(r.getString("updated_at")));
     }
@@ -1209,6 +1322,8 @@ public class PlanStore {
     public record PlanStep(String id, String planId, String clientId, int ordinal, String title,
                            String description, String type, String status, String executionMode,
                            String doneCriteriaJson, String runId, String resultSummary, String failureReason,
+                           String claimOwner, Instant leaseExpiresAt, Instant heartbeatAt, int attempt,
+                           Instant notBefore, String lastFailureClass, String dispatchIdempotencyKey,
                            Instant startedAt, Instant completedAt, Instant createdAt, Instant updatedAt) { }
     public record PlanEdge(String planId, String fromStepId, String toStepId, Instant createdAt) { }
     public record PlanEvent(long id, String planId, String stepId, String type, String data,

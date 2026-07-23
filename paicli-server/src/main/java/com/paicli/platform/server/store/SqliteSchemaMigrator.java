@@ -27,7 +27,8 @@ final class SqliteSchemaMigrator {
             new Migration(15, "durable plan runtime schema"),
             new Migration(16, "plan scheduler async jobs and validation checks"),
             new Migration(17, "agent profile catalog for expert agents"),
-            new Migration(18, "delegated runs can target agent profiles")
+            new Migration(18, "delegated runs can target agent profiles"),
+            new Migration(19, "plan step lease and recovery metadata")
     );
 
     private SqliteSchemaMigrator() { }

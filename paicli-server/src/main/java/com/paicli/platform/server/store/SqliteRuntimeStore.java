@@ -327,15 +327,28 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, client_id TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
                     "title TEXT NOT NULL, description TEXT NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL, " +
                     "execution_mode TEXT NOT NULL DEFAULT 'REACT', done_criteria_json TEXT NOT NULL DEFAULT '[]', " +
-                    "run_id TEXT, result_summary TEXT, failure_reason TEXT, started_at TEXT, completed_at TEXT, " +
+                    "run_id TEXT, result_summary TEXT, failure_reason TEXT, claim_owner TEXT, " +
+                    "lease_expires_at TEXT, heartbeat_at TEXT, attempt INTEGER NOT NULL DEFAULT 0, " +
+                    "not_before TEXT, last_failure_class TEXT, dispatch_idempotency_key TEXT, " +
+                    "started_at TEXT, completed_at TEXT, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(plan_id, client_id), " +
                     "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "run_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "claim_owner", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "lease_expires_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "heartbeat_at", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "attempt",
+                    "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "not_before", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "last_failure_class", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_steps", "dispatch_idempotency_key", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_status " +
                     "ON plan_steps(plan_id, status, ordinal)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_run " +
                     "ON plan_steps(run_id)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_lease " +
+                    "ON plan_steps(status, lease_expires_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS plan_edges (" +
                     "plan_id TEXT NOT NULL, from_step_id TEXT NOT NULL, to_step_id TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, PRIMARY KEY(plan_id, from_step_id, to_step_id), " +
