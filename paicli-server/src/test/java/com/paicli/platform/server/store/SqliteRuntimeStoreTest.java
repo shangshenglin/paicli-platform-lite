@@ -321,6 +321,18 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void replacesOnlyGenericSessionTitlesWithTaskSummaries() throws Exception {
+        SqliteRuntimeStore store = store();
+        var generic = store.createSession("新对话");
+        var named = store.createSession("保留我的标题");
+
+        assertThat(store.renameSessionIfGeneric(generic.id(), "请帮我修复登录超时问题，并补充验证。").title())
+                .isEqualTo("修复登录超时问题，并补充验证");
+        assertThat(store.renameSessionIfGeneric(named.id(), "另一个任务").title())
+                .isEqualTo("保留我的标题");
+    }
+
+    @Test
     void persistsPerRunThinkingControls() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("thinking");
@@ -368,7 +380,10 @@ class SqliteRuntimeStoreTest {
         assertThat(child.agentProfileId()).isEqualTo("agent-profile-a");
         assertThat(child.modelProfileId()).isEqualTo("model-profile-a");
         assertThat(first.agentProfileId()).isEqualTo("agent-profile-a");
-        assertThat(store.findSession(first.childSessionId()).orElseThrow().projectKey()).isEqualTo("project-a");
+        assertThat(store.findSession(first.childSessionId()).orElseThrow()).satisfies(childSession -> {
+            assertThat(childSession.projectKey()).isEqualTo("project-a");
+            assertThat(childSession.title()).isEqualTo("researcher · inspect docs");
+        });
         assertThat(store.sessions()).extracting("id").containsExactly(session.id());
         assertThat(store.delegationsForRun(parent.id())).containsExactly(first);
         assertThat(store.parentDelegationForRun(first.childRunId())).contains(first);

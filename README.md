@@ -458,6 +458,7 @@ GET/POST                    /v1/session-groups
 PATCH/DELETE                /v1/session-groups/{groupId}
 POST                        /v1/sessions/{sessionId}/runs
 GET                         /v1/runs/{runId}
+GET                         /v1/runs/{runId}/audit
 POST                        /v1/runs/{runId}/retry
 POST                        /v1/runs/{runId}/cancel
 GET                         /v1/runs/{runId}/timeline
@@ -468,9 +469,10 @@ POST                        /v1/sessions/import
 ```
 
 `/v1/sessions/{sessionId}/messages` 返回 Console 消息视图，保留原 Message 字段，并为每条消息补充 `runArtifacts`，用于在对话页展示最终交付物、Artifact 下载/预览入口和可点击的网页/本地文件引用。
+`/v1/runs/{runId}/audit` 聚合返回该 Run 所属 Session、模型输入与输出、ToolCall 原始参数和结果、持久化 Approval、事件、绑定的 Plan Step 与 Validation Check。Console 的 Plan 摘要和完整详情会在每个已绑定 Run 的 Step 上显示“打开 Run”，无需切换会话即可核对执行与验证证据。
 `/v1/runs/{runId}/workspace-file` 只读取该 Run 所属受控 workspace 下的相对文件路径，并通过认证请求返回文件内容，供 Console 以带 API Key 的方式打开或下载最终 HTML、Markdown、图片等交付物。
 
-同一 Session 的后续普通 Run 和 Plan Run 会继承已有 workspace owner；协作看板接口在最新 Run 不是 Leader Run 时会回溯该 Session 最近一次协作根 Run，因此续聊、切换计划模式或刷新页面后仍可访问此前工作空间和子专家链路。Console 会按 Session 保存历史阅读位置，后台刷新不再强制跳到底部。
+同一 Session 的后续普通 Run 和 Plan Run 会继承已有 workspace owner；协作看板接口在最新 Run 不是 Leader Run 时会回溯该 Session 最近一次协作根 Run，因此续聊、切换计划模式或刷新页面后仍可访问此前工作空间和子专家链路。Console 会按 Session 保存历史阅读位置，后台刷新不再强制跳到底部。占位 Session 在首次提交普通任务或 Plan 后会持久化一个有界的短任务名；Plan 与协作卡片也以摘要作为标题、保留完整目标作为说明。父子 Agent 会话切换时会先停止旧 Run 的事件流和轮询，再从最新持久化事件游标继续监听，避免返回父 Agent 时重放全部历史事件并反复重绘对话。Plan 轮询只局部替换顶部看板，并按高度差补偿滚动锚点，不再重建全部聊天消息；只要 Session 中仍有 `ACTIVE` / `WAITING_APPROVAL` Plan，即使当前 Leader Run 已终态，对话仍显示“计划执行中/计划等待确认”，不会提前显示完成或允许提交新任务。
 
 ### Plan Runtime
 
@@ -504,9 +506,11 @@ Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭
 
 当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>`、`file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>`、`test_report:<path>` 以及普通文字验收标准的最终回答证据匹配。文件与测试报告验证只读取 `paicli.workspace-root` 下的相对路径，拒绝绝对路径和越界路径。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续命令/API/截图断言和 Reviewer Agent 证据包预留扩展位置。
 
-新增 API 包括 `/v1/sessions/{sessionId}/plans`、`/v1/plans/{id}/dispatch`、`/v1/plans/{id}/dag/batches`、`/v1/plans/{id}/jobs`、`/v1/plans/{id}/validation-checks`、`/v1/async-jobs` 和 `/v1/async-jobs/{id}/cancel`。Console 普通消息区会在当前 Session 顶部展示已关联 Plan 的目标、状态、步骤进度和当前步骤，并保留打开工作台、详情和调度动作。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
+新增 API 包括 `/v1/sessions/{sessionId}/plans`、`/v1/plans/{id}/dispatch`、`/v1/plans/{id}/dag/batches`、`/v1/plans/{id}/jobs`、`/v1/plans/{id}/validation-checks`、`/v1/async-jobs` 和 `/v1/async-jobs/{id}/cancel`。Console 普通消息区会在当前 Session 顶部以 Plan 摘要作为短任务名，并展示完整目标、状态、步骤进度和当前步骤，保留打开工作台、详情和调度动作。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
 
 阶段 5/6 增量把上述基础执行闭环推进到受控并行和反馈闭环：Plan JSON 可声明 `resource_read_set`、`resource_write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；调度器会按关键路径优先级领取 Step，并用资源读写集阻止同一计划内的活跃写写或读写冲突。需要隔离的 Step 会创建内部 Session，`GIT_WORKTREE` 当前落为 Lite 受控 workspace 引用和目录边界；真实 Git worktree 的 add/merge 仍预留在后续工具层，不在当前版本自动执行。Plan 验证结果会写入 `agent_feedback`，验证通过时生成可追溯的过程型 Memory，失败时记录 validation/failure class，供后续专家评分、调度策略和人工复盘使用；Actuator 指标同步记录 Plan 验证成功/失败、资源冲突、Agent Feedback 和验证 Memory 写入次数。
+
+所有绑定 Agent Profile 的专家 Run 都会获得受控 Plan 工具：`list_plans`、`get_plan`、`create_plan`、`replan_plan`、`start_plan` 和 `cancel_plan`。读取只限当前项目；创建、调整、启动和取消必须经过既有持久化 Approval 流程，并且只能修改专家自己创建、当前 Step 绑定或父委派明确分配的 Plan。写操作以 ToolCall 为幂等边界，普通未绑定专家 Profile 的 Run 不开放这些工具。
 
 更完整的 Plan、Multi-Agent、Agent Harness、调度恢复和验证闭环说明见 [技术架构与面试指南](PaiCLI%20Platform%20Lite%20技术架构与面试指南.md) 的“Plan 与类型化 Graph Runtime”“Step 调度、租约、资源冲突、隔离与 Validation Gate”章节。
 

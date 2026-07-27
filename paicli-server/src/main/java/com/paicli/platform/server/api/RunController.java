@@ -12,10 +12,12 @@ import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.sse.SseEventService;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
 import com.paicli.platform.server.plan.PlanService;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpHeaders;
@@ -52,12 +54,13 @@ public class RunController {
     private final CompletionNotificationService notifications;
     private final ObjectMapper mapper;
     private final PlanService plans;
+    private final PlanStore planStore;
     private final Path workspaceRoot;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
                          CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans,
-                         PlatformProperties properties) {
+                         PlanStore planStore, PlatformProperties properties) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -66,6 +69,7 @@ public class RunController {
         this.notifications = notifications;
         this.mapper = mapper;
         this.plans = plans;
+        this.planStore = planStore;
         this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
     }
 
@@ -109,6 +113,7 @@ public class RunController {
         String reasoningEffort = agent != null && !blank(agent.reasoningEffort())
                 ? agent.reasoningEffort() : request.reasoningEffort();
         if (!"enabled".equalsIgnoreCase(thinkingMode)) reasoningEffort = "";
+        store.renameSessionIfGeneric(sessionId, request.input());
         RunRecord run = store.createRun(sessionId, runInput, thinkingMode, reasoningEffort,
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),
                 request.priority() == null ? 0 : request.priority(), 0);
@@ -178,6 +183,29 @@ public class RunController {
     @GetMapping("/runs/{runId}")
     public RunRecord getRun(@PathVariable String runId) {
         return requireRun(runId);
+    }
+
+    @GetMapping("/runs/{runId}/audit")
+    @Operation(summary = "Read consolidated Run audit details",
+            description = "Returns the Run and Session, model messages, tool calls, approvals, events, "
+                    + "bound Plan Step, and validation evidence in one read-only response.")
+    public Map<String, Object> runAudit(@PathVariable String runId) {
+        RunRecord run = requireRun(runId);
+        SessionRecord session = store.findSession(run.sessionId()).orElseThrow();
+        var step = planStore.findStepByRun(runId).orElse(null);
+        List<?> checks = step == null ? List.of() : planStore.validationChecks(step.planId(), 500).stream()
+                .filter(check -> step.id().equals(check.stepId())).toList();
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("run", run);
+        value.put("session", session);
+        value.put("messages", store.messages(run.sessionId()).stream()
+                .filter(message -> runId.equals(message.runId())).toList());
+        value.put("toolCalls", store.toolCallsForRun(runId));
+        value.put("approvals", store.approvalsForRun(runId));
+        value.put("events", store.events(runId, 0, 1_000));
+        value.put("planStep", step == null ? Map.of() : step);
+        value.put("validationChecks", checks);
+        return value;
     }
 
     @GetMapping("/runs/{runId}/workspace-file")

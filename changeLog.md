@@ -22,6 +22,19 @@
 - 验证：运行了哪些测试、构建或人工检查。
 ```
 
+## 2026-07-28
+
+### 对话任务短标题与父 Agent 返回刷新修复
+
+- 变更：新增统一的有界任务标题提取；普通占位 Session 在首次提交 Run 或 Plan 后持久化短标题，子专家 Session 使用“专家 · 子任务摘要”，Console 的 Plan、协作看板和 Plan 工作台以摘要作为任务名并保留完整目标说明。
+- 变更：修复从子专家返回父 Agent 时旧 Run 事件和轮询未立即失效、父 Run SSE 从 `after=0` 重放全部历史的问题；切换 Session 现在先停止 Plan/审批轮询并清空旧 Run 标识，静默读取持久化时间线确定最新事件游标，只把游标之后的新事件交给实时副作用处理。
+- 变更：Plan 的 6 秒轮询改为只替换顶部 Plan 看板，并在看板高度变化时补偿消息容器滚动位置；增加请求互斥，避免慢请求产生重叠刷新。聊天状态改为聚合当前 Run 与关联 Plan，只要 Plan 仍为 `ACTIVE` / `WAITING_APPROVAL`，Leader Run 终态不会把对话提前标为完成，也不会弹出错误的完成提醒或允许提交新任务。
+- 变更：Plan 摘要和完整详情中的每个已绑定步骤新增“打开 Run”，通过只读 `/v1/runs/{runId}/audit` 一次展示 Run 所属 Session、模型输入/输出、ToolCall 参数与结果、Approval、事件及 Validation Check 证据；Plan 详情从临时提示升级为完整审计对话框。
+- 变更：所有绑定 Agent Profile 的专家获得 `list/get/create/replan/start/cancel` 六个受控 Plan 工具；读取限制在当前项目，写操作复用持久化审批，只允许专家修改自己创建、当前 Step 绑定或父委派明确分配的 Plan，并按 ToolCall 幂等复用。普通 Run 不开放这些工具。
+- 思路：任务名称用于快速定位，不能把完整 Prompt 或内部 ID 当标题；历史事件用于恢复右侧审计时间线，但不应再次触发消息加载、完成提醒等实时副作用。聊天页展示的是 Session 级任务状态，不能只用某一个 Run 的终态代替整个 Plan 的终态。
+- 思路：步骤状态只回答“进行到哪里”，Run 审计视图负责回答“由谁、在哪个 Session、模型和工具实际做了什么、为何获批、如何验收”；专家可以参与计划演进，但写权限必须落在现有 ToolCall/Approval/幂等与作用域边界内，不能变成任意修改全项目 Plan 的旁路。
+- 验证：`node --check paicli-server/src/main/resources/static/app.js` 与 `git diff --check` 通过；`ContextManagerTest`、`TaskTitleTest`、`PlanServiceTest`、`PlanToolProviderTest`、`SqliteRuntimeStoreTest` 及两项 Web 定向用例共 54 项测试通过，覆盖标题与滚动修复、专家 Plan 工具注入和作用域、写工具审批与幂等重放、Run 审计响应及 Console 静态入口。全模块测试执行 120 项时仅既有协作用例受 Windows SQLite `SQLITE_BUSY_SNAPSHOT` 锁竞争中断，该用例随后单独重跑通过；打包验证未完成，原因是 Maven Wrapper 的 PowerShell 启动脚本间歇性 `null array`，直接调用 Wrapper 内 Maven 又被本机依赖 JAR 访问错误阻断。浏览器验证流程已连接，但本地 8080 未运行，因此未执行真实父子会话和 Run 审计对话框的点击回归。
+
 ## 2026-07-27
 
 ### 协作预算生效、审批聚合、父子导航与执行小队

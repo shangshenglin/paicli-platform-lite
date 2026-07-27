@@ -14,6 +14,7 @@ import com.paicli.platform.server.domain.RunEventRecord;
 import com.paicli.platform.server.domain.RunDelegationRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.domain.TaskTitle;
 import com.paicli.platform.server.domain.SessionGroupRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import jakarta.annotation.PostConstruct;
@@ -641,6 +642,25 @@ public class SqliteRuntimeStore {
         }
     }
 
+    public SessionRecord renameSessionIfGeneric(String sessionId, String task) {
+        SessionRecord current = findSession(sessionId)
+                .orElseThrow(() -> new IllegalArgumentException("session not found: " + sessionId));
+        if (!TaskTitle.isGenericSessionTitle(current.title())) return current;
+        String title = TaskTitle.summarize(task, current.title());
+        Instant now = Instant.now();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE sessions SET title=?, updated_at=? WHERE id=? AND title=?")) {
+            ps.setString(1, title);
+            ps.setString(2, now.toString());
+            ps.setString(3, sessionId);
+            ps.setString(4, current.title());
+            ps.executeUpdate();
+            return findSession(sessionId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("rename session", e);
+        }
+    }
+
     public boolean deleteSession(String sessionId) {
         List<String> runIds = new ArrayList<>();
         try (Connection connection = open()) {
@@ -1133,7 +1153,7 @@ public class SqliteRuntimeStore {
                         "INSERT INTO sessions(id,title,project_key,group_id,status,is_internal,created_at,updated_at) " +
                                 "VALUES(?,?,?,?,?,?,?,?)")) {
                     session.setString(1, childSessionId);
-                    session.setString(2, "Agent: " + name);
+                    session.setString(2, TaskTitle.delegated(name, input));
                     session.setString(3, parentSession.projectKey());
                     session.setString(4, null);
                     session.setString(5, "ACTIVE");

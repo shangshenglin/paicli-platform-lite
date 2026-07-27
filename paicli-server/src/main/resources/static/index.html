@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260727-collaboration-teams">
+  <link rel="stylesheet" href="/app.css?v=20260728-plan-run-audit">
 </head>
 <body>
 <div class="app">
@@ -209,6 +209,14 @@
     <div class="managed-list" id="policyList"></div>
   </section>
 </dialog>
+<dialog id="planDetailDialog" class="wide-dialog audit-dialog">
+  <div class="dialog-title"><strong id="planDetailTitle">Plan 详情</strong><button class="secondary" id="closePlanDetail">关闭</button></div>
+  <div id="planDetailContent"></div>
+</dialog>
+<dialog id="runAuditDialog" class="wide-dialog audit-dialog">
+  <div class="dialog-title"><strong id="runAuditTitle">Run 审计详情</strong><button class="secondary" id="closeRunAudit">关闭</button></div>
+  <div id="runAuditContent"></div>
+</dialog>
 <dialog id="evaluationDialog" class="wide-dialog evaluation-dialog">
   <div class="dialog-title"><strong>Agent 评测中心</strong><button class="secondary" id="closeEvaluationCenter">关闭</button></div>
   <div class="hint" id="evaluationProject">当前项目：default</div>
@@ -292,7 +300,7 @@
       <label class="form-field full"><span>模型配置方案</span><select id="agentModelProfile"><option value="">使用项目默认模型</option></select></label>
       <label class="form-field"><span>思考模式</span><select id="agentThinkingMode"><option value="">跟随对话设置</option><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
       <label class="form-field"><span>思考深度</span><select id="agentReasoningEffort"><option value="">跟随对话设置</option><option value="high">高</option><option value="max">最高</option></select><small>仅在思考模式开启时生效。</small></label>
-      <label class="form-field"><span>允许工具</span><select id="agentTools" multiple hidden></select><div id="agentToolsPicker" class="tag-picker"></div><small>按角色提供默认工具；可搜索后点选添加。</small></label>
+      <label class="form-field"><span>允许工具</span><select id="agentTools" multiple hidden></select><div id="agentToolsPicker" class="tag-picker"></div><small>按角色提供默认工具；所有专家固定获得受控 Plan 工具，其中创建、调整、启动和取消仍需持久化审批。</small></label>
       <label class="form-field"><span>允许 Skill</span><select id="agentSkills" multiple hidden></select><div id="agentSkillsPicker" class="tag-picker"></div><small>不添加表示不限定 Skill；可搜索后点选添加。</small></label>
       <label class="form-field"><span>交接策略</span><select id="agentHandoff"><option value="MANUAL">Manual</option><option value="LEADER_ASSIGNED">Leader Assigned</option><option value="AUTO">Auto</option></select></label>
       <label class="form-field"><span>工作区范围</span><select id="agentScope"><option value="PROJECT">Project</option><option value="SESSION">Session</option><option value="RUN">Run</option></select></label>
@@ -441,6 +449,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260727-collaboration-teams"></script>
+<script src="/app.js?v=20260728-plan-run-audit"></script>
 </body>
 </html>

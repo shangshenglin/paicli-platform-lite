@@ -18,6 +18,7 @@ import com.paicli.platform.server.knowledge.KnowledgeService;
 import com.paicli.platform.server.config.RagProperties;
 import com.paicli.platform.server.memory.LayeredMemoryService;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.plan.PlanToolProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -129,7 +130,11 @@ public class ContextManager {
                     + estimated + " > " + hardInputLimit);
         }
         var run = store.findRun(runId).orElseThrow();
-        Set<String> allowedTools = Set.copyOf(parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
+        Set<String> allowedTools = new java.util.HashSet<>(
+                parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
+        if (agentProfile != null && !allowedTools.isEmpty()) {
+            allowedTools.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+        }
         return new PreparedContext(new ModelRequest(messages, toolCatalog.definitions(allowedTools),
                 outputLimit, run.thinkingMode(), run.reasoningEffort()),
                 estimated, compaction);

@@ -177,6 +177,7 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .session-plan-panel { margin: 0 0 14px; padding: 14px; border: 1px solid #3c5d4f; border-radius: 10px; background: #111a17; }
 .session-plan-list { display: grid; gap: 8px; margin-top: 10px; }
 .session-plan-item { flex-wrap: wrap; background: #151d1a; }
+.task-description { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .plan-progress { width: 100%; height: 6px; margin: 8px 0 7px; overflow: hidden; border-radius: 99px; background: #26312d; }
 .plan-progress span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
 .plan-step-strip { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -184,6 +185,8 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .plan-step.completed, .plan-step.skipped { border-color: #315945; color: var(--green); }
 .plan-step.running, .plan-step.ready { border-color: #786338; color: var(--yellow); }
 .plan-step.failed { border-color: #674047; color: var(--red); }
+.plan-step.run-link { cursor: pointer; background: #18221f; font: inherit; }
+.plan-step.run-link:hover { border-color: var(--green); color: var(--text); }
 .collaboration-task-list { display: grid; gap: 9px; }
 .collaboration-task { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #171b21; }
 .collaboration-task-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -312,6 +315,18 @@ dialog { width: min(430px, calc(100% - 28px)); padding: 18px; border: 1px solid 
 dialog::backdrop { background: #0009; }
 dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #101319; }
 .wide-dialog { width: min(760px, calc(100% - 28px)); max-height: min(760px, calc(100vh - 40px)); overflow-y: auto; }
+.audit-dialog { width: min(960px, calc(100% - 28px)); }
+.audit-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.audit-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.audit-section > h3 { margin: 0 0 8px; font-size: 14px; }
+.audit-list { display: grid; gap: 7px; }
+.audit-card { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: #151a20; }
+.audit-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.audit-card p { margin: 7px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.audit-card pre { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #bbc5cf; }
+.audit-card details { margin-top: 7px; color: var(--muted); }
+.audit-card .managed-actions { margin-top: 8px; }
+@media (max-width: 700px) { .audit-summary { grid-template-columns: 1fr; } }
 .dialog-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .capability-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .capability-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }

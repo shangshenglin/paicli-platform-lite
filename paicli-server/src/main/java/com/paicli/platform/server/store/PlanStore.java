@@ -77,6 +77,30 @@ public class PlanStore {
         }
     }
 
+    public Optional<Plan> findPlanBySource(String projectKey, String source) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM plans WHERE project_key=? AND source=? ORDER BY created_at DESC LIMIT 1")) {
+            ps.setString(1, project(projectKey));
+            ps.setString(2, source == null ? "" : source.trim().toUpperCase());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(plan(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("find plan by source", e);
+        }
+    }
+
+    public boolean hasRevisionReason(String planId, String reason) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT 1 FROM plan_revisions WHERE plan_id=? AND reason=? LIMIT 1")) {
+            ps.setString(1, planId);
+            ps.setString(2, reason);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
+        } catch (SQLException e) {
+            throw failure("find plan revision", e);
+        }
+    }
+
     public List<Plan> plans(String projectKey, int limit) {
         List<Plan> values = new ArrayList<>();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
@@ -229,6 +253,48 @@ public class PlanStore {
             }
         } catch (SQLException e) {
             throw failure("activate plan", e);
+        }
+    }
+
+    public ToolActivation activateFromTool(String planId, String operationKey) {
+        String data = "{\"operationKey\":\"" + escape(operationKey) + "\"}";
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                Plan plan = findPlan(c, planId).orElseThrow(() -> new IllegalArgumentException("plan not found"));
+                try (PreparedStatement existing = c.prepareStatement(
+                        "SELECT 1 FROM plan_events WHERE plan_id=? AND event_type='plan.agent_started' "
+                                + "AND event_data=? LIMIT 1")) {
+                    existing.setString(1, planId);
+                    existing.setString(2, data);
+                    try (ResultSet rs = existing.executeQuery()) {
+                        if (rs.next()) {
+                            c.commit();
+                            return new ToolActivation(plan, false);
+                        }
+                    }
+                }
+                if (!List.of("DRAFT", "WAITING_APPROVAL").contains(plan.status())) {
+                    throw new IllegalStateException("only draft or waiting approval plans can be started");
+                }
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plans SET status='ACTIVE',started_at=COALESCE(started_at,?),updated_at=? WHERE id=?")) {
+                    ps.setString(1, now);
+                    ps.setString(2, now);
+                    ps.setString(3, planId);
+                    ps.executeUpdate();
+                }
+                markReadySteps(c, planId, now);
+                appendEvent(c, planId, null, "plan.agent_started", data, now);
+                c.commit();
+                return new ToolActivation(findPlan(planId).orElseThrow(), true);
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("activate agent plan", e);
         }
     }
 
@@ -1638,6 +1704,7 @@ public class PlanStore {
                        String summary, String status, int version, String source, String rawPlanJson,
                        String validationErrorsJson, Instant createdAt, Instant updatedAt,
                        Instant startedAt, Instant completedAt, String failureReason) { }
+    public record ToolActivation(Plan plan, boolean activatedNow) { }
     public record PlanStep(String id, String planId, String clientId, int ordinal, String title,
                            String description, String type, String status, String executionMode,
                            String doneCriteriaJson, String runId, String resultSummary, String failureReason,
