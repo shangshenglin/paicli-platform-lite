@@ -24,6 +24,15 @@
 
 ## 2026-07-28
 
+### Plan 与 Multi-Agent Graph 协作调度
+
+- 变更：默认 `PAICLI_WORKER_COUNT` 从 1 提升为 4，Run Worker 每轮按空闲槽位批量领取任务；项目并发预算继续限制实际并发。
+- 变更：Schema 迁移推进到 25，新增委派依赖边和资源读写表；`spawn_agent.dependencies` 成为服务端调度门禁，并新增 workspace 引用、`BLOCK_GRAPH` / `DEGRADE` / `REQUIRE_HUMAN` 失败策略。
+- 变更：同 workspace 的读写/写写冲突由 Run Queue 阻塞，不同 workspace 引用映射到隔离 owner；子 Run 终态在同一事务内写 Result Envelope v2、向可执行下游 Session 注入有界上游结果、推进节点、级联失败并唤醒等待父 Run。
+- 变更：Result Envelope 从消息、Artifact、ModelUsage 和 ToolCall 自动归集摘要、文件、命令、测试、风险与未完成项；协作 API/Console 展示依赖、阻塞原因、资源和失败策略，并提供人工节点批准/拒绝入口。
+- 思路：Plan Graph 继续管理跨步骤条件、回流、验证和 Human Node，Delegation Graph 管理 Leader 动态派发；两层都由后端确定性判断就绪状态并复用普通 Run，模型只负责规划和结果综合。
+- 验证：完整 Maven 测试通过，Common 2 项、Server 124 项、Sandbox 2 项，共 128 项；最终 Graph Store 定向回归 31 项通过，覆盖迁移 25、依赖防抢跑、已完成依赖即时解锁、上游信封注入、workspace 隔离、资源冲突、三类失败策略、自动结果信封和父 Run 唤醒。Human Node API 用例通过；组合重跑时出现一次既有 Spring 后台 Worker 的 SQLite 锁竞争，失败用例单独重跑通过。全模块普通 JAR 打包通过；Spring Boot 可执行 JAR 重打包因本机正在运行的旧 Server 锁住目标 JAR 未执行，未擅自停止现有服务。`node --check` 与 `git diff --check` 通过。
+
 ### 对话任务短标题与父 Agent 返回刷新修复
 
 - 变更：新增统一的有界任务标题提取；普通占位 Session 在首次提交 Run 或 Plan 后持久化短标题，子专家 Session 使用“专家 · 子任务摘要”，Console 的 Plan、协作看板和 Plan 工作台以摘要作为任务名并保留完整目标说明。

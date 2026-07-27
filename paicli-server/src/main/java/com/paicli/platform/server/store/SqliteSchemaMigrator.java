@@ -33,7 +33,8 @@ final class SqliteSchemaMigrator {
             new Migration(21, "controlled parallel plan execution and closed loop feedback"),
             new Migration(22, "expert thinking controls and persistent session workspace ownership"),
             new Migration(23, "typed plan graph edges and deterministic routing"),
-            new Migration(24, "reusable expert collaboration teams")
+            new Migration(24, "reusable expert collaboration teams"),
+            new Migration(25, "durable collaboration graph dependencies resources and terminal propagation")
     );
 
     private SqliteSchemaMigrator() { }

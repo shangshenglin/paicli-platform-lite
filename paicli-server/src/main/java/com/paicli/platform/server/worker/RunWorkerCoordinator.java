@@ -37,17 +37,23 @@ public class RunWorkerCoordinator {
 
     @Scheduled(fixedDelayString = "${paicli.worker-poll-millis:300}")
     public void dispatch() {
-        if (executor.getActiveCount() >= executor.getMaxPoolSize()) return;
-        var claimed = tryClaimNextRun();
-        claimed.ifPresent(run -> {
-            if (!executionRegistry.tryEnter(run.id())) return;
+        int available = Math.max(0, executor.getMaxPoolSize() - executor.getActiveCount());
+        for (int slot = 0; slot < available; slot++) {
+            var claimed = tryClaimNextRun();
+            if (claimed.isEmpty()) return;
+            RunRecord run = claimed.orElseThrow();
+            if (!executionRegistry.tryEnter(run.id())) {
+                queue.releaseClaim(run.id(), "run is already registered as executing");
+                continue;
+            }
             try {
                 executor.execute(() -> execute(run));
             } catch (TaskRejectedException e) {
                 executionRegistry.leave(run.id());
                 queue.releaseClaim(run.id(), "run worker executor rejected dispatch");
+                return;
             }
-        });
+        }
     }
 
     private java.util.Optional<RunRecord> tryClaimNextRun() {

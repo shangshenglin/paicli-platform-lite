@@ -25,6 +25,7 @@ import java.util.Set;
 public class DelegationToolProvider implements ServerToolProvider {
     private static final int AGENT_RESULT_SUMMARY_CHARS = 4_000;
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
+    private static final TypeReference<Map<String, Object>> OBJECT_MAP = new TypeReference<>() { };
     private final SqliteRuntimeStore store;
     private final ProductivityStore productivity;
     private final ObjectMapper mapper;
@@ -122,6 +123,17 @@ public class DelegationToolProvider implements ServerToolProvider {
         Map<String, Object> envelope = delegationEnvelope(request, session.projectKey(), planStep,
                 profile == null ? null : profile.outputSchema());
         String envelopeJson = writeJson(envelope);
+        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
+        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
+        if (planStep != null) {
+            if (readSet.isEmpty()) readSet = jsonList(planStep.resourceReadSetJson());
+            if (writeSet.isEmpty()) writeSet = jsonList(planStep.resourceWriteSetJson());
+        }
+        String workspaceRef = stringArg(request.arguments(), "workspace_ref");
+        if (workspaceRef.isBlank() && planStep != null) workspaceRef = nullToBlank(planStep.workspaceRef());
+        SqliteRuntimeStore.DelegationOptions graph = new SqliteRuntimeStore.DelegationOptions(
+                listArg(request.arguments().get("dependencies")), readSet, writeSet,
+                stringArg(request.arguments(), "failure_policy"), workspaceRef);
         RunDelegationRecord delegation = store.createOrGetDelegation(request.runId(), request.toolCallId(),
                 agentName,
                 String.valueOf(request.arguments().getOrDefault("task", "")),
@@ -129,7 +141,7 @@ public class DelegationToolProvider implements ServerToolProvider {
                 profile == null ? null : profile.modelProfileId(),
                 profile == null ? null : profile.thinkingMode(),
                 profile == null ? null : profile.reasoningEffort(),
-                planId, planStepId, envelopeJson);
+                planId, planStepId, envelopeJson, graph);
         var child = store.findRun(delegation.childRunId()).orElseThrow();
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("delegation_id", delegation.id());
@@ -138,7 +150,10 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("plan_step_id", nullToBlank(delegation.planStepId()));
         value.put("agent_profile_id", delegation.agentProfileId() == null ? "" : delegation.agentProfileId());
         value.put("agent_name", delegation.agentName());
-        value.put("status", child.status().name());
+        value.put("status", delegation.status());
+        value.put("run_status", child.status().name());
+        value.put("failure_policy", delegation.failurePolicy());
+        value.put("blocked_reason", nullToBlank(delegation.blockedReason()));
         value.put("envelope", envelope);
         return value;
     }
@@ -218,7 +233,8 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("plan_id", nullToBlank(delegation.planId()));
         value.put("plan_step_id", nullToBlank(delegation.planStepId()));
         if (child.error() != null && !child.error().isBlank()) value.put("error", child.error());
-        Map<String, Object> agentResult = agentResult(delegation, child);
+        Map<String, Object> agentResult = persistedAgentResult(delegation);
+        if (agentResult.isEmpty()) agentResult = agentResult(delegation, child);
         if (child.status().terminal()) {
             String answer = store.messages(delegation.childSessionId()).stream()
                     .filter(message -> "assistant".equals(message.role()))
@@ -228,8 +244,10 @@ public class DelegationToolProvider implements ServerToolProvider {
             value.put("result_truncated", answer.length() > AGENT_RESULT_SUMMARY_CHARS);
             value.put("full_result_source", "Open child_session_id or referenced artifacts for the full child Agent output.");
         }
-        RunDelegationRecord updated = store.completeDelegationResult(delegation.id(), child.status().name(),
-                writeJson(agentResult), failureClass(child.status(), child.error()));
+        RunDelegationRecord updated = child.status().terminal() && persistedAgentResult(delegation).isEmpty()
+                ? store.completeDelegationResult(delegation.id(), child.status().name(),
+                writeJson(agentResult), failureClass(child.status(), child.error()))
+                : delegation;
         value.put("agent_result", agentResult);
         value.put("result_json", updated.resultJson());
         value.put("agent_profile_id", delegation.agentProfileId() == null ? "" : delegation.agentProfileId());
@@ -247,6 +265,9 @@ public class DelegationToolProvider implements ServerToolProvider {
             value.put("agent_name", delegation.agentName());
             value.put("status", child.status().name());
             value.put("delegation_status", delegation.status());
+            value.put("failure_policy", delegation.failurePolicy());
+            value.put("blocked_reason", nullToBlank(delegation.blockedReason()));
+            value.put("dependencies", store.delegationDependencyIds(delegation.id()));
             value.put("plan_id", nullToBlank(delegation.planId()));
             value.put("plan_step_id", nullToBlank(delegation.planStepId()));
             value.put("task", delegation.task());
@@ -274,6 +295,15 @@ public class DelegationToolProvider implements ServerToolProvider {
         properties.put("budget", Map.of("type", "string", "description", "Token, time, or cost budget"));
         properties.put("deadline", Map.of("type", "string", "description", "Deadline or freshness window"));
         properties.put("dependencies", Map.of("type", "array", "items", Map.of("type", "string")));
+        properties.put("resource_read_set", Map.of("type", "array", "items", Map.of("type", "string"),
+                "description", "Files or logical resources read by this child"));
+        properties.put("resource_write_set", Map.of("type", "array", "items", Map.of("type", "string"),
+                "description", "Files or logical resources written by this child"));
+        properties.put("workspace_ref", Map.of("type", "string",
+                "description", "Optional isolated workspace reference"));
+        properties.put("failure_policy", Map.of("type", "string",
+                "enum", List.of("BLOCK_GRAPH", "DEGRADE", "REQUIRE_HUMAN"),
+                "description", "Behavior when an upstream dependency fails"));
         properties.put("forbidden_operations", Map.of("type", "array", "items", Map.of("type", "string")));
         return Map.of("type", "object", "properties", properties, "required", List.of("name", "task"));
     }
@@ -309,6 +339,17 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("budget", stringArg(request.arguments(), "budget"));
         value.put("deadline", stringArg(request.arguments(), "deadline"));
         value.put("dependencies", listArg(request.arguments().get("dependencies")));
+        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
+        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
+        value.put("resource_read_set", readSet.isEmpty() && step != null
+                ? jsonList(step.resourceReadSetJson()) : readSet);
+        value.put("resource_write_set", writeSet.isEmpty() && step != null
+                ? jsonList(step.resourceWriteSetJson()) : writeSet);
+        String workspaceRef = stringArg(request.arguments(), "workspace_ref");
+        value.put("workspace_ref", workspaceRef.isBlank() && step != null
+                ? nullToBlank(step.workspaceRef()) : workspaceRef);
+        String failurePolicy = stringArg(request.arguments(), "failure_policy");
+        value.put("failure_policy", failurePolicy.isBlank() ? "BLOCK_GRAPH" : failurePolicy.toUpperCase());
         value.put("forbidden_operations", listArg(request.arguments().get("forbidden_operations")));
         return value;
     }
@@ -348,6 +389,16 @@ public class DelegationToolProvider implements ServerToolProvider {
         return value;
     }
 
+    private Map<String, Object> persistedAgentResult(RunDelegationRecord delegation) {
+        if (delegation.resultJson() == null || delegation.resultJson().isBlank()
+                || "{}".equals(delegation.resultJson().trim())) return Map.of();
+        try {
+            return mapper.readValue(delegation.resultJson(), OBJECT_MAP);
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
     private String latestAssistantAnswer(String sessionId) {
         return store.messages(sessionId).stream()
                 .filter(message -> "assistant".equals(message.role()))
@@ -369,6 +420,14 @@ public class DelegationToolProvider implements ServerToolProvider {
             return mapper.writeValueAsString(value);
         } catch (Exception e) {
             throw new IllegalStateException("failed to serialize agent payload", e);
+        }
+    }
+
+    private List<String> jsonList(String value) {
+        try {
+            return mapper.readValue(value == null || value.isBlank() ? "[]" : value, STRING_LIST);
+        } catch (Exception ignored) {
+            return List.of();
         }
     }
 

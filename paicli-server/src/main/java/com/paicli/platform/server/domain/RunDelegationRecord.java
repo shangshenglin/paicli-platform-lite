@@ -17,6 +17,9 @@ public record RunDelegationRecord(
         String resultJson,
         String status,
         String failureClass,
+        String failurePolicy,
+        String blockedReason,
+        String workspaceRef,
         Instant completedAt,
         Instant createdAt
 ) { }

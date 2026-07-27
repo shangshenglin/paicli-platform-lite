@@ -423,7 +423,7 @@ public class ProductivityController {
     private static ResponseStatusException notFound(String name){return new ResponseStatusException(HttpStatus.NOT_FOUND,name+" not found");}
     private static final List<AgentSeed> AGENT_SEEDS=List.of(
             new AgentSeed("leader","Leader 任务队长",1,"把一句话目标拆成可验证计划，挑选专家并综合最终交付。",
-                    "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要把同一任务重复派发；对子专家给出清晰边界、输入、交付格式和验收标准。",
+                    "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。独立节点可并行；审查、测试等后置节点必须用 dependencies 引用前置 delegation_id 或 child_run_id，并声明资源读写集与失败策略。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要重复派发任务。",
                     "LEADER","LEADER_ASSIGNED","INHERIT",
                     List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge","web_search","web_fetch","github_repo_fetch","mcp__github__*"),
                     "输出 Markdown：目标拆解、专家分工、关键结果、风险、最终建议或交付物。"),

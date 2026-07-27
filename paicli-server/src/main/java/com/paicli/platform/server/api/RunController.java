@@ -141,9 +141,10 @@ public class RunController {
                 这是一次由普通对话自动触发的协作任务。请作为 Leader 自主完成以下流程：
                 1. 先在内部形成清晰的执行计划和验收标准，判断任务是否需要拆分。
                 2. 调用 list_agent_profiles 查看当前策略允许的专家，依据任务能力匹配选择专家。
-                3. 对相互独立的工作并行调用 spawn_agent；每个子任务必须包含边界、输入、交付格式和验收标准。
-                4. 使用 list_agents 和 get_agent_result 跟踪子任务；必要时补充验证或审查。
-                5. 最终汇总计划、执行进度、专家结果、风险和未完成项，用中文交付。
+                3. 对相互独立的工作并行调用 spawn_agent；每个子任务必须包含边界、输入、交付格式、验收标准、资源读写集和失败策略。
+                4. 后置任务（例如代码审查、测试）必须在 dependencies 中引用前置委派返回的 delegation_id 或 child_run_id，不能提前运行。
+                5. 使用 list_agents 和 get_agent_result 跟踪子任务；必要时补充验证或审查。
+                6. 最终汇总计划、执行进度、专家结果、风险和未完成项，用中文交付。
 
                 用户目标：
                 %s
@@ -314,6 +315,16 @@ public class RunController {
                         .map(this::collaborationTask).toList());
     }
 
+    @PostMapping("/runs/{runId}/delegations/{delegationId}/decision")
+    public Map<String, Object> decideDelegation(@PathVariable String runId,
+                                                @PathVariable String delegationId,
+                                                @Valid @RequestBody ApiDtos.DelegationDecisionRequest request) {
+        requireRun(runId);
+        RunDelegationRecord delegation = store.decideDelegation(
+                runId, delegationId, request.decision(), request.reason());
+        return collaborationTask(delegation);
+    }
+
     private Map<String, Object> parentNavigation(String runId) {
         return store.parentDelegationForRun(runId).map(delegation -> {
             RunRecord parent = store.findRun(delegation.parentRunId()).orElse(null);
@@ -391,6 +402,7 @@ public class RunController {
                 .orElse(Map.of());
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("delegationId", delegation.id());
+        value.put("parentRunId", delegation.parentRunId());
         value.put("childSessionId", delegation.childSessionId());
         value.put("childRunId", delegation.childRunId());
         value.put("agentProfileId", delegation.agentProfileId() == null ? "" : delegation.agentProfileId());
@@ -398,12 +410,20 @@ public class RunController {
         value.put("task", delegation.task());
         value.put("createdAt", delegation.createdAt());
         value.put("delegationStatus", delegation.status());
+        value.put("failurePolicy", delegation.failurePolicy());
+        value.put("blockedReason", delegation.blockedReason() == null ? "" : delegation.blockedReason());
+        value.put("workspaceRef", delegation.workspaceRef() == null ? "" : delegation.workspaceRef());
+        value.put("dependencies", store.delegationDependencyIds(delegation.id()));
+        value.put("resources", store.delegationResources(delegation.id()));
         value.put("delegationCompletedAt", delegation.completedAt());
-        value.put("status", child == null ? "UNKNOWN" : child.status().name());
+        value.put("runStatus", child == null ? "UNKNOWN" : child.status().name());
+        value.put("status", List.of("BLOCKED", "WAITING_HUMAN").contains(delegation.status())
+                ? delegation.status() : child == null ? "UNKNOWN" : child.status().name());
         value.put("currentStep", child == null ? 0 : child.currentStep());
         value.put("finishedAt", child == null ? null : child.finishedAt());
         value.put("error", child == null || child.error() == null ? "" : child.error());
         value.put("result", child == null || !child.status().terminal() ? "" : latestAssistant(delegation.childSessionId()));
+        value.put("resultEnvelope", delegation.resultJson());
         value.put("pendingApprovals", child == null ? List.of() : store.approvalsForRun(child.id()).stream()
                 .filter(approval -> "PENDING".equals(approval.status().name()))
                 .map(this::approvalSummary).toList());

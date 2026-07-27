@@ -98,9 +98,11 @@ Planner 调用现有 `ModelClient` 生成结构化 JSON。Server 会清理 Markd
 
 Plan 负责“任务如何拆、依赖如何排、每步如何验收”；Multi-Agent 负责“某个步骤是否需要委派给专家 Run”。二者之间通过持久化字段衔接，而不是靠对话文本约定。
 
-`spawn_agent` 是普通 ToolCall，必须先落库并按需要审批。执行时 `DelegationToolProvider` 会根据父 ToolCall 幂等创建或复用内部子 Session/Run，并把 `plan_id`、`plan_step_id`、scope、允许文件/工具、输入 artifact、期望输出、done criteria、预算、deadline、依赖和禁止操作写入 `run_delegations.envelope_json`。子 Agent 仍由普通 `RunProcessor` 执行，因此继续复用正式模型方案、ToolCall 持久化、Approval、Artifact、Event、预算和恢复链路。
+`spawn_agent` 是普通 ToolCall，必须先落库并按需要审批。执行时 `DelegationToolProvider` 会根据父 ToolCall 幂等创建或复用内部子 Session/Run，并把 `plan_id`、`plan_step_id`、scope、允许文件/工具、输入 artifact、期望输出、done criteria、预算、deadline、依赖、资源读写集、workspace 引用、失败策略和禁止操作写入执行信封。子 Agent 仍由普通 `RunProcessor` 执行，因此继续复用正式模型方案、ToolCall 持久化、Approval、Artifact、Event、预算和恢复链路。
 
-Leader 通过 `get_agent_result` 读取子 Run 结果。该工具会把子 Run 终态、摘要、Artifact、Token 用量、失败分类和证据写回 `run_delegations.result_json`，供 Leader 汇总、Plan Step 验证和后续审计使用。Plan Step 最终仍由 `PlanValidator` 验收；子 Agent 声称完成不等于 Step 自动完成，必须有 `validation_checks`、必要 Artifact 或可匹配证据。
+Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`run_delegation_resources` 保存规范化读写集。Run Queue 只领取依赖已满足且没有 workspace 资源冲突的节点；同一 `workspace_ref` 共享 workspace owner，不同引用形成隔离目录。上游失败后，下游按 `BLOCK_GRAPH` 级联取消、`DEGRADE` 带风险继续或 `REQUIRE_HUMAN` 进入持久化人工节点。Plan Graph 继续负责跨 Step 的条件边、REWORK、Validation Gate 和 Human Node；Delegation Graph 负责 Leader 动态派发，两者共享“持久化节点/边、确定性就绪判断、普通 Run 执行”的语义。
+
+子 Run 终态与 Event 原子提交时，同一事务会写入 Result Envelope v2、把有界上游信封追加到可执行下游的子 Session、推进依赖节点并唤醒 `WAITING_AGENT` 父 Run。信封自动归集摘要、Artifact、Token、文件写入、命令、测试、失败分类、风险和未完成项。Leader 的 `get_agent_result` 只读取持久化信封；Plan Step 最终仍由 `PlanValidator` 验收，子 Agent 声称完成不等于 Step 自动完成。
 
 阶段 5/6 增加的 `agent_feedback` 是 Plan 与 Agent Harness 的反馈层：每个绑定 Step 的 Run 终态都会记录验证状态、得分、失败分类和证据质量；验证通过时还会写过程型 Memory。这样后续调度、专家评分和人工复盘可以基于结构化事实，而不是翻聊天记录。
 
@@ -116,7 +118,7 @@ DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工�
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 23，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环，22 为专家思考配置和 Session 工作空间归属继承，23 为类型化 Plan Graph Edge 与确定性路由。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 25，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环，22 为专家思考配置和 Session 工作空间归属继承，23 为类型化 Plan Graph Edge 与确定性路由，24 为可复用执行小队，25 为 Delegation Graph 依赖、资源与终态传播。
 
 连接策略和迁移目录与领域 Store 分离。定时维护执行被动 WAL checkpoint，并按显式配置清理过期 Event/Audit、孤儿 Artifact 和临时文件。Knowledge、Attachment 和 Artifact 采用临时文件、fsync、原子替换；索引中断后可按正文元数据重建。
 

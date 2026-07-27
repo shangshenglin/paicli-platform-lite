@@ -300,6 +300,33 @@ class WebSecurityIntegrationTest {
     }
 
     @Test
+    void humanCanApproveADelegationBlockedByFailedDependency() throws Exception {
+        var session = store.createSession("collaboration human", "collab-human-" + System.nanoTime());
+        var parent = store.createRun(session.id(), "parent");
+        var sourceTool = store.createToolCall(parent.id(), "call-source", "spawn_agent", "{}",
+                "source-" + parent.id());
+        var source = store.createOrGetDelegation(parent.id(), sourceTool.id(), "source", "produce input",
+                null, null);
+        var humanTool = store.createToolCall(parent.id(), "call-human", "spawn_agent", "{}",
+                "human-" + parent.id());
+        var human = store.createOrGetDelegation(parent.id(), humanTool.id(), "reviewer", "review partial input",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(java.util.List.of(source.id()), java.util.List.of(),
+                        java.util.List.of(), "REQUIRE_HUMAN", "workspace/root"));
+        store.completeRun(parent.id());
+        store.claimNextRun().orElseThrow();
+        store.failRun(source.childRunId(), "upstream failed");
+
+        mvc.perform(post("/v1/runs/{runId}/delegations/{delegationId}/decision", parent.id(), human.id())
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\",\"reason\":\"continue with partial result\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.delegationStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.failurePolicy").value("REQUIRE_HUMAN"));
+    }
+
+    @Test
     void agentResultReturnedToParentUsesBoundedSummary() throws Exception {
         var session = store.createSession("delegation summary", "delegation-summary-" + System.nanoTime());
         var parent = store.createRun(session.id(), "parent");

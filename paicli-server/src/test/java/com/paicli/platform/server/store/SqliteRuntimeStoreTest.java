@@ -87,7 +87,7 @@ class SqliteRuntimeStoreTest {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24);
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25);
         }
     }
 
@@ -445,9 +445,152 @@ class SqliteRuntimeStoreTest {
                 .isEqualTo(com.paicli.platform.common.RunStatus.WAITING_AGENT);
 
         store.completeRun(child.childRunId());
-        assertThat(store.requeueWaitingParentRuns(child.childRunId())).isEqualTo(1);
         assertThat(store.findRun(parent.id()).orElseThrow().status())
                 .isEqualTo(com.paicli.platform.common.RunStatus.QUEUED);
+        assertThat(store.requeueWaitingParentRuns(child.childRunId())).isZero();
+        assertThat(store.findDelegation(parent.id(), child.childRunId()).orElseThrow().resultJson())
+                .contains("\"version\":2", "\"terminal_event\"");
+    }
+
+    @Test
+    void gatesDelegatedRunsUntilDependenciesCompleteAndPersistsTerminalEnvelope() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("graph", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var upstreamTool = store.createToolCall(parent.id(), "spawn-code", "spawn_agent", "{}",
+                "spawn-code-" + parent.id());
+        var upstream = store.createOrGetDelegation(parent.id(), upstreamTool.id(), "coder", "implement",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of("src"), List.of("src/main.java"),
+                        "BLOCK_GRAPH", "workspace/root"));
+        var reviewerTool = store.createToolCall(parent.id(), "spawn-review", "spawn_agent", "{}",
+                "spawn-review-" + parent.id());
+        var reviewer = store.createOrGetDelegation(parent.id(), reviewerTool.id(), "reviewer", "review",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(upstream.id()), List.of("src/main.java"),
+                        List.of(), "BLOCK_GRAPH", "workspace/root"));
+        store.completeRun(parent.id());
+
+        assertThat(reviewer.status()).isEqualTo("BLOCKED");
+        assertThat(store.delegationDependencyIds(reviewer.id())).containsExactly(upstream.id());
+        assertThat(store.delegationResources(upstream.id()).get("write")).containsExactly("src/main.java");
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(upstream.childRunId());
+        assertThat(store.claimNextRun()).isEmpty();
+
+        store.appendMessage(upstream.childSessionId(), upstream.childRunId(), "assistant", "implementation done");
+        store.completeRun(upstream.childRunId());
+
+        var completed = store.findDelegation(parent.id(), upstream.childRunId()).orElseThrow();
+        assertThat(completed.resultJson()).contains("\"version\":2", "implementation done",
+                "\"files_changed\"", "\"commands_executed\"", "\"tests\"");
+        assertThat(store.findDelegation(parent.id(), reviewer.childRunId()).orElseThrow().status())
+                .isEqualTo("QUEUED");
+        assertThat(store.messages(reviewer.childSessionId()).stream()
+                .map(com.paicli.platform.server.domain.MessageRecord::content).toList())
+                .anySatisfy(content -> assertThat(content).contains(
+                        "Upstream dependency results", "implementation done", upstream.id()));
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(reviewer.childRunId());
+    }
+
+    @Test
+    void immediatelyQueuesADelegationWhoseDependenciesAlreadyCompleted() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("late dependency", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(parent.id());
+        var sourceTool = store.createToolCall(parent.id(), "spawn-source-late", "spawn_agent", "{}",
+                "spawn-source-late-" + parent.id());
+        var source = store.createOrGetDelegation(parent.id(), sourceTool.id(), "source", "produce result",
+                null, null);
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(source.childRunId());
+        store.appendMessage(source.childSessionId(), source.childRunId(), "assistant", "ready result");
+        store.completeRun(source.childRunId());
+
+        var downstreamTool = store.createToolCall(parent.id(), "spawn-downstream-late", "spawn_agent", "{}",
+                "spawn-downstream-late-" + parent.id());
+        var downstream = store.createOrGetDelegation(parent.id(), downstreamTool.id(), "reviewer", "review result",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(source.id()), List.of(), List.of(),
+                        "BLOCK_GRAPH", "workspace/review"));
+
+        assertThat(downstream.status()).isEqualTo("QUEUED");
+        assertThat(store.messages(downstream.childSessionId()).stream()
+                .map(com.paicli.platform.server.domain.MessageRecord::content).toList())
+                .anySatisfy(content -> assertThat(content).contains("ready result"));
+    }
+
+    @Test
+    void serializesConflictingDelegationResourcesWithinOneWorkspaceOwner() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("resource graph", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var firstTool = store.createToolCall(parent.id(), "spawn-a", "spawn_agent", "{}",
+                "spawn-a-" + parent.id());
+        var first = store.createOrGetDelegation(parent.id(), firstTool.id(), "writer-a", "write a",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of(), List.of("src/shared.java"),
+                        "BLOCK_GRAPH", "workspace/root"));
+        var secondTool = store.createToolCall(parent.id(), "spawn-b", "spawn_agent", "{}",
+                "spawn-b-" + parent.id());
+        var second = store.createOrGetDelegation(parent.id(), secondTool.id(), "writer-b", "write b",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of("src/shared.java"), List.of(),
+                        "BLOCK_GRAPH", "workspace/root"));
+        var isolatedTool = store.createToolCall(parent.id(), "spawn-isolated", "spawn_agent", "{}",
+                "spawn-isolated-" + parent.id());
+        var isolated = store.createOrGetDelegation(parent.id(), isolatedTool.id(), "writer-c", "write c",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of(), List.of("src/shared.java"),
+                        "BLOCK_GRAPH", "workspace/isolated"));
+        store.completeRun(parent.id());
+
+        assertThat(store.workspaceOwnerRunId(first.childRunId()))
+                .isEqualTo(store.workspaceOwnerRunId(second.childRunId()));
+        assertThat(store.workspaceOwnerRunId(isolated.childRunId()))
+                .isNotEqualTo(store.workspaceOwnerRunId(first.childRunId()));
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(first.childRunId());
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(isolated.childRunId());
+        assertThat(store.claimNextRun()).isEmpty();
+        store.completeRun(first.childRunId());
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(second.childRunId());
+    }
+
+    @Test
+    void routesFailedDependenciesThroughBlockDegradeAndHumanPolicies() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("failure graph", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var sourceTool = store.createToolCall(parent.id(), "spawn-source", "spawn_agent", "{}",
+                "spawn-source-" + parent.id());
+        var source = store.createOrGetDelegation(parent.id(), sourceTool.id(), "source", "fail",
+                null, null);
+        var blocked = dependent(store, parent, source, "blocked", "BLOCK_GRAPH");
+        var degraded = dependent(store, parent, source, "degraded", "DEGRADE");
+        var human = dependent(store, parent, source, "human", "REQUIRE_HUMAN");
+        store.completeRun(parent.id());
+
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(source.childRunId());
+        store.failRun(source.childRunId(), "model failed");
+
+        assertThat(store.findDelegation(parent.id(), blocked.childRunId()).orElseThrow().status())
+                .isEqualTo("CANCELED");
+        assertThat(store.findDelegation(parent.id(), degraded.childRunId()).orElseThrow().status())
+                .isEqualTo("QUEUED");
+        assertThat(store.findDelegation(parent.id(), human.childRunId()).orElseThrow().status())
+                .isEqualTo("WAITING_HUMAN");
+        assertThat(store.decideDelegation(parent.id(), human.id(), "APPROVE", "accept degraded input").status())
+                .isEqualTo("QUEUED");
+    }
+
+    private static com.paicli.platform.server.domain.RunDelegationRecord dependent(
+            SqliteRuntimeStore store, com.paicli.platform.server.domain.RunRecord parent,
+            com.paicli.platform.server.domain.RunDelegationRecord source, String name, String policy) {
+        var tool = store.createToolCall(parent.id(), "spawn-" + name, "spawn_agent", "{}",
+                "spawn-" + name + "-" + parent.id());
+        return store.createOrGetDelegation(parent.id(), tool.id(), name, name + " task",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(source.id()), List.of(), List.of(),
+                        policy, "workspace/root"));
     }
 
     @Test

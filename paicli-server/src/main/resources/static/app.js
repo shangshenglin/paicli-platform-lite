@@ -937,6 +937,11 @@ function renderCollaborationTask(task) {
   item.append(head);
   item.append(element('div', 'hint',
     `${task.agentName || profile.name || '子专家'} · ${profile.role || 'EXPERT'} · step ${task.currentStep || 0}`));
+  if (task.blockedReason) item.append(element('div', 'hint', `阻塞：${task.blockedReason}`));
+  if ((task.dependencies || []).length) {
+    item.append(element('div', 'hint',
+      `依赖 ${task.dependencies.length} 个节点 · 失败策略 ${task.failurePolicy || 'BLOCK_GRAPH'}`));
+  }
   item.append(element('p', '', task.task || ''));
   const actions = element('div', 'collaboration-actions');
   const openChild = element('button', 'secondary', '打开子会话');
@@ -944,6 +949,12 @@ function renderCollaborationTask(task) {
   const mountTrace = element('button', 'secondary', '挂载到执行详情');
   mountTrace.onclick = () => mountChildTrace(task);
   actions.append(openChild, mountTrace);
+  if (task.delegationStatus === 'WAITING_HUMAN') {
+    actions.append(
+      actionButtonElement('批准继续', () => decideDelegationNode(task, 'APPROVE')),
+      actionButtonElement('拒绝执行', () => decideDelegationNode(task, 'REJECT'))
+    );
+  }
   item.append(actions);
   (task.pendingApprovals || []).forEach(approval => item.append(renderChildApproval(approval)));
   if (task.error) item.append(element('div', 'form-error', task.error));
@@ -963,6 +974,18 @@ function renderCollaborationTask(task) {
     item.append(details);
   }
   return item;
+}
+
+async function decideDelegationNode(task, decision) {
+  try {
+    await api(`/v1/runs/${task.parentRunId || state.runId}/delegations/${task.delegationId}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({decision, reason: 'Console human graph decision'})
+    });
+    await loadMessages();
+  } catch (error) {
+    alert(`协作节点决策失败：${error.message}`);
+  }
 }
 
 function actionButtonElement(label, action) {
