@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–17，并补齐 Memory/RAG/Plan/Agent Harness 阶段 2/3/4 增量闭环，以及方案阶段 5/6 的受控并行与闭环生产加固；包含 103 项自动化测试，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–18，并补齐 Memory/RAG/Plan/Agent Harness 阶段 2/3/4 增量闭环、方案阶段 5/6 的受控并行与闭环生产加固，以及类型化 Graph Runtime；现有 113 项自动化测试覆盖 Runtime、Store、Graph 路由、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -25,7 +25,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 可靠 Runtime | SQLite WAL、持久化状态机、可恢复 Worker、ToolCall 幂等、SSE 重放、取消与失败恢复 |
 | 执行安全 | Local/Docker Sandbox、危险工具审批、持久化审批策略、路径/资源/密钥边界、JSONL 审计 |
 | 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、摘要、Token 预算、Artifact、项目规则 |
-| Plan Runtime | 持久化 Plan/Step/Edge、JSON 计划解析校验、DAG 合法性检查、审批/启动/取消/Replan API、Step 调度复用普通 ReAct Run、Async Job 记录、Plan Validator Gate、Validation Check 与 DAG 批次分析 |
+| Plan / Graph Runtime | 持久化 Plan/Step/类型化 Edge、确定性条件分支、有限失败回流、PlanState 快照、Human Node 决策、DAG 校验、Step 调度复用普通 ReAct Run、Validation Gate 与受控并行 |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
 | 质量闭环 | 官方入门评测集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
@@ -82,6 +82,8 @@ paicli-server（Agent Runtime / 脑）
 ```powershell
 .\scripts\start-local.ps1
 ```
+
+启动脚本会在加载 `.env` 前按 Windows 规则合并仅大小写不同的进程环境变量，例如 `NO_PROXY/no_proxy`、`HTTP_PROXY/http_proxy` 和 `PATH/Path`。这可避免代理工具、IDE 或 Agent Runtime 重复注入变量后，PowerShell `Start-Process` 抛出 `Item has already been added`。
 
 默认使用无需模型 Key 的 `DemoModelClient`，访问：
 
@@ -228,6 +230,7 @@ X-API-Key: your-key
 
 ```http
 GET /v1/approvals
+GET /v1/approvals?runId={runId}
 
 POST /v1/approvals/{approvalId}
 Content-Type: application/json
@@ -235,7 +238,7 @@ Content-Type: application/json
 {"decision":"APPROVED","rememberScope":"SESSION"}
 ```
 
-`rememberScope` 可为仅本次、不创建策略，或 `SESSION`、`PROJECT`。持久化策略只复用相同工具名和完全相同的参数 SHA-256，参数变化后必须重新审批。
+`runId` 可选；传入后返回当前 Run 所属整棵父子委派树的待审批项。`rememberScope` 可为仅本次、不创建策略，或 `SESSION`、`PROJECT`。持久化策略只复用相同工具名和完全相同的参数 SHA-256，参数变化后必须重新审批。
 
 ### 阶段 3：真实模型与上下文工程
 
@@ -252,7 +255,7 @@ Content-Type: application/json
 
 ### 阶段 5：DeepSeek V4 与真实 Docker 验收
 
-- 支持 DeepSeek V4 Flash/Pro、每 Run 思考模式和推理等级。
+- 支持 DeepSeek V4 Flash/Pro、每 Run 思考模式和推理等级；默认不按单 Run 累计 Token 截断任务，可通过 `PAICLI_MODEL_MAX_RUN_TOKENS` 设置正数启用可选保护阀。
 - `reasoning_content`、assistant `tool_calls` 与工具结果会持久化，并在后续模型轮次正确回传。
 - 解析 Prompt Cache 用量，兼容旧 SQLite 结构，并完成真实 Docker 容器验收。
 
@@ -261,7 +264,7 @@ Content-Type: application/json
 - 一轮多个 ToolCall 与 assistant 消息先原子落库，再按 Provider 顺序逐个执行和审批。
 - 支持主动取消模型 HTTP/SSE 请求、受控项目规则、批量 delta 持久化和终态对账。
 - Console 支持聊天、流式 reasoning、Run 时间线、审批、Session 分组/移动/删除和独立滚动。
-- 删除 Session 前拒绝活跃 Run；随后在同一事务清理 Approval、ToolCall、Event、Artifact、ModelUsage、MemoryExtraction、Message 和 Run。删除分组只将 Session 移到未分组。
+- 删除 Session 前拒绝活跃 Run；随后在同一事务清理 Approval、ToolCall、Event、Artifact、ModelUsage、ModelAttempt、MemoryExtraction、CollaborationPolicy、AsyncJob、Message 和 Run。删除分组只将 Session 移到未分组。
 
 项目规则按“全局 → 项目 → Run 工作区”读取，越具体的规则优先，总字符预算为 16,000：
 
@@ -283,7 +286,7 @@ data/workspaces/{runId}/PAI.md
 - 每轮只注入稳定排序的名称/描述索引；正文由模型调用 `load_skill` 按需加载。
 - `read_skill_resource` 在受控路径和字符预算内读取 references、模板和文本脚本。
 - Console 支持 HTTPS Git 导入、安装预检、项目/全局作用域、启停、固定版本、检查更新、升级和单级回滚。
-- 多 Skill 仓库需指定准确目录名；GitHub tree/blob 链接会转换为仓库地址与 Ref。
+- 多 Skill 仓库可指定准确目录名；GitHub tree/blob 链接会转换为仓库地址与 Ref，并优先从链接路径推断 Skill 目录名。
 
 #### 知识库与混合 RAG
 
@@ -310,8 +313,8 @@ data/workspaces/{runId}/PAI.md
 
 #### 持久化 Multi-Agent
 
-- `agent_profiles` 保存可复用的智能体专家定义，包括专家指令、模型方案、工具白名单、Skill 白名单、输出契约、协作角色、交接策略、工作区范围和审批策略。
-- 创建 Run 时可传 `agentProfileId`，Server 会把专家指令注入系统上下文；若请求未显式指定模型方案，则优先使用专家绑定的模型方案。
+- `agent_profiles` 保存可复用的智能体专家定义，包括专家指令、模型方案、专家级思考开关/深度、工具白名单、Skill 白名单、输出契约、协作角色、交接策略、工作区范围和审批策略。
+- 创建 Run 时可传 `agentProfileId`，Server 会把专家指令注入系统上下文，并优先使用专家绑定的模型方案与思考设置；未设置的专家字段继续继承对话级设置。Leader 派发的子专家同样使用各自绑定的模型和思考深度。
 - 工具白名单会过滤传给模型的 Tool Definition；Skill 白名单会过滤上下文中的 Skill 索引，为后续 Leader/Worker 小队调度预留稳定专家目录。
 - `spawn_agent` 经审批后创建内部子 Session/Run，并以父 ToolCall 为唯一键避免恢复时重复派生。
 - 委派限制三层深度、每个父 Run 最多六个子 Run；取消父 Run 会级联取消后代。
@@ -323,6 +326,7 @@ data/workspaces/{runId}/PAI.md
 - 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。
 - Server 校验真实图片字节、尺寸与大小，必要时压缩；附件 id 在创建 Run 时原子绑定 user Message，不能重复使用。
 - 只有当前 Run 的图片按 OpenAI-compatible `image_url` 注入，历史图片不重复发送。
+- 当所选纯文本模型明确拒绝多模态内容时，Server 会自动降级为文本请求并要求模型用中文提示切换视觉模型，避免整个对话 Run 因图片能力不匹配而失败。
 - 文档写入当前项目知识库并作为本轮优先 RAG 来源；“总结附件”使用跨文档分段采样，具体问题使用检索。
 - 扫描 PDF 默认最多处理 6 页、150 DPI，可通过 `PAICLI_RAG_PDF_OCR_*` 调整；图片、OCR 中间结果和模型 Key 都不进入 Sandbox。
 
@@ -375,8 +379,9 @@ Run 完成后先持久化 `memory_extractions` job，再由 Worker 从受限对�
 
 - **任务模板**：保存 Prompt、`${变量}`、附件要求、允许工具和模型方案；内置 `/review`、`/summarize`、`/research`。
 - **模型方案**：保存用途、Base URL、模型、后备模型、上下文/输出上限和价格；密钥只保存环境变量名。
-- **智能体专家**：保存专家指令、模型方案、工具/Skill 白名单和输出契约；聊天输入区可选择专家运行，首页提供“普通对话 / 专家协作”模式切换。复杂普通对话会由后端自动评估，必要时选择 Leader、创建协作执行计划并调用子专家；简单问题仍保持单 Agent 对话。当前 Session 会同时展示根计划进度和子专家任务看板。
+- **智能体专家**：保存专家指令、模型方案、独立思考模式/深度、工具/Skill 白名单和输出契约；聊天输入区可选择专家运行，首页提供“普通对话 / 专家协作”模式切换。复杂普通对话会由后端自动评估，必要时选择 Leader、创建协作执行计划并调用子专家；简单问题仍保持单 Agent 对话。当前 Session 会持续展示最近一次根协作计划和子专家任务看板，后续普通续聊或计划模式不会让工作空间入口消失。
 - **专家模板治理**：内置 Leader/需求/实现/测试/审查/文档专家带稳定模板 key/version；左侧“专家创建”支持编辑、复制为新专家、恢复内置模板版本。不同协作角色有默认工具和审批策略，非 Leader 默认不能继续派发子 Agent，后端 `spawn_agent` 会校验策略允许的专家、深度和数量上限。
+- **执行小队**：`agent_teams` 持久化 Leader、成员专家、并发人数、委派深度和 Reviewer/Runner 要求；“专家创建”支持小队 CRUD，专家协作首页可直接套用。父界面持续聚合整棵委派树审批，即使父 Run 已终止也继续刷新；子专家页面提供返回父专家入口。
 - **用量与预算**：按日期、项目、Session、模型统计调用、Token、缓存、耗时、失败、重试和估算成本；支持日/月 Token、费用提醒和项目最大并发。
 - **Run 队列**：支持 `-10..10` 优先级、项目公平领取、批量取消、失败/取消 Run 重新排队，并显示步骤、耗时和重试次数。
 - **定时任务**：引用已保存模板，支持一次性、每日、每周和 Spring 六段 Cron；每次触发仍创建普通 Session/Run。
@@ -432,7 +437,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–21：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据，以及受控并行 Plan Step 与 Agent Feedback 闭环。
+SQLite `schema_migrations` 当前记录版本 1–23：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据、受控并行 Plan Step 与 Agent Feedback 闭环、专家思考配置与 Session 工作空间继承，以及类型化 Plan Graph Edge 与确定性路由。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -457,9 +462,15 @@ POST                        /v1/runs/{runId}/retry
 POST                        /v1/runs/{runId}/cancel
 GET                         /v1/runs/{runId}/timeline
 GET                         /v1/runs/{runId}/events
+GET                         /v1/runs/{runId}/workspace-file?path={relativePath}
 GET                         /v1/sessions/{sessionId}/export
 POST                        /v1/sessions/import
 ```
+
+`/v1/sessions/{sessionId}/messages` 返回 Console 消息视图，保留原 Message 字段，并为每条消息补充 `runArtifacts`，用于在对话页展示最终交付物、Artifact 下载/预览入口和可点击的网页/本地文件引用。
+`/v1/runs/{runId}/workspace-file` 只读取该 Run 所属受控 workspace 下的相对文件路径，并通过认证请求返回文件内容，供 Console 以带 API Key 的方式打开或下载最终 HTML、Markdown、图片等交付物。
+
+同一 Session 的后续普通 Run 和 Plan Run 会继承已有 workspace owner；协作看板接口在最新 Run 不是 Leader Run 时会回溯该 Session 最近一次协作根 Run，因此续聊、切换计划模式或刷新页面后仍可访问此前工作空间和子专家链路。Console 会按 Session 保存历史阅读位置，后台刷新不再强制跳到底部。
 
 ### Plan Runtime
 
@@ -468,6 +479,7 @@ GET/POST                    /v1/plans
 GET                         /v1/sessions/{sessionId}/plans
 POST                        /v1/plans/generate
 GET                         /v1/plans/{planId}
+GET                         /v1/plans/{planId}/state
 POST                        /v1/plans/{planId}/approve
 POST                        /v1/plans/{planId}/start
 POST                        /v1/plans/{planId}/dispatch
@@ -480,12 +492,15 @@ GET                         /v1/plans/{planId}/jobs
 GET                         /v1/plans/{planId}/validation-checks
 POST                        /v1/plan-steps/{stepId}/retry
 POST                        /v1/plan-steps/{stepId}/skip
+POST                        /v1/plan-steps/{stepId}/decision
 POST                        /v1/async-jobs
 GET                         /v1/async-jobs/{jobId}
 POST                        /v1/async-jobs/{jobId}/cancel
 ```
 
-Plan Runtime 已从“持久化计划对象”推进到受控执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、关键路径权重、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、调度幂等键和绑定的普通 `run_id`；`plan_edges` 保存 DAG 依赖。Server 会清理模型输出中的 Markdown 包裹、重新映射 step id、校验 step 类型、依赖存在性和循环依赖。启动后 Plan Worker 会先回收过期且尚未绑定 Run 的 Step 租约，再按关键路径和下游依赖优先领取 `READY` Step；调度前会检查活跃 Step 的资源读写集，写写或读写冲突会被标记为 `RESOURCE_CONFLICT` 并短暂延后。Run 进入 `COMPLETED` 后先把 Step 推进到 `VALIDATING`，再由 `PlanValidator` 按 done criteria 写入 `actual`、`evidence` 和 `error`，只有验证通过才完成 Step、Async Job 和 Plan，验证失败会落到 `VALIDATION_FAILED`。FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部 Replan：保留已完成/跳过/取消步骤及其证据，只替换未完成尾部并重新激活 Plan。
+Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、关键路径权重、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、失败分类、调度幂等键和绑定的普通 `run_id`；`plan_edges` 保存 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类边、确定性条件、优先级、最大回流次数和已回流次数。旧数据库中的边自动迁移为 `DEPENDENCY + ON_SUCCESS`。条件只支持 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE` 和 `ON_SKIPPED`，由 Server 代码判断，不让模型临时解释布尔逻辑；未命中的分支自动进入 `SKIPPED`，Validation Check 与 `plan_events` 同步收口。`REWORK` 只重置目标节点及其下游分支，并受持久化 `max_traversals` 限制，耗尽后按原失败语义终止 Plan。
+
+`GET /v1/plans/{id}` 和独立的 `/state` 接口会返回结构化 `PlanState`：状态计数、READY/活跃/等待人工 Step、阻塞原因、累计模型 Token、最后事件序号和更新时间。`USER_APPROVAL` 是真实 Human Node，必须通过 `/v1/plan-steps/{id}/decision` 持久化 `APPROVED` 或 `REJECTED`；决定完成后才计算条件边。Console 的 Plan 详情展示类型化边、状态快照、阻塞原因和回流计数，并允许处理等待中的人工节点。
 
 当前内置验证规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>`、`file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>`、`test_report:<path>` 以及普通文字验收标准的最终回答证据匹配。文件与测试报告验证只读取 `paicli.workspace-root` 下的相对路径，拒绝绝对路径和越界路径。这个闸口避免把“模型/工具链路成功结束”误判为“用户目标已经达成”，也为后续命令/API/截图断言和 Reviewer Agent 证据包预留扩展位置。
 
@@ -493,12 +508,12 @@ Plan Runtime 已从“持久化计划对象”推进到受控执行闭环：`pla
 
 阶段 5/6 增量把上述基础执行闭环推进到受控并行和反馈闭环：Plan JSON 可声明 `resource_read_set`、`resource_write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；调度器会按关键路径优先级领取 Step，并用资源读写集阻止同一计划内的活跃写写或读写冲突。需要隔离的 Step 会创建内部 Session，`GIT_WORKTREE` 当前落为 Lite 受控 workspace 引用和目录边界；真实 Git worktree 的 add/merge 仍预留在后续工具层，不在当前版本自动执行。Plan 验证结果会写入 `agent_feedback`，验证通过时生成可追溯的过程型 Memory，失败时记录 validation/failure class，供后续专家评分、调度策略和人工复盘使用；Actuator 指标同步记录 Plan 验证成功/失败、资源冲突、Agent Feedback 和验证 Memory 写入次数。
 
-更完整的 Plan、Multi-Agent、Agent Harness 和阶段 5/6 闭环说明已合并到 [技术架构与面试讲解](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md) 的“Plan Runtime、Multi-Agent 与 Agent Harness”章节。
+更完整的 Plan、Multi-Agent、Agent Harness、调度恢复和验证闭环说明见 [技术架构与面试指南](PaiCLI%20Platform%20Lite%20技术架构与面试指南.md) 的“Plan 与类型化 Graph Runtime”“Step 调度、租约、资源冲突、隔离与 Validation Gate”章节。
 
 ### Approval、附件与 Artifact
 
 ```text
-GET                         /v1/approvals
+GET                         /v1/approvals[?runId={runId}]
 POST                        /v1/approvals/{approvalId}
 GET                         /v1/approvals/policies
 DELETE                      /v1/approvals/policies/{policyId}
@@ -562,6 +577,8 @@ PUT/DELETE                  /v1/productivity/model-profiles/{id}
 GET/POST                    /v1/productivity/agent-profiles
 POST                        /v1/productivity/agent-profiles/starter-pack
 PUT/DELETE                  /v1/productivity/agent-profiles/{id}
+GET/POST                    /v1/productivity/agent-teams
+PUT/DELETE                  /v1/productivity/agent-teams/{id}
 GET                         /v1/productivity/estimate
 GET                         /v1/productivity/usage
 GET/PUT                     /v1/productivity/budget
@@ -642,7 +659,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 - 单机、单租户、私有部署；不实现 Kubernetes、多地域和分布式高可用。
 - SQLite、本地 Artifact、进程内 Worker 和 Docker 分别替代 PostgreSQL、S3、消息队列和 MicroVM。
 - Docker 不是硬件级隔离，不适合执行完全不可信的敌对代码。
-- 当前提供可复用智能体专家 Profile、左侧专家创建入口、首页专家协作模式、Session 内协作任务看板，以及基于 `list_agent_profiles`/`spawn_agent(agent_profile_id)` 的 Leader 最小协作闭环；尚不包含复杂 DAG 调度、基于历史成功率的自动专家评分和跨项目 Memory 联想图谱。
+- 当前提供可复用智能体专家 Profile、可复用执行小队、左侧专家创建入口、首页专家协作模式、Session 内协作任务看板，以及基于 `list_agent_profiles`/`spawn_agent(agent_profile_id)` 的 Leader 最小协作闭环；尚不包含基于历史成功率的自动专家评分和跨项目 Memory 联想图谱。
 - MCP 当前只支持远程 Streamable HTTP，不管理本地 stdio MCP 进程。
 - 默认不依赖外部向量数据库；未配置真实 Embedding 时使用明确的本地降级。
 - 图片型 PDF 支持受限 OCR/视觉路径；尚不支持音频和视频理解。
@@ -651,7 +668,8 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 
 ## 文档与产品站点
 
-- [技术架构与面试讲解](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md)
+- [技术架构与面试指南（按功能重构版）](PaiCLI%20Platform%20Lite%20技术架构与面试指南.md)
+- [技术架构与面试讲解（原始专题版）](PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md)
 - [架构说明](docs/architecture.md)
 - [阶段状态](docs/phases.md)
 - [变更日志与优化复盘](changeLog.md)

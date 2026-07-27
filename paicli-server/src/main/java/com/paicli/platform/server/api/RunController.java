@@ -1,10 +1,14 @@
 package com.paicli.platform.server.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.server.domain.ApprovalRecord;
 import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.domain.RunDelegationRecord;
 import com.paicli.platform.server.domain.RunEventRecord;
 import com.paicli.platform.server.domain.RunRecord;
+import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.domain.ToolCallRecord;
+import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.sse.SseEventService;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
@@ -14,7 +18,10 @@ import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,6 +37,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 
 @RestController
 @RequestMapping("/v1")
@@ -42,10 +52,12 @@ public class RunController {
     private final CompletionNotificationService notifications;
     private final ObjectMapper mapper;
     private final PlanService plans;
+    private final Path workspaceRoot;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
-                         CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans) {
+                         CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans,
+                         PlatformProperties properties) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -54,6 +66,7 @@ public class RunController {
         this.notifications = notifications;
         this.mapper = mapper;
         this.plans = plans;
+        this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
     }
 
     @PostMapping("/sessions/{sessionId}/runs")
@@ -67,7 +80,7 @@ public class RunController {
         if (request.agentProfileId() != null && !request.agentProfileId().isBlank() && agent == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "agent profile not found");
         }
-        String requestedModel = blank(request.modelProfileId()) && agent != null
+        String requestedModel = agent != null && !blank(agent.modelProfileId())
                 ? agent.modelProfileId() : request.modelProfileId();
         String profileId = productivity.resolveModelProfile(session.projectKey(), requestedModel)
                 .map(ProductivityStore.ModelProfile::id).orElse(null);
@@ -91,7 +104,12 @@ public class RunController {
         }
         String runInput = automaticCollaboration && agent != null
                 ? automaticLeaderInput(request.input()) : request.input();
-        RunRecord run = store.createRun(sessionId, runInput, request.thinkingMode(), request.reasoningEffort(),
+        String thinkingMode = agent != null && !blank(agent.thinkingMode())
+                ? agent.thinkingMode() : request.thinkingMode();
+        String reasoningEffort = agent != null && !blank(agent.reasoningEffort())
+                ? agent.reasoningEffort() : request.reasoningEffort();
+        if (!"enabled".equalsIgnoreCase(thinkingMode)) reasoningEffort = "";
+        RunRecord run = store.createRun(sessionId, runInput, thinkingMode, reasoningEffort,
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),
                 request.priority() == null ? 0 : request.priority(), 0);
         if (requestedCollaboration) {
@@ -162,6 +180,36 @@ public class RunController {
         return requireRun(runId);
     }
 
+    @GetMapping("/runs/{runId}/workspace-file")
+    public ResponseEntity<ByteArrayResource> workspaceFile(@PathVariable String runId,
+                                                           @RequestParam String path) {
+        requireRun(runId);
+        try {
+            Path runRoot = workspaceRoot.resolve(store.workspaceOwnerRunId(runId)).normalize();
+            Path rootReal = runRoot.toRealPath();
+            Path candidate = rootReal.resolve(path == null ? "" : path.replace('\\', '/')).normalize();
+            if (candidate.isAbsolute() && !candidate.startsWith(rootReal)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "path escapes workspace");
+            }
+            Path existing = candidate.toRealPath();
+            if (!existing.startsWith(rootReal) || !Files.isRegularFile(existing)) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "workspace file not found");
+            }
+            byte[] bytes = Files.readAllBytes(existing);
+            String filename = existing.getFileName().toString().replaceAll("[\\r\\n\\\"]", "_");
+            MediaType mediaType = mediaType(filename);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename*=UTF-8''" +
+                            java.net.URLEncoder.encode(filename, StandardCharsets.UTF_8).replace("+", "%20"))
+                    .contentType(mediaType).contentLength(bytes.length)
+                    .body(new ByteArrayResource(bytes));
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "workspace file not found");
+        }
+    }
+
     @PostMapping("/runs/{runId}/retry")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Map<String, Object> retry(@PathVariable String runId,
@@ -192,6 +240,15 @@ public class RunController {
         return Map.of("run", retried, "sessionId", sessionId, "branchCreated", branch);
     }
 
+    @PostMapping("/runs/{runId}/branch")
+    @ResponseStatus(HttpStatus.CREATED)
+    public SessionRecord branch(@PathVariable String runId) {
+        RunRecord source = requireRun(runId);
+        if (!source.status().terminal()) throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "only terminal runs can be branched");
+        return store.createBranchSession(source.id());
+    }
+
     @PostMapping("/runs/{runId}/cancel")
     public Map<String, Object> cancel(@PathVariable String runId) {
         requireRun(runId);
@@ -216,12 +273,28 @@ public class RunController {
     @GetMapping("/runs/{runId}/collaboration")
     public Map<String, Object> collaboration(@PathVariable String runId) {
         RunRecord run = requireRun(runId);
-        var policy = store.collaborationPolicy(runId).orElse(null);
-        return Map.of("runId", run.id(), "sessionId", run.sessionId(),
+        String rootRunId = store.delegationRootRunId(runId);
+        String collaborationRunId = store.collaborationPolicy(runId).isPresent() ? runId
+                : store.collaborationPolicy(rootRunId).isPresent() ? rootRunId
+                : store.latestCollaborationRunId(run.sessionId()).orElse(runId);
+        var policy = store.collaborationPolicy(collaborationRunId).orElse(null);
+        return Map.of("runId", collaborationRunId, "viewingRunId", runId, "sessionId", run.sessionId(),
                 "enabled", policy != null && policy.enabled(),
                 "policy", policy == null ? Map.of() : policy,
-                "tasks", store.delegationsForRun(runId).stream()
+                "parent", parentNavigation(runId),
+                "tasks", store.delegationsForRun(collaborationRunId).stream()
                         .map(this::collaborationTask).toList());
+    }
+
+    private Map<String, Object> parentNavigation(String runId) {
+        return store.parentDelegationForRun(runId).map(delegation -> {
+            RunRecord parent = store.findRun(delegation.parentRunId()).orElse(null);
+            if (parent == null) return Map.<String, Object>of();
+            return Map.<String, Object>of(
+                    "runId", parent.id(),
+                    "sessionId", parent.sessionId(),
+                    "agentName", delegation.agentName());
+        }).orElse(Map.of());
     }
 
     @GetMapping(value = "/runs/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -296,11 +369,70 @@ public class RunController {
         value.put("agentName", delegation.agentName());
         value.put("task", delegation.task());
         value.put("createdAt", delegation.createdAt());
+        value.put("delegationStatus", delegation.status());
+        value.put("delegationCompletedAt", delegation.completedAt());
         value.put("status", child == null ? "UNKNOWN" : child.status().name());
+        value.put("currentStep", child == null ? 0 : child.currentStep());
+        value.put("finishedAt", child == null ? null : child.finishedAt());
         value.put("error", child == null || child.error() == null ? "" : child.error());
         value.put("result", child == null || !child.status().terminal() ? "" : latestAssistant(delegation.childSessionId()));
+        value.put("pendingApprovals", child == null ? List.of() : store.approvalsForRun(child.id()).stream()
+                .filter(approval -> "PENDING".equals(approval.status().name()))
+                .map(this::approvalSummary).toList());
+        value.put("toolCalls", child == null ? List.of() : tail(store.toolCallsForRun(child.id()), 6).stream()
+                .map(this::toolCallSummary).toList());
+        value.put("events", child == null ? List.of() : tail(store.events(child.id(), 0, 1_000), 8).stream()
+                .map(this::eventSummary).toList());
         value.put("profile", profile);
         return value;
+    }
+
+    private Map<String, Object> approvalSummary(ApprovalRecord approval) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("id", approval.id());
+        value.put("runId", approval.runId());
+        value.put("toolCallId", approval.toolCallId());
+        value.put("status", approval.status().name());
+        value.put("reason", approval.reason());
+        value.put("createdAt", approval.createdAt());
+        return value;
+    }
+
+    private Map<String, Object> toolCallSummary(ToolCallRecord call) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("id", call.id());
+        value.put("name", call.toolName());
+        value.put("status", call.status().name());
+        value.put("error", call.error() == null ? "" : call.error());
+        value.put("createdAt", call.createdAt());
+        value.put("finishedAt", call.finishedAt());
+        return value;
+    }
+
+    private Map<String, Object> eventSummary(RunEventRecord event) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("id", event.id());
+        value.put("type", event.type());
+        value.put("data", event.data());
+        value.put("createdAt", event.createdAt());
+        return value;
+    }
+
+    private static <T> List<T> tail(List<T> values, int limit) {
+        if (values.size() <= limit) return values;
+        return values.subList(values.size() - limit, values.size());
+    }
+
+    private static MediaType mediaType(String filename) {
+        String value = filename == null ? "" : filename.toLowerCase();
+        if (value.endsWith(".html") || value.endsWith(".htm")) return MediaType.TEXT_HTML;
+        if (value.endsWith(".json")) return MediaType.APPLICATION_JSON;
+        if (value.endsWith(".png")) return MediaType.IMAGE_PNG;
+        if (value.endsWith(".jpg") || value.endsWith(".jpeg")) return MediaType.IMAGE_JPEG;
+        if (value.endsWith(".gif")) return MediaType.IMAGE_GIF;
+        if (value.endsWith(".css")) return MediaType.valueOf("text/css");
+        if (value.endsWith(".js")) return MediaType.valueOf("text/javascript");
+        return MediaType.TEXT_PLAIN;
     }
 
     private String latestAssistant(String sessionId) {

@@ -145,7 +145,7 @@ public class SkillService {
                                          String ref, boolean global) {
         GitSource gitSource = normalizeGitSource(gitUrl, ref);
         NetworkPolicy.requirePublicHttpUrl(gitSource.remoteUrl());
-        String name = normalizeSkillName(requestedName, gitSource.remoteUrl());
+        String name = normalizeSkillName(requestedName, gitSource);
         Path targetRoot = global ? dataRoot.resolve("skills") : projectDirectory(projectKey).resolve("skills");
         Path target = targetRoot.resolve(name).normalize();
         if (!target.startsWith(targetRoot.normalize())) throw new IllegalArgumentException("invalid skill name");
@@ -156,7 +156,8 @@ public class SkillService {
             Files.createDirectories(stagingRoot);
             List<String> command = new ArrayList<>(List.of(
                     "git", "-c", "http.version=HTTP/1.1", "clone", "--depth", "1"));
-            boolean sparse = requestedName != null && !requestedName.isBlank();
+            boolean sparse = (requestedName != null && !requestedName.isBlank())
+                    || (gitSource.suggestedName() != null && !gitSource.suggestedName().isBlank());
             if (sparse) command.addAll(List.of("--filter=blob:none", "--sparse"));
             if (gitSource.ref() != null) {
                 if (!gitSource.ref().matches("[a-zA-Z0-9_./-]{1,120}")) {
@@ -240,7 +241,7 @@ public class SkillService {
 
     public SkillInspection inspectFromGit(String gitUrl,String requestedName,String ref){
         GitSource source=normalizeGitSource(gitUrl,ref);NetworkPolicy.requirePublicHttpUrl(source.remoteUrl());
-        String name=normalizeSkillName(requestedName,source.remoteUrl());Path checkout=dataRoot.resolve(".skill-imports").resolve(UUID.randomUUID().toString()).normalize();
+        String name=normalizeSkillName(requestedName,source);Path checkout=dataRoot.resolve(".skill-imports").resolve(UUID.randomUUID().toString()).normalize();
         try{Files.createDirectories(checkout.getParent());List<String> command=new ArrayList<>(List.of("git","-c","http.version=HTTP/1.1","clone","--depth","1"));
             if(source.ref()!=null)command.addAll(List.of("--branch",source.ref()));command.addAll(List.of("--",source.remoteUrl(),checkout.toString()));runProcess(command,180,"inspect skill repository");
             Path root=locateSkillRoot(checkout,name);validateImport(root);String header=Files.readString(root.resolve("SKILL.md"),StandardCharsets.UTF_8);
@@ -331,10 +332,11 @@ public class SkillService {
         return values;
     }
 
-    private static String normalizeSkillName(String requested, String gitUrl) {
+    private static String normalizeSkillName(String requested, GitSource source) {
         String value = requested == null ? "" : requested.trim();
+        if (value.isBlank() && source.suggestedName() != null) value = source.suggestedName();
         if (value.isBlank()) {
-            String path = java.net.URI.create(gitUrl).getPath();
+            String path = java.net.URI.create(source.remoteUrl()).getPath();
             value = path.substring(path.lastIndexOf('/') + 1).replaceFirst("\\.git$", "");
         }
         if (!NAME.matcher(value).matches()) throw new IllegalArgumentException("invalid skill name");
@@ -360,13 +362,20 @@ public class SkillService {
             if (!owner.matches("[a-zA-Z0-9_.-]+") || !repository.matches("[a-zA-Z0-9_.-]+")) {
                 throw new IllegalArgumentException("invalid GitHub repository URL");
             }
-            if (ref == null && parts.size() >= 4
-                    && (parts.get(2).equals("tree") || parts.get(2).equals("blob"))) {
-                ref = parts.get(3);
+            String suggestedName = null;
+            if (parts.size() >= 4 && (parts.get(2).equals("tree") || parts.get(2).equals("blob"))) {
+                if (ref == null) ref = parts.get(3);
+                if (parts.size() >= 5) {
+                    suggestedName = parts.get(parts.size() - 1);
+                    if (suggestedName.equalsIgnoreCase("SKILL.md") && parts.size() >= 6) {
+                        suggestedName = parts.get(parts.size() - 2);
+                    }
+                    if (!NAME.matcher(suggestedName).matches()) suggestedName = null;
+                }
             }
-            return new GitSource("https://github.com/" + owner + "/" + repository + ".git", ref);
+            return new GitSource("https://github.com/" + owner + "/" + repository + ".git", ref, suggestedName);
         }
-        return new GitSource(value.trim(), ref);
+        return new GitSource(value.trim(), ref, null);
     }
 
     static Path locateSkillRoot(Path checkout, String name) throws Exception {
@@ -504,5 +513,5 @@ public class SkillService {
                                 int totalChars, boolean truncated) { }
     public record SkillUpdateStatus(String name,String currentCommit,String latestCommit,boolean updateAvailable,String error) { }
     public record SkillInspection(String name,String repository,String ref,String permissions,List<String> files) { }
-    record GitSource(String remoteUrl, String ref) { }
+    record GitSource(String remoteUrl, String ref, String suggestedName) { }
 }

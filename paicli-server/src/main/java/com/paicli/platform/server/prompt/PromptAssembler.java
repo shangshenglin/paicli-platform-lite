@@ -30,10 +30,10 @@ public class PromptAssembler {
 
     public String runtimeContext(Path workspaceRoot) {
         return "<runtime_context>\n"
-                + "Current time: " + Instant.now() + "\n"
-                + "Workspace root: " + workspaceRoot.toAbsolutePath().normalize() + "\n"
-                + "All file tool paths must be relative to this Run workspace; never pass the host absolute path.\n"
-                + "Execution environment is selected by SandboxDriver.\n"
+                + "当前时间：" + Instant.now() + "\n"
+                + "工作区根目录：" + workspaceRoot.toAbsolutePath().normalize() + "\n"
+                + "所有文件工具路径必须相对于当前 Run 工作区，不得传入宿主机绝对路径。\n"
+                + "执行环境由 SandboxDriver 选择。\n"
                 + "</runtime_context>";
     }
 
@@ -51,7 +51,7 @@ public class PromptAssembler {
                 new RuleFile("run AGENTS.md", runDirectory.resolve("AGENTS.md")),
                 new RuleFile("run PAI.md", runDirectory.resolve("PAI.md")));
         StringBuilder result = new StringBuilder("<project_rules>\n"
-                + "Rules are ordered from general to specific; later rules take precedence.\n");
+                + "规则按从通用到具体的顺序排列；后出现的规则优先级更高。\n");
         for (RuleFile file : files) {
             if (!Files.isRegularFile(file.path())) continue;
             String value;

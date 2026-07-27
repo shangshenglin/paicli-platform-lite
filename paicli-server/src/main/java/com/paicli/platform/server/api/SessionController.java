@@ -1,5 +1,6 @@
 package com.paicli.platform.server.api;
 
+import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.domain.SessionRecord;
 import com.paicli.platform.server.domain.RunRecord;
@@ -64,11 +65,16 @@ public class SessionController {
     }
 
     @GetMapping("/{sessionId}/messages")
-    public List<MessageRecord> messages(@PathVariable String sessionId) {
+    public List<MessageView> messages(@PathVariable String sessionId) {
         if (store.findSession(sessionId).isEmpty()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "session not found");
         }
-        return store.messages(sessionId);
+        java.util.Map<String, List<ArtifactRecord>> artifactsByRun = new java.util.HashMap<>();
+        return store.messages(sessionId).stream()
+                .map(message -> new MessageView(message,
+                        message.runId() == null || message.runId().isBlank()
+                                ? List.of() : artifactsByRun.computeIfAbsent(message.runId(), store::artifactsForRun)))
+                .toList();
     }
 
     @GetMapping("/{sessionId}/runs")
@@ -77,5 +83,26 @@ public class SessionController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "session not found");
         }
         return store.runsForSession(sessionId);
+    }
+
+    public record MessageView(
+            String id,
+            String sessionId,
+            String runId,
+            String role,
+            String content,
+            String reasoningContent,
+            String toolCallId,
+            String toolCallsJson,
+            boolean archived,
+            long sequence,
+            java.time.Instant createdAt,
+            List<ArtifactRecord> runArtifacts
+    ) {
+        MessageView(MessageRecord message, List<ArtifactRecord> runArtifacts) {
+            this(message.id(), message.sessionId(), message.runId(), message.role(), message.content(),
+                    message.reasoningContent(), message.toolCallId(), message.toolCallsJson(), message.archived(),
+                    message.sequence(), message.createdAt(), runArtifacts == null ? List.of() : runArtifacts);
+        }
     }
 }

@@ -23,6 +23,7 @@ import java.util.Set;
 
 @Component
 public class DelegationToolProvider implements ServerToolProvider {
+    private static final int AGENT_RESULT_SUMMARY_CHARS = 4_000;
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private final SqliteRuntimeStore store;
     private final ProductivityStore productivity;
@@ -126,6 +127,8 @@ public class DelegationToolProvider implements ServerToolProvider {
                 String.valueOf(request.arguments().getOrDefault("task", "")),
                 profile == null ? null : profile.id(),
                 profile == null ? null : profile.modelProfileId(),
+                profile == null ? null : profile.thinkingMode(),
+                profile == null ? null : profile.reasoningEffort(),
                 planId, planStepId, envelopeJson);
         var child = store.findRun(delegation.childRunId()).orElseThrow();
         Map<String, Object> value = new LinkedHashMap<>();
@@ -208,6 +211,7 @@ public class DelegationToolProvider implements ServerToolProvider {
         var child = store.findRun(childRunId).orElseThrow();
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("child_run_id", child.id());
+        value.put("child_session_id", delegation.childSessionId());
         value.put("agent_name", delegation.agentName());
         value.put("status", child.status().name());
         value.put("delegation_status", delegation.status());
@@ -220,7 +224,9 @@ public class DelegationToolProvider implements ServerToolProvider {
                     .filter(message -> "assistant".equals(message.role()))
                     .map(MessageRecord::content).filter(content -> content != null && !content.isBlank())
                     .reduce((first, second) -> second).orElse("");
-            value.put("result", answer);
+            value.put("result", summarizeAgentAnswer(answer));
+            value.put("result_truncated", answer.length() > AGENT_RESULT_SUMMARY_CHARS);
+            value.put("full_result_source", "Open child_session_id or referenced artifacts for the full child Agent output.");
         }
         RunDelegationRecord updated = store.completeDelegationResult(delegation.id(), child.status().name(),
                 writeJson(agentResult), failureClass(child.status(), child.error()));
@@ -348,8 +354,14 @@ public class DelegationToolProvider implements ServerToolProvider {
                 .map(MessageRecord::content)
                 .filter(content -> content != null && !content.isBlank())
                 .reduce((first, second) -> second)
-                .map(value -> value.length() > 16_000 ? value.substring(0, 16_000) : value)
+                .map(this::summarizeAgentAnswer)
                 .orElse("");
+    }
+
+    private String summarizeAgentAnswer(String value) {
+        if (value == null || value.length() <= AGENT_RESULT_SUMMARY_CHARS) return value == null ? "" : value;
+        return value.substring(0, AGENT_RESULT_SUMMARY_CHARS)
+                + "\n[child agent result truncated; open child session or inspect artifacts for full output]";
     }
 
     private String writeJson(Object value) {

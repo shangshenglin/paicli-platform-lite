@@ -91,10 +91,16 @@ public class PlanExecutionService {
             if (batch.isEmpty()) break;
             boolean readOnly = batch.stream().allMatch(this::readOnlyCandidate);
             boolean resourceSafe = resourceSafeBatch(batch);
-            batches.add(new ParallelBatch(batches.size() + 1, readOnly, readOnly
-                    ? resourceSafe
+            boolean deterministicDependencies = batch.stream().allMatch(step -> edges.stream()
+                    .filter(edge -> edge.toStepId().equals(step.id()))
+                    .allMatch(edge -> "DEPENDENCY".equals(edge.type())));
+            boolean eligible = readOnly && resourceSafe && deterministicDependencies;
+            batches.add(new ParallelBatch(batches.size() + 1, eligible, eligible
                     ? "All steps are read-only candidates, dependency-independent, and resource-compatible."
-                    : "Batch is read-only by type but has resource conflicts; schedule conservatively."
+                    : !resourceSafe
+                    ? "Batch has resource conflicts; schedule conservatively."
+                    : !deterministicDependencies
+                    ? "Batch contains conditional graph routing; schedule only the selected branch."
                     : "Batch contains stateful, manual, validation, or async work; schedule conservatively.",
                     batch.stream().map(PlanStore.PlanStep::id).toList()));
             batch.forEach(step -> completed.add(step.id()));
@@ -103,7 +109,7 @@ public class PlanExecutionService {
     }
 
     private int refresh(PlanStore.Plan plan) {
-        int changed = 0;
+        int changed = plans.resumeAutomatableManualSteps(plan.id());
         for (PlanStore.PlanStep step : plans.steps(plan.id())) {
             if (step.runId() == null || step.runId().isBlank()) continue;
             if (!List.of("RUNNING", "WAITING_APPROVAL", "WAITING_JOB", "VALIDATING").contains(step.status())) continue;
@@ -171,7 +177,7 @@ public class PlanExecutionService {
                     started++;
                     continue;
                 }
-                if ("MANUAL".equals(claimed.executionMode()) || "USER_APPROVAL".equals(claimed.type())) {
+                if ("USER_APPROVAL".equals(claimed.type())) {
                     plans.markStepWaitingApproval(claimed.id());
                     started++;
                     continue;
@@ -210,28 +216,28 @@ public class PlanExecutionService {
 
     private String promptFor(PlanStore.Plan plan, PlanStore.PlanStep step) {
         return """
-                Plan objective:
+                计划目标：
                 %s
 
-                Current plan step:
+                当前计划步骤：
                 %s
 
-                Step description:
+                步骤说明：
                 %s
 
-                Done criteria JSON:
+                完成标准 JSON：
                 %s
 
-                Resource read set:
+                资源读取集合：
                 %s
 
-                Resource write set:
+                资源写入集合：
                 %s
 
-                Isolation strategy:
+                隔离策略：
                 %s
 
-                Complete only this step. Include concise evidence for the done criteria in the final response.
+                只完成当前步骤。最终回复必须使用中文，并为每条完成标准提供简洁证据。
                 """.formatted(plan.objective(), step.title(), step.description(), step.doneCriteriaJson(),
                 step.resourceReadSetJson(), step.resourceWriteSetJson(), step.isolationStrategy());
     }
@@ -252,7 +258,9 @@ public class PlanExecutionService {
 
     private Map<String, Integer> downstreamCounts(List<PlanStore.PlanEdge> edges) {
         java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
-        for (PlanStore.PlanEdge edge : edges) counts.merge(edge.fromStepId(), 1, Integer::sum);
+        for (PlanStore.PlanEdge edge : edges) {
+            if (!"REWORK".equals(edge.type())) counts.merge(edge.fromStepId(), 1, Integer::sum);
+        }
         return counts;
     }
 
@@ -365,6 +373,7 @@ public class PlanExecutionService {
 
     private static boolean dependenciesSatisfied(String stepId, List<PlanStore.PlanEdge> edges, Set<String> completed) {
         return edges.stream().filter(edge -> edge.toStepId().equals(stepId))
+                .filter(edge -> !"REWORK".equals(edge.type()))
                 .allMatch(edge -> completed.contains(edge.fromStepId()));
     }
 

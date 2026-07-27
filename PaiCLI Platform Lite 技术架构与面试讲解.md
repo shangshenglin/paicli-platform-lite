@@ -302,6 +302,8 @@ WAL 只在数据库初始化时设置一次，避免每次开连接都重新切�
 19. Plan Step 领取租约、心跳、过期恢复和调度幂等键。
 20. 类型化 Memory、RAG Query Plan 和 Plan 绑定 Agent 委派 metadata。
 21. 受控并行 Plan Step、workspace 引用和 Agent Feedback 闭环。
+22. 专家思考配置和 Session 工作空间归属继承。
+23. 类型化 Plan Graph Edge、确定性条件路由和有限失败回流。
 
 面试时要主动承认：这个方案比 Flyway/Liquibase 轻，但缺少正式的 SQL 版本脚本、回滚和迁移校验。如果进入多节点/商业化阶段，会改用 Flyway 并将 Store 抽象为接口。
 
@@ -325,7 +327,9 @@ flowchart TD
     Exec -->|"领取 READY Step"| Step["PlanStep"]
     Step -->|"REACT"| Run["普通 ReAct Run"]
     Step -->|"ASYNC / ASYNC_JOB"| Job["async_jobs + Run"]
-    Step -->|"MANUAL"| Manual["等待人工处理"]
+    Step -->|"USER_APPROVAL"| Manual["Human Node 持久化决策"]
+    Checks --> Route["确定性 Edge 路由 / 有限 REWORK"]
+    Route --> Step
     Run --> Runtime["RunProcessor / ToolCall / Approval / Artifact"]
     Runtime --> Validator["PlanValidator"]
     Validator --> Checks["validation_checks"]
@@ -341,7 +345,7 @@ Plan 被拆成一组可恢复、可审计的数据表：
 |---|---|---|
 | `plans` | 一个可审批、可启动、可 Replan 的任务计划 | `objective`、`summary`、`status`、`version`、`raw_plan_json`、`failure_reason` |
 | `plan_steps` | 任务级步骤 | `title`、`description`、`type`、`execution_mode`、`done_criteria_json`、`status`、`run_id` |
-| `plan_edges` | Step DAG 依赖 | `from_step_id`、`to_step_id` |
+| `plan_edges` | 类型化 Graph 路由 | `from_step_id`、`to_step_id`、`edge_type`、`condition_expression`、`max_traversals`、`traversal_count` |
 | `plan_revisions` | Replan 历史 | `version`、`reason`、`raw_plan_json` |
 | `plan_events` | Plan/Step 审计事件 | `event_type`、`event_data`、`sequence` |
 | `async_jobs` | 外部长任务或异步 Step 状态 | `idempotency_key`、`payload_json`、`result_json`、`status` |
@@ -384,6 +388,29 @@ Plan 被拆成一组可恢复、可审计的数据表：
 }
 ```
 
+需要条件分支或局部失败回流时，可在顶层增加类型化边：
+
+```json
+{
+  "edges": [
+    {
+      "from": "validate",
+      "to": "publish",
+      "type": "CONDITIONAL",
+      "condition": "ON_SUCCESS",
+      "priority": 10
+    },
+    {
+      "from": "validate",
+      "to": "patch_readme",
+      "type": "REWORK",
+      "condition": "ON_VALIDATION_FAILURE",
+      "max_traversals": 1
+    }
+  ]
+}
+```
+
 `PlanParser` 的工作不是“相信模型”，而是做执行前治理：
 
 1. 清理 Markdown code fence。
@@ -394,8 +421,13 @@ Plan 被拆成一组可恢复、可审计的数据表：
 6. 检测 DAG 循环。
 7. 将资源读写集保存为 JSON 数组。
 8. 将未知隔离策略作为校验错误处理，而不是降级后悄悄执行。
+9. 校验 Edge 类型和确定性条件；`REWORK` 不参与 DAG 循环判断，但必须具有 1–10 次的有限回流上限。
 
 校验失败的计划不会进入可执行状态。
+
+运行时只支持 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE` 和 `ON_SKIPPED` 五种条件，由 Java 状态机判断，不让模型在执行途中解释任意表达式。条件未命中的目标分支和 Validation Check 会一起标记为 `SKIPPED`；命中、未命中和回流均写入 `plan_events`。`REWORK` 只重置目标节点及其非回流边下游，其他已经完成的并行分支保持不变。
+
+Plan 详情还返回结构化 `PlanState`，统一汇总步骤状态、READY/活跃/等待人工节点、阻塞原因、累计 Token 和最后事件序号。`USER_APPROVAL` 通过持久化 decision API 批准或拒绝，决策完成后再计算条件边，因此人工确认也是可恢复、可审计的图节点。
 
 #### 7.4.3 Step 状态机
 
@@ -665,7 +697,7 @@ Console 可为一次 Run 暂存最多 4 张 PNG/JPEG/GIF。Server 会验证实�
 
 `SandboxDriver` 屏蔽执行环境差异：
 
-```java
+```text
 ToolResult execute(ToolRequest request);
 void release(String runId);
 String mode();
@@ -760,6 +792,17 @@ DeepSeek thinking 模式下，当 assistant 消息同时包含 `reasoning_conten
 
 因此 `messages` 表中有 `reasoning_content` 和 `tool_calls_json`，`ContextManager.toModelMessage()` 会将它们一起恢复。
 
+#### 10.3.1 推理流合并
+
+模型 SSE 会把可见回答、reasoning 和 tool call arguments 拆成很多小 delta。PaiCLI 的处理边界是：
+
+1. 读流线程只负责按 provider 顺序重组 content、reasoning_content 和 tool_calls。
+2. 中间 delta 通过缓冲器批量写入 `run_events`，避免每个 token 都同步写 SQLite。
+3. 前端把 reasoning delta 合并成一张活动卡，降低 DOM 刷新频率。
+4. 在模型轮次结束时，完整 assistant message、reasoning_content、tool_calls_json 和 usage 仍以终态数据写入。
+
+这叫“推理流合并”：合并的是流式过程片段和前端刷新频率，不是把模型上下文变短，也不是放宽 Run 预算。面试时可以强调一句：**性能优化可以合并中间流，但可恢复性仍依赖最终消息和工具调用的原子持久化**。
+
 ### 10.4 取消正在进行的模型请求
 
 `OpenAiCompatibleModelClient` 按 runId 保存 `ActiveRequest`，其中有 `CompletableFuture` 和 response `InputStream`。取消时同时：
@@ -820,6 +863,16 @@ estimatedInputTokens <= maxContextTokens - maxOutputTokens
 ```
 
 保留 `maxOutputTokens` 是为了防止输入将整个窗口占满，导致模型没有输出空间。
+
+这里需要区分三个经常混在一起的概念：
+
+| 概念 | 作用 | 不解决什么 |
+|---|---|---|
+| 模型上下文窗口 | 限制单次请求能带多少输入和预留多少输出 | 不代表整个 Run 可以无限多轮 |
+| `maxRunTokens` | 限制一个 Run 多轮模型调用累计消耗 | 不会自动压缩旧历史 |
+| 推理流合并 | 降低 reasoning/content delta 的写库和刷新频率 | 不减少模型实际 token 消耗 |
+
+因此一次复杂 ReAct 任务即使界面只显示简短对话，也可能因为每轮都重复携带 system prompt、工具 schema、历史摘要、工具结果 preview、项目规则和可用能力，累计到很高的 Run token。当前做法是同时提高单 Run 安全上限，并让压缩器参考累计预算风险提前归档旧消息。
 
 ### 11.3 对话压缩
 
@@ -1161,64 +1214,365 @@ PaiCLI Lite 不是企业能力的缩小清单，而是对核心工程不变量�
 
 ## 16. 已完成能力与演进路线
 
-### 16.1 已完成 P0：正确性和业务工作台
+这一节适合在面试的后半段使用。前面章节已经讲了单个模块怎么实现，这里要回答的是一个更宏观的问题：**这个项目从一个能对话的 Agent，怎样一步步演进成一个可恢复、可审计、可验证、可扩展的 Agent Runtime**。
 
-- SSE 断线后按 Event 游标重放并对账 Run 终态；模型 delta 批量持久化，避免每个 Token 同步写 SQLite。
-- 提供终态 Run 重试、对话分支、统一搜索、Memory 治理、Knowledge 治理和 Artifact 预览/下载/复用。
-- Approval 支持仅本次、本对话和本项目策略，策略绑定已持久化工具名与参数摘要。
+如果面试官只给一分钟，可以这样概括：
 
-### 16.2 已完成长期使用效率
+> 我不是一次性堆功能，而是按 Runtime 风险从底向上演进。第一层先保证 Run、ToolCall、Approval、Event 和 Artifact 的正确性；第二层补 Memory、RAG、Skill、MCP、预算、通知和业务工作台，让它能长期使用；第三层加入真实内部 Run 的评测中心，用可重复 Case 检测行为退化；第四层把复杂任务升级为持久化 Plan Graph，用租约、资源读写集、隔离工作区、Validation Gate、Human Node 和 REWORK 回流完成复杂任务编排。企业版方向不是推翻现有设计，而是把 SQLite、本地 Artifact、进程内 Worker 和 Docker 分别替换成 PostgreSQL、S3、分布式队列和更强沙箱。
 
-- 项目级/全局任务模板、变量替换、`/review`、`/summarize`、`/research` 快捷入口和 Session 草稿自动保存。
-- 快速、深度、低成本、视觉、本地模型等配置方案；项目默认方案、后备模型、提交前上下文/输出/成本估算和失败后切换方案重试。
-- 按日期、项目、Session、模型统计 Token、缓存、耗时、失败与重试；支持日/月预算、预算预警和本地模型仅计耗时。
-- Run 优先级、批量取消、重新排队、最大并发和项目公平调度；长任务展示状态、步骤、耗时和重试信息。
-- 一次性、每日、每周和 Cron 定时任务，执行结果继续进入普通 Session/Run、Approval 和 Audit 链路。
-- 浏览器通知及 Server 侧 Webhook、邮件/企业 IM 网关，覆盖完成、失败、等待审批和预算不足。
+### 16.1 演进主线：先可靠，再智能，再可评测
+
+项目演进可以按三条主线讲：
+
+| 主线 | 解决的问题 | 当前落地 |
+| --- | --- | --- |
+| Runtime 正确性 | Agent 崩溃、刷新、断线、工具失败后还能不能恢复 | Run 状态机、ToolCall 先落库、幂等键、Approval、SSE 重放、终态不可回退 |
+| 上下文与效率 | 长期使用时上下文、记忆、知识、成本和协作如何管理 | Summary、Artifact、Memory、RAG、Skill、MCP、模板、预算、通知、专家 Profile |
+| 复杂任务闭环 | 多步骤任务如何被调度、验证、回流和解释 | Plan Runtime、Async Job、Validation Check、资源锁、隔离 workspace、PlanState、Human Node |
+
+这里有一个重要取舍：PaiCLI Lite 没有直接上 Kafka、Kubernetes、S3 和 MicroVM，因为这些会把本地单机项目变成运维项目。它选择先把状态、事务、幂等、审批、验证这些契约做扎实，再保留端口，未来替换底层组件。
+
+面试时可以强调：
+
+- 这个项目不是“功能列表”，而是围绕 Agent Runtime 的失败模式逐层补齐。
+- 每次新增能力都尽量复用正式 RunProcessor、ToolCall、Approval、Artifact 和预算链路，不另起一套旁路执行。
+- Lite 版的核心价值是用较少组件验证企业级责任边界，而不是宣称自己已经具备多租户分布式能力。
+
+### 16.2 P0：正确性、恢复和业务工作台
+
+最早的 P0 不是做复杂 Agent，而是先回答三个问题：
+
+1. 用户提交之后，任务状态能不能可靠落库？
+2. 模型生成工具调用后，工具参数能不能先持久化再执行？
+3. 浏览器断线、服务重启或工具失败后，系统能不能恢复到一个可解释状态？
+
+已完成能力包括：
+
+- SSE 断线后按 Event 游标重放，并对账 Run 终态。
+- 模型 content/reasoning delta 批量持久化，避免每个 token 同步写 SQLite。
+- assistant message 和同一轮全部 ToolCall 原子落库，再按 provider 顺序执行。
+- ToolCall 具有幂等键，恢复时优先复用已持久化参数。
+- Approval 支持仅本次、本对话、本项目策略，策略绑定工具名和参数摘要。
+- 终态 Run 支持重试，对话支持分支，用户可以从失败点继续而不是丢失上下文。
+- Artifact 支持预览、下载、复制到其他 Session，并通过 SHA-256、路径校验和认证接口保护。
+- 业务工作台提供 Run 队列、Memory、Knowledge、Artifact、评测、Plan 等入口，不需要从数据库手动排障。
+
+这一阶段的面试重点是：**Agent 的正确性不能靠模型自觉，必须靠后端状态机和数据库事务约束**。
+
+可以这样讲：
+
+> 我把一次对话执行拆成 Run、Message、Event、ToolCall、Approval 和 Artifact。模型可以决定下一步想做什么，但真正执行之前，工具调用必须作为结构化记录进入 SQLite。这样重启后恢复的是原参数，不是重新问模型生成一份可能不同的命令。
+
+### 16.3 长期使用效率：模板、预算、模型方案和通知
+
+P0 之后，项目开始解决“每天用”的问题。单次任务能跑通还不够，长期使用会遇到重复输入、成本不可控、长任务不可见、模型选择混乱、执行完成没人知道等问题。
+
+已完成能力包括：
+
+- 项目级和全局任务模板，支持变量替换。
+- `/review`、`/summarize`、`/research` 等快捷入口。
+- Session 草稿自动保存，避免长输入丢失。
+- 快速、深度、低成本、视觉、本地模型等模型方案。
+- 项目默认方案、后备模型、提交前上下文/输出/成本估算。
+- 失败后可切换模型方案重试。
+- 按日期、项目、Session、模型统计 Token、缓存、耗时、失败和重试。
+- 支持日/月预算、预算预警，本地模型只计耗时。
+- Run 优先级、批量取消、重新排队、最大并发和项目公平调度。
+- 一次性、每日、每周和 Cron 定时任务，执行结果仍进入普通 Session/Run/Approval/Audit 链路。
+- 浏览器通知、Webhook、邮件和企业 IM 网关，覆盖完成、失败、等待审批和预算不足。
 - Session 导出 Markdown、JSON 或完整审计包，支持脱敏和跨实例导入。
-- Skill 来源、Commit、作用域、安装预检、启停、固定、更新、升级与回滚，以及 MCP Server 的 Console 配置、测试、健康/Schema 展示和按工具审批。
+- Skill 来源、Commit、作用域、安装预检、启停、固定、更新、升级与回滚。
+- MCP Server 支持 Console 配置、测试、健康检查、Schema 展示和按工具审批。
 
-### 16.3 已完成阶段 12：Agent 评测中心
+这一阶段可以强调产品工程意识：
 
-- 项目级 Suite/Case CRUD，支持工具、回答、调用次数、输出 Token 和耗时约束，报告同时展示输入、输出和总 Token。
-- 每个 Case 创建真实内部 Run，并支持 1–10 次 Trial；全部 Trial 通过才让 Execution 通过。
-- 确定性逐项扣分、资源硬门禁和仅通过 Trial 可晋升的 Baseline，可发现工具行为、输出 Token 与耗时退化。
-- 评测复用正式审批链路；报告可处理待审批项，不通过旁路放行危险工具。
-- 内部 Session 对用户隐藏，并排除自动 Memory 提取，避免评测数据污染日常上下文。
+> 很多 Agent Demo 只关注一次回答是否聪明，但真正日常使用时，成本、排队、通知、模板、导出、Skill 生命周期和 MCP 健康状态同样重要。PaiCLI 把这些都收敛到同一套 Run 和审计链路里，所以效率功能不会绕过审批和恢复边界。
 
-### 16.4 已完成阶段 14：Plan Runtime 基础
+### 16.4 阶段 12：Agent 评测中心
 
-- 计划、步骤、依赖边、Replan 版本和计划事件全部持久化到 SQLite，迁移版本推进到 15。
-- Planner 生成结构化 JSON 后由 Server 解析校验，拒绝非法类型、缺失依赖和循环依赖。
-- 创建、生成、批准/启动、取消、Replan、Step retry/skip 和事件查询 API 已可用。
-- 启动阶段只把根 Step 推进到 `READY`，不绕过已有 ReAct Run、ToolCall 和 Approval 边界。
+评测中心的目标不是做一个离线打分页面，而是解决 Agent 系统最难的问题之一：**模型、Prompt、工具和上下文策略变化后，怎么知道行为没有退化**。
 
-### 16.5 已完成阶段 15：Plan 执行闭环、Async Job 与验证证据
+核心设计是复用真实 Runtime：
 
-- `plan_steps` 增加 `run_id`，新增 `async_jobs` 与 `validation_checks`，迁移版本推进到 16。
-- Plan Worker 自动领取 `READY` Step，创建普通 ReAct Run，并在 Run 终态后回写 Step、Plan、Job 和 Check。
+- 项目级 `Suite` 管理一组评测任务。
+- `Case` 描述输入、期望行为、工具约束、回答约束和资源上限。
+- 每个 Case 创建隐藏内部 Session 和真实普通 Run。
+- 每个 Case 支持 1-10 次 Trial，全部 Trial 达标才让 Execution 通过。
+- 报告同时展示输入 Token、输出 Token 和总 Token。
+- 工具调用次数、输出 Token 和耗时是硬门禁，超限不能靠语义分数抵消。
+- 评分采用确定性逐项扣分，先覆盖可重复判断的规则。
+- 只有通过的 Trial 才能晋升 Baseline。
+- 评测复用正式 Approval 链路，不为自动化旁路危险工具。
+- 内部评测 Session 对用户隐藏，并排除自动 Memory 提取，避免污染日常上下文。
+
+面试中可以把 Baseline 讲清楚：
+
+> Baseline 不是标准答案，也不是训练数据，而是一条人工确认过的、曾经通过的 Trial。后续模型或 Prompt 改动后，系统拿新 Trial 和 Baseline 对比行为、成本和耗时，用来发现退化。
+
+这个设计的价值是：
+
+- 能发现工具漏调、乱调和调用次数膨胀。
+- 能发现输出 Token 和耗时退化。
+- 能发现审批链路是否被错误绕过。
+- 能把“感觉模型变差了”变成可重复执行的回归信号。
+
+### 16.5 阶段 14：Plan Runtime 基础
+
+Plan Runtime 解决的是复杂任务的状态问题。普通聊天里，模型可能会说“我会分三步做”，但这三步只存在于文本里。服务重启、用户刷新、某一步失败后，系统很难知道：
+
+- 哪一步已经完成？
+- 哪一步应该重试？
+- 哪一步依赖谁？
+- 哪些步骤可以跳过？
+- 当前失败应该终止还是重新规划？
+
+因此阶段 14 把计划变成数据库对象：
+
+| 对象 | 作用 |
+| --- | --- |
+| `plans` | 保存目标、摘要、状态、版本、原始计划 JSON |
+| `plan_steps` | 保存步骤标题、描述、类型、执行模式、依赖、状态 |
+| `plan_edges` | 保存步骤依赖边，早期为普通 DAG 依赖 |
+| `plan_revisions` | 保存 Replan 版本 |
+| `plan_events` | 保存计划执行过程中的审计事件 |
+
+基础能力包括：
+
+- Planner 生成结构化 JSON，由 Server 清理 code fence 并解析。
+- Server 校验 Step 类型、执行模式、依赖存在性和 DAG 循环。
+- 非法计划不会创建为可执行 Plan。
+- 创建、生成、批准、启动、取消、Replan、Step retry/skip 和事件查询 API 已可用。
+- 启动阶段只把根 Step 推进到 `READY`，不直接执行工具。
+- 真正执行仍进入普通 ReAct Run，不绕过 ToolCall、Approval 和预算链路。
+
+面试时可以这样讲：
+
+> Plan 层只负责任务编排，不直接执行 Shell 或文件写入。Step 真正执行时仍然创建普通 Run，所以已有的工具持久化、审批、Artifact、预算、模型重试和恢复能力都能复用。
+
+### 16.6 阶段 15：Plan 执行闭环、Async Job 与验证证据
+
+阶段 14 解决了“计划能落库”，阶段 15 解决“计划能跑起来并回写结果”。
+
+关键变化：
+
+- `plan_steps` 增加 `run_id`，把 Step 与普通 ReAct Run 绑定。
+- 新增 `async_jobs`，表达长耗时异步任务。
+- 新增 `validation_checks`，保存每个 Step 的 done criteria、实际结果、证据和错误。
+- Plan Worker 自动领取 `READY` Step，创建普通 Run。
+- Run 终态后，Plan Worker 回写 Step、Plan、Job 和 Validation Check。
 - `ASYNC`/`ASYNC_JOB` Step 进入 `WAITING_JOB`，Job 支持幂等创建、查询和取消。
-- 新增 DAG 批次分析 API，先识别 read-only 可并行候选；真正并行执行仍保留到资源锁和会话隔离阶段。
-- Console 效率工作台新增 Plan 工作台；评测 Starter Pack 增加默认关闭的 Plan/DAG/验证模板用例。
+- 新增 DAG 批次分析 API，识别 read-only 可并行候选。
+- Console 效率工作台新增 Plan 工作台。
+- 评测 Starter Pack 增加默认关闭的 Plan/DAG/验证模板用例。
 
-### 16.6 P2：可维护性
+这个阶段要讲清楚一个区别：
 
-- `SqliteRuntimeStore` 抽象为 `RuntimeStore` 接口。
-- 使用 Flyway 替代 `ensureColumn()`。
-- OpenTelemetry Trace，将 API、Context、Model、Tool、Sandbox 分 Span。
+> Run `COMPLETED` 只代表执行链路结束，不代表业务验收一定满足。因此后面引入 Validation Gate，把“模型执行完成”和“任务真的达到验收标准”分开。
+
+`validation_checks` 的价值在于让结果可解释：
+
+- 用户能看到为什么一个 Step 被认为完成。
+- 失败时能看到具体哪条 done criteria 不满足。
+- 后续 Agent Feedback 和 Memory 可以引用结构化证据。
+- Replan 或 retry 时可以清理旧证据，避免污染下一次执行。
+
+### 16.7 阶段 16：协作可视化、长任务稳定性和最终产物交付
+
+这个阶段主要解决用户体验和多 Agent 协作的可见性问题。复杂任务通常不只需要执行，还需要让用户知道：
+
+- 当前谁在做？
+- 子任务是否还在运行？
+- 有没有待审批？
+- 最终产物在哪里？
+- 刷新页面后进度是否还在？
+
+已完成能力包括：
+
+- 专家 Profile 支持独立模型方案、思考开关和 reasoning effort。
+- Leader 派发子专家时，子 Run 使用子专家自己的模型与思考深度。
+- 父 Run 页面可挂载子 Agent 执行链路。
+- 协作面板展示子 Run 状态、工具调用、事件摘要和待审批项。
+- 父子 Run 的 Token 独立计量。
+- 父 Run 只读取子结果摘要和 Artifact 引用，不共享完整子上下文。
+- Console 保存每个 Session 的历史阅读位置。
+- 后台轮询、Plan 状态刷新、协作看板刷新不会强行把用户滚动到底部。
+- 最终 assistant 回答会聚合 workspace 文件、Artifact、URL 和本地路径引用。
+- 对话页展示“交付成果”，HTML、Markdown、图片等产物可通过受控接口打开或下载。
+- 本地启动脚本按 Windows 环境变量规则合并大小写重复项，提高启动稳定性。
+
+这里有一个很适合面试讲的设计点：
+
+> 子 Agent 不是把完整上下文塞回父 Agent，而是把摘要、Artifact、Token、失败分类和证据结构化写回。这样父 Agent 能聚合结果，但不会因为子任务很长而拖垮上下文窗口。
+
+### 16.8 阶段 17：受控并行、资源读写冲突与隔离工作区
+
+阶段 17 是 Plan Runtime 从“串行执行 DAG”走向“受控并行”的关键阶段。这里没有简单地把所有无依赖 Step 并发跑起来，因为 Agent Step 可能读写同一文件或同一资源，盲目并发会造成覆盖、乱序和不可恢复结果。
+
+新增字段包括：
+
+| 字段 | 作用 |
+| --- | --- |
+| `resource_read_set_json` | Step 会读取的资源集合 |
+| `resource_write_set_json` | Step 会写入的资源集合 |
+| `isolation_strategy` | `SHARED_SESSION`、`INTERNAL_SESSION` 或 `GIT_WORKTREE` |
+| `max_parallelism` | Step 级并行度提示 |
+| `critical_path_weight` | 关键路径调度权重 |
+| `workspace_ref` | 隔离 Step 对应的受控工作区引用 |
+
+调度规则：
+
+- 调度器按关键路径权重、下游数量和 ordinal 排序。
+- 领取 Step 前先汇总同一 Plan 内活跃 Step 的读写集。
+- 写写冲突会延后。
+- 读写冲突会延后。
+- 纯读之间可以作为并行候选。
+- 冲突 Step 不直接失败，而是写入 `RESOURCE_CONFLICT` 并短暂 `not_before` 延后。
+- 下一轮调度会重新检查资源锁，避免永久卡死。
+
+隔离策略：
+
+- `SHARED_SESSION`：复用同一会话上下文，适合轻量串行步骤。
+- `INTERNAL_SESSION`：为 Step 创建内部 Session，隔离对话上下文和执行链路。
+- `GIT_WORKTREE`：当前 Lite 版落为受控 workspace 引用和目录边界，为未来真实 git worktree add/merge 预留。
+
+需要主动说明的边界：
+
+> 当前 `GIT_WORKTREE` 不是自动执行真实 git worktree merge。Lite 版先实现目录隔离、workspace owner 映射和资源冲突控制，避免提前引入复杂 merge 策略。真正的 worktree 创建、diff 汇总和 merge 冲突处理属于后续工具层。
+
+这一阶段的价值是：
+
+- 复杂 Plan 可以更安全地识别并行机会。
+- 同一文件的修改不会被两个 Step 同时写。
+- 隔离 Step 可以拥有独立 Session 和 workspace 引用。
+- 调度失败是可审计、可恢复的状态，不是线程里静默丢失。
+
+### 16.9 阶段 18：类型化 Graph Runtime、Human Node 与失败回流
+
+阶段 18 把 Plan Edge 从普通依赖升级成类型化图语义。此前 DAG 只能表达“B 依赖 A 成功后执行”，但真实任务经常需要：
+
+- A 成功后走正常分支。
+- A 失败后走修复分支。
+- 验证失败后回到修改步骤。
+- 用户批准后继续，拒绝后走取消或替代分支。
+- 未选分支要自动跳过，不能永久卡住 fan-in。
+
+因此 `plan_edges` 增加了：
+
+| 字段 | 作用 |
+| --- | --- |
+| `edge_type` | `DEPENDENCY`、`CONDITIONAL`、`REWORK` |
+| `condition_expression` | `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE`、`ON_SKIPPED` |
+| `priority` | 条件边选择顺序 |
+| `max_traversals` | REWORK 最大回流次数 |
+| `traversal_count` | 已回流次数 |
+
+运行语义：
+
+- 旧数据库中的边自动迁移为 `DEPENDENCY + ON_SUCCESS`。
+- 条件只由 Server 状态机判断，不执行模型生成的任意表达式。
+- 条件命中和未命中都会写入 `plan_events`。
+- 未选分支及其 Validation Check 自动标记 `SKIPPED`。
+- fan-in 节点可以在一个分支完成、其他不可达分支跳过后继续。
+- `REWORK` 命中时只重置目标节点及其非回流下游分支。
+- `REWORK` 保留无关已完成分支，不整图重跑。
+- 回流次数持久化，超过 `max_traversals` 后恢复原失败终态。
+- `USER_APPROVAL` 成为真正 Human Node，通过持久化 decision API 提交 `APPROVED` 或 `REJECTED`。
+
+`PlanState` 统一提供结构化进度视图：
+
+- 各状态 Step 数量。
+- 可运行 Step ID。
+- 活跃 Step ID。
+- 等待人工审批 Step ID。
+- 阻塞原因。
+- 累计模型 Token。
+- 最新事件序号。
+- 最新 Step/Plan 更新时间。
+
+面试时可以这样总结：
+
+> 类型化 Graph Runtime 的核心是把“模型说下一步怎么走”变成“Server 根据持久化状态确定下一条边”。模型负责生成候选计划，代码状态机负责条件判断、跳过不可达分支、限制失败回流和记录审计事件。
+
+这一阶段非常适合回答“为什么不用 LangGraph 或 Temporal”：
+
+> 这个项目是单机 Lite Runtime，目标是先把计划状态、工具审批、验证证据和恢复语义打通。LangGraph 或 Temporal 可以作为未来替换或外部编排方案，但在当前规模下，引入它们会增加部署和状态同步成本。PaiCLI 先用 SQLite 表表达最小可审计图语义，保留清晰迁移边界。
+
+### 16.10 当前能力边界
+
+面试中主动说边界，反而会显得更可信。
+
+当前已经完成：
+
+- 单机单租户私有部署。
+- SQLite WAL 持久化 Runtime 状态。
+- Docker Sandbox 作为轻量执行边界。
+- ToolCall 先落库再执行。
+- 危险工具持久化审批。
+- Run、Plan、Async Job、Validation Check 和 Agent Feedback 的恢复闭环。
+- 资源读写冲突控制和 Lite workspace 隔离。
+- 真实内部 Run 的评测中心。
+- 本地 Artifact、Knowledge、Memory、Skill、MCP、通知和 Console 工作台。
+
+当前没有宣称完成：
+
+- 多租户公网安全隔离。
+- 多节点分布式调度。
+- 自动真实 git worktree merge。
+- 对任意敌对代码的强沙箱。
+- 独立向量数据库和跨项目 Memory 图谱。
+- 完整 LLM Judge 体系和人工抽检平台。
+- Kubernetes、MicroVM 池、S3、Kafka、Redis 的生产适配器。
+
+这段可以直接用于面试：
+
+> 我会把它定位成单机私有 Managed Agent Runtime。它验证的是企业级 Agent 的核心契约：状态持久化、工具幂等、审批审计、沙箱边界、验证闭环和评测回归。但它不是多租户 SaaS，也不宣称 Docker 等同于 MicroVM。企业化时我会优先替换存储、队列、Artifact、沙箱和观测，而不是重写业务层。
+
+### 16.11 P2：可维护性演进
+
+P2 目标是降低长期维护成本，让现在的 Lite 实现更容易替换底层组件。
+
+计划方向：
+
+- 将 `SqliteRuntimeStore` 抽象为 `RuntimeStore` 接口，降低存储替换成本。
+- 使用 Flyway 替代手写 `ensureColumn()` 和内置迁移逻辑。
+- 为 Plan、Run、Memory、Evaluation 等 Store 增加更细的契约测试。
+- 引入 OpenTelemetry Trace，将 API、Context、Model、Tool、Sandbox、Plan Dispatch 拆成 Span。
 - 为 Console 增加前端单元测试和端到端测试。
-- 在确定性评测硬门禁之后增加版本化语义 Rubric、LLM Judge 和人工抽检，并持续校准误判率。
+- 为 Plan Graph 增加可视化调试页面，展示边命中、跳过和回流原因。
+- 在确定性评测硬门禁之后增加版本化语义 Rubric、LLM Judge 和人工抽检。
+- 持续校准 LLM Judge 的误判率，不把语义评分作为唯一门禁。
 
-### 16.7 P3：向企业版演进
+这里要讲清楚优先级：
 
-- PostgreSQL + `SKIP LOCKED` + Outbox。
-- Redis/Kafka 辅助调度和事件分发。
-- MinIO/S3 Artifact Store。
-- 独立 Sandbox Gateway、预热池、长连接和快照恢复。
-- MicroVM/gVisor/Kata 中任选更强隔离方案。
-- Model Gateway：跨供应商路由、会话粘连、价格表、组织配额和成本归因（当前已有单端点重试/Fallback/限流/Run 预算）。
-- 跨项目 Memory Dreaming/关联图、独立向量数据库、stdio MCP、带 Planner/Reviewer 的自治 Agent Team。
-- 多租户认证、Vault、PII 脱敏、细粒度策略和审计中心。
+> P2 不是再加新能力，而是把已经跑通的能力变得更可维护、更可替换、更容易排障。尤其是 Store 抽象、迁移治理和 Trace，会直接影响后续企业化替换成本。
+
+### 16.12 P3：向企业版演进
+
+P3 是把 Lite 边界替换成生产组件，但业务语义尽量不变。
+
+| Lite 当前实现 | 企业版替换方向 | 替换后解决的问题 |
+| --- | --- | --- |
+| SQLite WAL | PostgreSQL + `SKIP LOCKED` + Outbox | 多 Worker 并发领取、事务可靠性、审计扩展 |
+| 进程内 Worker | Redis/Kafka 调度与事件分发 | 多节点调度、削峰、重试和消费者隔离 |
+| 本地 Artifact | MinIO/S3 Artifact Store | 大文件、跨节点访问、生命周期和权限 |
+| Docker Sandbox | Sandbox Gateway + MicroVM/gVisor/Kata | 更强隔离、预热池、快照恢复和资源配额 |
+| 单端点模型调用 | Model Gateway | 多供应商路由、价格表、组织配额和成本归因 |
+| SQLite Memory/RAG | 独立向量库和关联图 | 大规模检索、跨项目知识、召回评估 |
+| 单用户策略 | 多租户 IAM + Vault + PII 脱敏 | 组织权限、密钥托管、合规审计 |
+
+企业版升级时应保持的契约：
+
+- ToolCall 仍然必须先持久化再执行。
+- 危险工具 Approval 仍然绑定原始参数。
+- Run 和 Step 终态仍然不可随意回退。
+- Artifact 仍然先写内容再写元数据，保证可对账。
+- Plan 条件边仍由 Server 确定性判断。
+- Validation Gate 仍然是任务完成前的硬边界。
+- Evaluation 仍然复用正式 Runtime，而不是离线假执行。
+
+最后可以这样收束：
+
+> 所以企业版不是重做一个系统，而是把 Lite 中已经证明过的契约迁移到更强基础设施上。真正需要稳定的是业务语义和审计边界，底层存储、队列、对象存储和沙箱可以逐步替换。
 
 ---
 
@@ -1256,9 +1610,12 @@ PaiCLI Lite 不是企业能力的缩小清单，而是对核心工程不变量�
 6. 讲 Docker 安全参数和 workspace 路径边界。
 7. 讲 DeepSeek reasoning/tool_calls 持久化回传。
 8. 讲 Summary + Artifact + Memory 三种上下文缩减手段。
-9. 讲 Agent 评测中心如何复用真实 Runtime，并解释 `pass^k`、Baseline 和 Memory 隔离。
-10. 对比 CatPaw 的企业组件和 Lite 替代。
-11. 主动说两个局限和升级路线，体现架构边界感。
+9. 讲推理流合并、Run 累计预算和上下文压缩的区别。
+10. 讲 Plan Runtime 如何把“计划”变成可恢复 DAG，并用 Validation Gate 验证最终产物。
+11. 讲 Multi-Agent 父子 Run 如何通过摘要和 Artifact 协作，而不是共享完整上下文。
+12. 讲 Agent 评测中心如何复用真实 Runtime，并解释 `pass^k`、Baseline 和 Memory 隔离。
+13. 对比 CatPaw 的企业组件和 Lite 替代。
+14. 主动说两个局限和升级路线，体现架构边界感。
 
 ---
 
@@ -1511,7 +1868,7 @@ Start-Process http://127.0.0.1:8080/docs
 
 Console 连接设置填写的是 `PAICLI_API_KEY`，模型供应商密钥是只留在 Server 的 `PAICLI_MODEL_API_KEY`，两者用途不同。启动脚本会读取被 Git 忽略的项目 `.env`，但已存在的进程环境变量优先。
 
-当前项目回归测试覆盖 RunProcessor、工具失败恢复、重复工具循环保护、Approval Flow、ContextManager、SQLite Store/WAL 并发、模型重试/Fallback、DeepSeek/多模态请求与 SSE 解析、Docker Driver、Local Driver、API Key、管理端点/OpenAPI 安全、Console 安全头、Artifact 原子写入、SQLite 维护、图片/文档附件、长 Markdown/Tika 提取、结构化分块、混合 RAG、MCP、Skill、Memory、长期效率 Store、模板解析回归、Plan Runtime 的 JSON/DAG/Replan 校验、Step 内 ReAct Run 调度、Async Job、Validation Check、Read-only DAG 批次分析、资源冲突推迟、内部 Session/workspace 隔离引用、Agent Feedback 幂等写入、验证 Memory 闭环，以及评测多 Trial、输出 Token 硬门禁、Baseline、审批不旁路、Starter Pack 幂等安装和 Common/Sandbox 边界，现有 103 项测试通过；评测接口还完成了真实 REST 多 Trial 与基线冒烟验证。
+当前项目回归测试覆盖 RunProcessor、工具失败恢复、重复工具循环保护、Approval Flow、ContextManager、SQLite Store/WAL 并发、模型重试/Fallback、DeepSeek/多模态请求与 SSE 解析、Docker Driver、Local Driver、API Key、管理端点/OpenAPI 安全、Console 安全头、Artifact 原子写入、SQLite 维护、图片/文档附件、长 Markdown/Tika 提取、结构化分块、混合 RAG、MCP、Skill、Memory、长期效率 Store、模板解析回归、Plan Runtime 的 JSON/DAG/Replan 校验、类型化 Edge、条件分支、Human Node、有限失败回流、PlanState、Step 内 ReAct Run 调度、Async Job、Validation Check、资源冲突推迟、内部 Session/workspace 隔离引用、Agent Feedback 幂等写入、验证 Memory 闭环，以及评测多 Trial、输出 Token 硬门禁、Baseline、审批不旁路、Starter Pack 幂等安装和 Common/Sandbox 边界，现有 113 项测试通过；评测接口还完成了真实 REST 多 Trial 与基线冒烟验证。
 
 Phase 9 进一步补齐了单机私有部署的运维基线：Sandbox 与 Docker CLI 输出在读取阶段限额并在超时后清理进程树；生产模式可强制 API Key，管理端点复用认证，Console 密钥只保留在标签页会话中；SQLite 定时执行 WAL checkpoint，并支持显式 Event/Audit 保留与孤儿文件清理；文件存储采用 fsync 后原子替换；停机备份带 SHA-256、ZIP 路径和 SQLite 文件头校验。交付侧增加 GitHub Actions、Dependabot、CycloneDX SBOM 与 Maven 全量警告检查。
 

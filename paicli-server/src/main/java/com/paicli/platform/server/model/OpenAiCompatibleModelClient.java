@@ -88,7 +88,13 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             if (previous != null) throw new IllegalStateException("Model request is already active for run " + runId);
         }
         try {
-            HttpResponse<InputStream> response = sendWithRetry(active, request);
+            HttpResponse<InputStream> response;
+            try {
+                response = sendWithRetry(active, request);
+            } catch (IllegalStateException error) {
+                if (!containsImages(request) || !imageInputRejected(error.getMessage())) throw error;
+                response = sendWithRetry(active, withoutImages(request));
+            }
             active.body = response.body();
             if (active.canceled) throw new CancellationException("Model request canceled");
             ModelResponse result = readSse(response, listener == null ? ModelStreamListener.NO_OP : listener);
@@ -112,6 +118,28 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             if (runId != null && !runId.isBlank()) activeRequests.remove(runId, active);
             active.closeBody();
         }
+    }
+
+    private static boolean containsImages(ModelRequest request) {
+        return request.messages().stream().anyMatch(message -> !message.images().isEmpty());
+    }
+
+    private static boolean imageInputRejected(String message) {
+        String value = message == null ? "" : message.toLowerCase();
+        return value.contains("image") || value.contains("vision") || value.contains("multimodal")
+                || value.contains("content must be a string") || value.contains("invalid content type");
+    }
+
+    private static ModelRequest withoutImages(ModelRequest request) {
+        List<ModelMessage> messages = request.messages().stream().map(message -> {
+            if (message.images().isEmpty()) return message;
+            String notice = "\n\n[系统提示：当前模型接口不支持图像输入，图片未能传给模型。"
+                    + "请根据文字内容作答，并明确提醒用户切换到支持视觉的模型后重试图片分析。]";
+            return new ModelMessage(message.role(), message.content() + notice, message.toolCallId(),
+                    message.toolCalls(), message.reasoningContent(), List.of());
+        }).toList();
+        return new ModelRequest(messages, request.tools(), request.maxOutputTokens(),
+                request.thinkingMode(), request.reasoningEffort(), request.route());
     }
 
     private HttpResponse<InputStream> sendWithRetry(ActiveRequest active, ModelRequest request) throws Exception {
@@ -279,7 +307,7 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             } else {
                 ArrayNode content = node.putArray("content");
                 content.addObject().put("type", "text").put("text", message.content()
-                        + "\n\n[Images are attached to this user message. Analyze the image content directly.]");
+                        + "\n\n[系统提示：此用户消息附带图片，请直接分析图片内容。]");
                 for (ModelImage image : message.images()) {
                     ObjectNode imagePart = content.addObject();
                     imagePart.put("type", "image_url");

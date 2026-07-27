@@ -39,7 +39,7 @@ public record ModelProperties(
                            String thinkingMode, String reasoningEffort) {
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
-                3, 500, 60, "", 30, 200_000, 45, 5, 30, 1_800, 16, 100, 3);
+                3, 500, 60, "", 30, 0, 45, 5, 30, 1_800, 16, 100, 3);
     }
 
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
@@ -97,7 +97,7 @@ public record ModelProperties(
         requestsPerMinute = requestsPerMinute <= 0 ? 60 : Math.min(requestsPerMinute, 10_000);
         fallbackModel = fallbackModel == null ? "" : fallbackModel.trim();
         maxRunSteps = maxRunSteps <= 0 ? 30 : Math.min(maxRunSteps, 200);
-        maxRunTokens = maxRunTokens <= 0 ? 200_000 : maxRunTokens;
+        maxRunTokens = Math.max(0, maxRunTokens);
         streamIdleTimeoutSeconds = streamIdleTimeoutSeconds <= 0 ? 45 : Math.min(streamIdleTimeoutSeconds, 600);
         circuitFailureThreshold = circuitFailureThreshold <= 0 ? 5 : Math.min(circuitFailureThreshold, 100);
         circuitOpenSeconds = circuitOpenSeconds <= 0 ? 30 : Math.min(circuitOpenSeconds, 3_600);

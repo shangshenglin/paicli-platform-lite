@@ -45,11 +45,18 @@ final class ApiDtos {
 
     record AgentProfileRequest(@NotBlank String projectKey, @NotBlank String name,
                                String description, @NotBlank String systemPrompt,
-                               String modelProfileId, List<String> toolNames, List<String> skillNames,
+                               String modelProfileId, String thinkingMode, String reasoningEffort,
+                               List<String> toolNames, List<String> skillNames,
                                String outputSchema, String collaborationRole, String handoffPolicy,
                                String workspaceScope, String approvalPolicy, Boolean enabled) { }
 
     record AgentProfileCopyRequest(String projectKey, String name) { }
+
+    record AgentTeamRequest(@NotBlank String projectKey, @NotBlank String name,
+                            String description, @NotBlank String leaderAgentProfileId,
+                            List<String> memberAgentProfileIds, Integer maxExperts,
+                            Integer maxDepth, Boolean requireReviewer,
+                            Boolean requireRunner, Boolean enabled) { }
 
     record BudgetRequest(Long dailyTokens, Long monthlyTokens, Double dailyCost,
                          Double monthlyCost, Double warnRatio, Integer maxConcurrentRuns) { }
@@ -86,6 +93,8 @@ final class ApiDtos {
     record ReplanRequest(@NotBlank String reason, @NotBlank String rawPlanJson) { }
 
     record SkipPlanStepRequest(String reason) { }
+
+    record PlanStepDecisionRequest(@NotBlank String decision, String reason) { }
 
     record CreateAsyncJobRequest(String planId, String stepId, String runId,
                                  @NotBlank String projectKey, @NotBlank String kind,

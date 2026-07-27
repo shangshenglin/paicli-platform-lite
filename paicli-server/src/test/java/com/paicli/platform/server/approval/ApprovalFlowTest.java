@@ -96,6 +96,30 @@ class ApprovalFlowTest {
         assertThat(Files.list(audit.auditDirectory()).findAny()).isPresent();
     }
 
+    @Test
+    void returnsPendingApprovalsForTheWholeDelegationTree() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        var parentSession = store.createSession("parent");
+        var parent = store.createRun(parentSession.id(), "coordinate");
+        var spawn = store.createToolCall(parent.id(), "spawn", "spawn_agent", "{}", "spawn-key");
+        var delegation = store.createOrGetDelegation(parent.id(), spawn.id(), "reviewer", "review");
+        var childTool = store.createToolCall(delegation.childRunId(), "command",
+                "execute_command", "{}", "child-command-key");
+        var childApproval = store.createApproval(delegation.childRunId(), childTool.id(), "child approval");
+        var unrelatedSession = store.createSession("unrelated");
+        var unrelated = store.createRun(unrelatedSession.id(), "other");
+        var unrelatedTool = store.createToolCall(unrelated.id(), "other-command",
+                "execute_command", "{}", "other-command-key");
+        store.createApproval(unrelated.id(), unrelatedTool.id(), "unrelated approval");
+        ApprovalService approvals = new ApprovalService(store, null, null);
+
+        assertThat(approvals.pendingForRunTree(parent.id())).containsExactly(childApproval);
+        assertThat(approvals.pendingForRunTree(delegation.childRunId())).containsExactly(childApproval);
+    }
+
     private static final class CommandModel implements ModelClient {
         @Override
         public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {

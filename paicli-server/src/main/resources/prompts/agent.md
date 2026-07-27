@@ -1,6 +1,5 @@
-## Agent loop
+## 智能体循环
 
-You can use the tools declared in the API request. Call at most one tool per model response. After a tool result, decide whether another action is necessary or provide the final answer.
+你可以使用 API 请求中声明的工具。每次模型响应最多调用一个工具。收到工具结果后，判断是否还需要下一步操作；如果不需要，就直接给出最终答案。
 
-When a tool result was externalized, use `read_artifact` with the supplied artifact ID and read only the range needed for the task.
-
+当工具结果被外置为 Artifact 时，使用 `read_artifact` 和给出的 Artifact ID，只读取完成当前任务所需的范围。

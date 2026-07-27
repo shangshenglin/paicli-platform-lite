@@ -20,7 +20,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/v1")
-@Tag(name = "Plans", description = "Durable plan lifecycle, DAG steps, and plan revisions")
+@Tag(name = "Plans", description = "Durable plan lifecycle, typed graph routing, state, and revisions")
 public class PlanController {
     private final PlanService service;
     private final PlanExecutionService execution;
@@ -64,6 +64,11 @@ public class PlanController {
     @GetMapping("/plans/{planId}")
     public PlanService.PlanView get(@PathVariable String planId) {
         return service.view(planId);
+    }
+
+    @GetMapping("/plans/{planId}/state")
+    public PlanService.PlanState state(@PathVariable String planId) {
+        return service.state(planId);
     }
 
     @PostMapping("/plans/{planId}/approve")
@@ -158,5 +163,11 @@ public class PlanController {
     public PlanStore.PlanStep skipStep(@PathVariable String stepId,
                                        @RequestBody(required = false) ApiDtos.SkipPlanStepRequest request) {
         return store.skipStep(stepId, request == null ? "" : request.reason());
+    }
+
+    @PostMapping("/plan-steps/{stepId}/decision")
+    public PlanStore.PlanStep decideStep(@PathVariable String stepId,
+                                         @Valid @RequestBody ApiDtos.PlanStepDecisionRequest request) {
+        return store.decideApprovalStep(stepId, request.decision(), request.reason());
     }
 }

@@ -266,6 +266,7 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', " +
                     "system_prompt TEXT NOT NULL, model_profile_id TEXT, tool_names_json TEXT NOT NULL DEFAULT '[]', " +
                     "skill_names_json TEXT NOT NULL DEFAULT '[]', output_schema TEXT NOT NULL DEFAULT '', " +
+                    "thinking_mode TEXT NOT NULL DEFAULT '', reasoning_effort TEXT NOT NULL DEFAULT '', " +
                     "collaboration_role TEXT NOT NULL DEFAULT 'EXPERT', handoff_policy TEXT NOT NULL DEFAULT 'MANUAL', " +
                     "workspace_scope TEXT NOT NULL DEFAULT 'PROJECT', approval_policy TEXT NOT NULL DEFAULT 'INHERIT', " +
                     "template_key TEXT NOT NULL DEFAULT '', template_version INTEGER NOT NULL DEFAULT 0, " +
@@ -273,8 +274,21 @@ public class SqliteRuntimeStore {
                     "UNIQUE(project_key,name))");
             SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "template_key", "TEXT NOT NULL DEFAULT ''");
             SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "template_version", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "thinking_mode", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "workspace_owner_run_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_profiles_project " +
                     "ON agent_profiles(project_key,enabled DESC,name COLLATE NOCASE)");
+            statement.execute("CREATE TABLE IF NOT EXISTS agent_teams (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, " +
+                    "description TEXT NOT NULL DEFAULT '', leader_agent_profile_id TEXT NOT NULL, " +
+                    "member_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]', " +
+                    "max_experts INTEGER NOT NULL DEFAULT 3, max_depth INTEGER NOT NULL DEFAULT 1, " +
+                    "require_reviewer INTEGER NOT NULL DEFAULT 0, require_runner INTEGER NOT NULL DEFAULT 0, " +
+                    "enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "UNIQUE(project_key,name))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_teams_project " +
+                    "ON agent_teams(project_key,enabled DESC,name COLLATE NOCASE)");
             statement.execute("CREATE TABLE IF NOT EXISTS budget_policies (" +
                     "project_key TEXT PRIMARY KEY, daily_tokens INTEGER NOT NULL DEFAULT 0, monthly_tokens INTEGER NOT NULL DEFAULT 0, " +
                     "daily_cost REAL NOT NULL DEFAULT 0, monthly_cost REAL NOT NULL DEFAULT 0, warn_ratio REAL NOT NULL DEFAULT 0.8, " +
@@ -403,10 +417,24 @@ public class SqliteRuntimeStore {
                     "ON plan_steps(run_id, workspace_ref)");
             statement.execute("CREATE TABLE IF NOT EXISTS plan_edges (" +
                     "plan_id TEXT NOT NULL, from_step_id TEXT NOT NULL, to_step_id TEXT NOT NULL, " +
+                    "edge_type TEXT NOT NULL DEFAULT 'DEPENDENCY', " +
+                    "condition_expression TEXT NOT NULL DEFAULT 'ON_SUCCESS', " +
+                    "priority INTEGER NOT NULL DEFAULT 0, max_traversals INTEGER NOT NULL DEFAULT 0, " +
+                    "traversal_count INTEGER NOT NULL DEFAULT 0, " +
                     "created_at TEXT NOT NULL, PRIMARY KEY(plan_id, from_step_id, to_step_id), " +
                     "FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE, " +
                     "FOREIGN KEY(from_step_id) REFERENCES plan_steps(id) ON DELETE CASCADE, " +
                     "FOREIGN KEY(to_step_id) REFERENCES plan_steps(id) ON DELETE CASCADE)");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_edges", "edge_type",
+                    "TEXT NOT NULL DEFAULT 'DEPENDENCY'");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_edges", "condition_expression",
+                    "TEXT NOT NULL DEFAULT 'ON_SUCCESS'");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_edges", "priority",
+                    "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_edges", "max_traversals",
+                    "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "plan_edges", "traversal_count",
+                    "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_plan_edges_to_step " +
                     "ON plan_edges(plan_id, to_step_id)");
             statement.execute("CREATE TABLE IF NOT EXISTS plan_revisions (" +
@@ -641,7 +669,10 @@ public class SqliteRuntimeStore {
                         policies.executeUpdate();
                     }
                     deleteBySessionRuns(connection, "model_usage", currentSession);
+                    deleteBySessionRuns(connection, "model_attempts", currentSession);
                     deleteBySessionRuns(connection, "memory_extractions", currentSession);
+                    deleteBySessionRuns(connection, "run_collaboration_policies", currentSession);
+                    deleteBySessionRuns(connection, "async_jobs", currentSession);
                     deleteBySessionRuns(connection, "approvals", currentSession);
                     deleteBySessionRuns(connection, "tool_calls", currentSession);
                     deleteBySessionRuns(connection, "run_events", currentSession);
@@ -755,13 +786,14 @@ public class SqliteRuntimeStore {
         Instant now = Instant.now();
         String resolvedThinking = normalizeThinkingMode(thinkingMode);
         String resolvedEffort = normalizeReasoningEffort(reasoningEffort);
+        String workspaceOwnerRunId = latestWorkspaceOwner(sessionId);
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode," +
                                 "reasoning_effort,priority,model_profile_id,agent_profile_id,retry_count," +
-                                "created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,0)")) {
+                                "workspace_owner_run_id,created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,?,0)")) {
                     ps.setString(1, runId);
                     ps.setString(2, sessionId);
                     ps.setString(3, RunStatus.QUEUED.name());
@@ -772,8 +804,9 @@ public class SqliteRuntimeStore {
                     ps.setString(8, modelProfileId == null || modelProfileId.isBlank() ? null : modelProfileId);
                     ps.setString(9, agentProfileId == null || agentProfileId.isBlank() ? null : agentProfileId);
                     ps.setInt(10, Math.max(0, retryCount));
-                    ps.setString(11, now.toString());
+                    ps.setString(11, workspaceOwnerRunId);
                     ps.setString(12, now.toString());
+                    ps.setString(13, now.toString());
                     ps.executeUpdate();
                 }
                 MessageRecord userMessage = insertMessage(connection, sessionId, runId, "user", input.trim(),
@@ -1039,10 +1072,20 @@ public class SqliteRuntimeStore {
                                                         String agentName, String task, String agentProfileId,
                                                         String modelProfileId, String planId, String planStepId,
                                                         String envelopeJson) {
+        return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, agentProfileId,
+                modelProfileId, null, null, planId, planStepId, envelopeJson);
+    }
+
+    public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
+                                                        String agentName, String task, String agentProfileId,
+                                                        String modelProfileId, String thinkingMode,
+                                                        String reasoningEffort, String planId,
+                                                        String planStepId, String envelopeJson) {
         String name = requireText(agentName, "agentName", 80);
         String input = requireText(task, "task", 32_000);
         String childAgentProfileId = nullableText(agentProfileId);
         String childModelProfileId = nullableText(modelProfileId);
+        String delegatedWorkspaceOwner = workspaceOwnerRunId(parentRunId);
         String normalizedEnvelope = envelopeJson == null || envelopeJson.isBlank() ? "{}" : envelopeJson.trim();
         if (normalizedEnvelope.length() > 64_000) throw new IllegalArgumentException("delegation envelope is too large");
         try (Connection connection = open()) {
@@ -1078,6 +1121,11 @@ public class SqliteRuntimeStore {
                 SessionRecord parentSession = findSession(connection, parent.sessionId()).orElseThrow();
                 String resolvedAgentProfileId = childAgentProfileId == null ? parent.agentProfileId() : childAgentProfileId;
                 String resolvedModelProfileId = childModelProfileId == null ? parent.modelProfileId() : childModelProfileId;
+                String resolvedThinkingMode = nullableText(thinkingMode) == null
+                        ? parent.thinkingMode() : normalizeThinkingMode(thinkingMode);
+                String resolvedReasoningEffort = nullableText(reasoningEffort) == null
+                        ? parent.reasoningEffort() : normalizeReasoningEffort(reasoningEffort);
+                if (!"enabled".equals(resolvedThinkingMode)) resolvedReasoningEffort = "";
                 Instant now = Instant.now();
                 String childSessionId = id("session");
                 String childRunId = id("run");
@@ -1096,18 +1144,19 @@ public class SqliteRuntimeStore {
                 }
                 try (PreparedStatement run = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode,reasoning_effort," +
-                                "model_profile_id,agent_profile_id,created_at,queued_at,version) " +
-                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,0)")) {
+                                "model_profile_id,agent_profile_id,workspace_owner_run_id,created_at,queued_at,version) " +
+                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,?,0)")) {
                     run.setString(1, childRunId);
                     run.setString(2, childSessionId);
                     run.setString(3, RunStatus.QUEUED.name());
                     run.setString(4, input);
-                    run.setString(5, parent.thinkingMode());
-                    run.setString(6, parent.reasoningEffort());
+                    run.setString(5, resolvedThinkingMode);
+                    run.setString(6, resolvedReasoningEffort);
                     run.setString(7, resolvedModelProfileId);
                     run.setString(8, resolvedAgentProfileId);
-                    run.setString(9, now.toString());
+                    run.setString(9, delegatedWorkspaceOwner);
                     run.setString(10, now.toString());
+                    run.setString(11, now.toString());
                     run.executeUpdate();
                 }
                 insertMessage(connection, childSessionId, childRunId, "user", input,
@@ -1173,6 +1222,26 @@ public class SqliteRuntimeStore {
             }
         } catch (SQLException e) {
             throw failure("find delegated run", e);
+        }
+    }
+
+    public Optional<RunDelegationRecord> parentDelegationForRun(String childRunId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_delegations WHERE child_run_id=? ORDER BY created_at DESC LIMIT 1")) {
+            ps.setString(1, childRunId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapDelegation(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("find parent delegation", e);
+        }
+    }
+
+    public String delegationRootRunId(String runId) {
+        try (Connection connection = open()) {
+            return rootRunId(connection, runId);
+        } catch (SQLException e) {
+            throw failure("resolve delegation root", e);
         }
     }
 
@@ -2122,9 +2191,56 @@ public class SqliteRuntimeStore {
                     if (rs.next()) return rs.getString(1);
                 }
             }
-            return rootRunId(connection, runId);
+            return workspaceOwnerRunId(connection, runId);
         } catch (SQLException e) {
             throw failure("resolve delegated workspace", e);
+        }
+    }
+
+    public Optional<String> latestCollaborationRunId(String sessionId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT r.id FROM runs r JOIN run_collaboration_policies p ON p.run_id=r.id " +
+                        "WHERE r.session_id=? ORDER BY r.created_at DESC LIMIT 1")) {
+            ps.setString(1, sessionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("resolve latest collaboration run", e);
+        }
+    }
+
+    private String workspaceOwnerRunId(Connection connection, String runId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT workspace_owner_run_id FROM runs WHERE id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String owner = rs.getString(1);
+                    if (owner != null && !owner.isBlank()) return owner;
+                }
+            }
+        }
+        return rootRunId(connection, runId);
+    }
+
+    private String latestWorkspaceOwner(Connection connection, String sessionId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT id,workspace_owner_run_id FROM runs WHERE session_id=? ORDER BY created_at DESC LIMIT 1")) {
+            ps.setString(1, sessionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                String owner = rs.getString("workspace_owner_run_id");
+                return owner == null || owner.isBlank() ? rs.getString("id") : owner;
+            }
+        }
+    }
+
+    private String latestWorkspaceOwner(String sessionId) {
+        try (Connection connection = open()) {
+            return latestWorkspaceOwner(connection, sessionId);
+        } catch (SQLException e) {
+            throw failure("resolve latest workspace owner", e);
         }
     }
 

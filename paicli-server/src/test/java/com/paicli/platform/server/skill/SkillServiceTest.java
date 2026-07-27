@@ -53,6 +53,7 @@ class SkillServiceTest {
 
         assertThat(source.remoteUrl()).isEqualTo("https://github.com/anthropics/skills.git");
         assertThat(source.ref()).isEqualTo("main");
+        assertThat(source.suggestedName()).isEqualTo("skill-creator");
     }
 
     private void write(String relative, String content) throws Exception {

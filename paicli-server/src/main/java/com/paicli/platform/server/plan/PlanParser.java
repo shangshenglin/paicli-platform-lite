@@ -20,6 +20,9 @@ public class PlanParser {
             "TOOL_EXECUTION", "ASYNC_JOB", "USER_APPROVAL", "VALIDATION", "ANALYSIS",
             "SYNTHESIS", "DELEGATION", "FILE_READ", "FILE_WRITE", "COMMAND", "VERIFICATION");
     private static final Set<String> EXECUTION_MODES = Set.of("REACT", "MANUAL", "ASYNC", "NONE");
+    private static final Set<String> EDGE_TYPES = Set.of("DEPENDENCY", "CONDITIONAL", "REWORK");
+    private static final Set<String> EDGE_CONDITIONS = Set.of("ALWAYS", "ON_SUCCESS", "ON_FAILURE",
+            "ON_VALIDATION_FAILURE", "ON_SKIPPED");
     private final ObjectMapper mapper;
 
     public PlanParser(ObjectMapper mapper) {
@@ -71,6 +74,7 @@ public class PlanParser {
             for (ParsedStep step : parsed) clientToStepId.put(step.clientId(), id("pstep"));
             List<PlanStore.StepDraft> stepDrafts = new ArrayList<>();
             List<PlanStore.EdgeDraft> edgeDrafts = new ArrayList<>();
+            Set<String> edgePairs = new HashSet<>();
             Map<String, List<String>> graph = new LinkedHashMap<>();
             for (ParsedStep step : parsed) {
                 String stepId = clientToStepId.get(step.clientId());
@@ -94,6 +98,55 @@ public class PlanParser {
                     }
                     graph.get(step.clientId()).add(depClient);
                     edgeDrafts.add(new PlanStore.EdgeDraft(depStepId, stepId));
+                    edgePairs.add(depStepId + "->" + stepId);
+                }
+            }
+            JsonNode edgesNode = root.path("edges");
+            if (!edgesNode.isMissingNode() && !edgesNode.isArray()) errors.add("edges must be an array");
+            if (edgesNode.isArray() && edgesNode.size() > 100) errors.add("edges size must not exceed 100");
+            if (edgesNode.isArray()) {
+                for (int index = 0; index < edgesNode.size(); index++) {
+                    JsonNode edge = edgesNode.get(index);
+                    String fromRef = text(edge.path("from").asText(""), "", 120);
+                    String toRef = text(edge.path("to").asText(""), "", 120);
+                    String fromClient = sourceToClient.getOrDefault(fromRef, fromRef);
+                    String toClient = sourceToClient.getOrDefault(toRef, toRef);
+                    String fromStepId = clientToStepId.get(fromClient);
+                    String toStepId = clientToStepId.get(toClient);
+                    String label = "edge_" + (index + 1);
+                    if (fromStepId == null || toStepId == null) {
+                        errors.add(label + " references an unknown step");
+                        continue;
+                    }
+                    if (fromStepId.equals(toStepId)) {
+                        errors.add(label + " cannot connect a step to itself");
+                        continue;
+                    }
+                    String type = text(edge.path("type").asText("DEPENDENCY"),
+                            "DEPENDENCY", 40).toUpperCase();
+                    String defaultCondition = switch (type) {
+                        case "DEPENDENCY" -> "ON_SUCCESS";
+                        case "REWORK" -> "ON_FAILURE";
+                        default -> "ALWAYS";
+                    };
+                    String condition = text(edge.path("condition").asText(defaultCondition),
+                            defaultCondition, 40).toUpperCase();
+                    if ("DEPENDENCY".equals(type)) condition = "ON_SUCCESS";
+                    if (!EDGE_TYPES.contains(type)) errors.add(label + " has unsupported type: " + type);
+                    if (!EDGE_CONDITIONS.contains(condition)) {
+                        errors.add(label + " has unsupported condition: " + condition);
+                    }
+                    String pair = fromStepId + "->" + toStepId;
+                    if (!edgePairs.add(pair)) {
+                        errors.add(label + " duplicates an existing edge");
+                        continue;
+                    }
+                    int priority = Math.max(-100, Math.min(edge.path("priority").asInt(0), 100));
+                    int maxTraversals = "REWORK".equals(type)
+                            ? Math.max(1, Math.min(edge.path("max_traversals").asInt(1), 10)) : 0;
+                    edgeDrafts.add(new PlanStore.EdgeDraft(fromStepId, toStepId, type, condition,
+                            priority, maxTraversals));
+                    if (!"REWORK".equals(type)) graph.get(toClient).add(fromClient);
                 }
             }
             errors.addAll(cycles(graph));

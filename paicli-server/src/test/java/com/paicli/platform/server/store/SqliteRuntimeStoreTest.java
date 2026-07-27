@@ -87,7 +87,43 @@ class SqliteRuntimeStoreTest {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21);
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24);
+        }
+    }
+
+    @Test
+    void migratesTypedPlanEdgeRoutingColumns() throws Exception {
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
+        store.initialize();
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            var columns = new java.util.ArrayList<String>();
+            try (var values = statement.executeQuery("PRAGMA table_info(plan_edges)")) {
+                while (values.next()) columns.add(values.getString("name"));
+            }
+            assertThat(columns).contains("edge_type", "condition_expression", "priority",
+                    "max_traversals", "traversal_count");
+        }
+    }
+
+    @Test
+    void migratesExpertThinkingAndWorkspaceOwnershipColumns() throws Exception {
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
+        store.initialize();
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            var agentColumns = new java.util.ArrayList<String>();
+            try (var columns = statement.executeQuery("PRAGMA table_info(agent_profiles)")) {
+                while (columns.next()) agentColumns.add(columns.getString("name"));
+            }
+            var runColumns = new java.util.ArrayList<String>();
+            try (var columns = statement.executeQuery("PRAGMA table_info(runs)")) {
+                while (columns.next()) runColumns.add(columns.getString("name"));
+            }
+            assertThat(agentColumns).contains("thinking_mode", "reasoning_effort");
+            assertThat(runColumns).contains("workspace_owner_run_id");
         }
     }
 
@@ -251,12 +287,17 @@ class SqliteRuntimeStoreTest {
     @Test
     void groupsMovesAndDeletesSessionsWithTheirRuntimeRecords() throws Exception {
         SqliteRuntimeStore store = store();
+        PlanStore plans = new PlanStore(properties());
         var group = store.createSessionGroup("Work");
         var session = store.createSession("grouped", "default", group.id());
         var run = store.createRun(session.id(), "hello");
         var tool = store.createToolCall(run.id(), "provider-1", "write_file", "{}", "delete-test");
         var approval = store.createApproval(run.id(), tool.id(), "confirm");
         var artifact = store.createArtifact(run.id(), "tool-result", "large", "x.txt", 1, "abc");
+        store.startModelAttempt(run.id(), "provider", "model", 1);
+        store.saveCollaborationPolicy(run.id(), true, "medium", "medium",
+                "[]", 2, 1, 2, 4_000, 0, false, false, false);
+        plans.createAsyncJob(null, null, run.id(), "default", "GENERIC", "{}", "delete-session-job");
 
         assertThat(session.groupId()).isEqualTo(group.id());
         assertThat(store.sessionGroups()).extracting("name").containsExactly("Work");
@@ -330,6 +371,8 @@ class SqliteRuntimeStoreTest {
         assertThat(store.findSession(first.childSessionId()).orElseThrow().projectKey()).isEqualTo("project-a");
         assertThat(store.sessions()).extracting("id").containsExactly(session.id());
         assertThat(store.delegationsForRun(parent.id())).containsExactly(first);
+        assertThat(store.parentDelegationForRun(first.childRunId())).contains(first);
+        assertThat(store.delegationRootRunId(first.childRunId())).isEqualTo(parent.id());
         assertThatThrownBy(() -> store.deleteSession(first.childSessionId()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("parent session");
@@ -354,7 +397,7 @@ class SqliteRuntimeStoreTest {
                 false, true, true);
         var tool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-key");
         var child = store.createOrGetDelegation(parent.id(), tool.id(), "runner", "run tests",
-                "agent-a", "model-a");
+                "agent-a", "model-a", "enabled", "max", null, null, "{}");
 
         assertThat(policy.complexity()).isEqualTo("COMPLEX");
         assertThat(policy.risk()).isEqualTo("HIGH");
@@ -363,6 +406,15 @@ class SqliteRuntimeStoreTest {
         assertThat(store.delegationDepth(child.childRunId())).isEqualTo(1);
         assertThat(store.delegationCountForTree(child.childRunId())).isEqualTo(1);
         assertThat(store.workspaceOwnerRunId(child.childRunId())).isEqualTo(parent.id());
+        assertThat(store.findRun(child.childRunId())).get().satisfies(run -> {
+            assertThat(run.thinkingMode()).isEqualTo("enabled");
+            assertThat(run.reasoningEffort()).isEqualTo("max");
+        });
+
+        store.completeRun(parent.id());
+        var continuation = store.createRun(session.id(), "continue in the same workspace");
+        assertThat(store.workspaceOwnerRunId(continuation.id())).isEqualTo(parent.id());
+        assertThat(store.latestCollaborationRunId(session.id())).contains(parent.id());
     }
 
     @Test
@@ -467,7 +519,16 @@ class SqliteRuntimeStoreTest {
         var agent = productivity.saveAgentProfile(null, "project-p1", "Code Reviewer",
                 "Reviews code changes", "Review code for correctness and risk.", profile.id(),
                 "[\"read_file\",\"search_knowledge\"]", "[\"java-review\"]",
-                "summary, risks, fixes", "REVIEWER", "MANUAL", "PROJECT", "INHERIT", true);
+                "summary, risks, fixes", "REVIEWER", "MANUAL", "PROJECT", "INHERIT",
+                "enabled", "max", true, "", 0);
+        var leader = productivity.saveAgentProfile(null, "project-p1", "Delivery Leader",
+                "Coordinates experts", "Delegate and synthesize.", profile.id(),
+                "[\"list_agent_profiles\",\"spawn_agent\"]", "[]",
+                "summary", "LEADER", "LEADER_ASSIGNED", "PROJECT", "INHERIT",
+                "enabled", "max", true, "", 0);
+        var team = productivity.saveAgentTeam(null, "project-p1", "Delivery Team",
+                "Leader plus reviewer", leader.id(), "[\"" + agent.id() + "\"]",
+                2, 1, true, false, true);
         var budget = productivity.saveBudget("project-p1", 10_000, 100_000, 1, 10, .8, 2);
         var session = store.createSession("P1", "project-p1");
         var run = store.createRun(session.id(), "review", "disabled", "", List.of(), profile.id(), agent.id(), 5, 0);
@@ -482,8 +543,12 @@ class SqliteRuntimeStoreTest {
         assertThat(productivity.markTemplateUsed("project-p1", template.id()).id()).isEqualTo(template.id());
         assertThat(productivity.markTemplateUsed("project-p1", "review").id()).isEqualTo(template.id());
         assertThat(productivity.resolveModelProfile("project-p1", null)).contains(profile);
-        assertThat(productivity.agentProfiles("project-p1")).containsExactly(agent);
+        assertThat(productivity.agentProfiles("project-p1")).containsExactlyInAnyOrder(agent, leader);
         assertThat(productivity.resolveAgentProfile("project-p1", agent.id())).contains(agent);
+        assertThat(productivity.agentTeams("project-p1")).containsExactly(team);
+        assertThat(productivity.findAgentTeam(team.id())).contains(team);
+        assertThat(agent.thinkingMode()).isEqualTo("enabled");
+        assertThat(agent.reasoningEffort()).isEqualTo("max");
         assertThat(store.findRun(run.id()).orElseThrow().agentProfileId()).isEqualTo(agent.id());
         assertThat(budget.maxConcurrentRuns()).isEqualTo(2);
         assertThat(productivity.queue("project-p1")).singleElement()

@@ -8,9 +8,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Repository
@@ -317,6 +320,18 @@ public class PlanStore {
         return claimReadyStep(stepId, "local-plan-worker", 60);
     }
 
+    public long latestEventSequence(String planId) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT COALESCE(MAX(sequence),0) FROM plan_events WHERE plan_id=?")) {
+            ps.setString(1, planId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw failure("read latest plan event sequence", e);
+        }
+    }
+
     public Optional<PlanStep> claimReadyStep(String stepId, String claimOwner, int leaseSeconds) {
         try (Connection c = open()) {
             c.setAutoCommit(false);
@@ -452,6 +467,49 @@ public class PlanStore {
 
     public void markStepWaitingApproval(String stepId) {
         setStepRuntimeStatus(stepId, "WAITING_APPROVAL", null, "plan_step.waiting_approval");
+    }
+
+    public int resumeAutomatableManualSteps(String planId) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                List<String> stepIds = new ArrayList<>();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT id FROM plan_steps WHERE plan_id=? AND status='WAITING_APPROVAL' " +
+                                "AND execution_mode='MANUAL' AND type<>'USER_APPROVAL' AND run_id IS NULL")) {
+                    ps.setString(1, planId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) stepIds.add(rs.getString(1));
+                    }
+                }
+                if (stepIds.isEmpty()) {
+                    c.rollback();
+                    return 0;
+                }
+                String now = Instant.now().toString();
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status='READY',execution_mode='REACT',claim_owner=NULL," +
+                                "lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? WHERE id=?")) {
+                    for (String stepId : stepIds) {
+                        ps.setString(1, now);
+                        ps.setString(2, stepId);
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                for (String stepId : stepIds) {
+                    appendEvent(c, planId, stepId, "plan_step.auto_resumed",
+                            "{\"reason\":\"non-interactive MANUAL step normalized to REACT\"}", now);
+                }
+                c.commit();
+                return stepIds.size();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("resume automatable manual plan steps", e);
+        }
     }
 
     public void markStepRunningAgain(String stepId) {
@@ -739,6 +797,57 @@ public class PlanStore {
         return updateStepStatus(stepId, "SKIPPED", reason, "plan_step.skipped");
     }
 
+    public PlanStep decideApprovalStep(String stepId, String decision, String reason) {
+        String resolvedDecision = value(decision, 40).toUpperCase();
+        if (!List.of("APPROVED", "REJECTED").contains(resolvedDecision)) {
+            throw new IllegalArgumentException("decision must be APPROVED or REJECTED");
+        }
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                PlanStep current = findStep(c, stepId)
+                        .orElseThrow(() -> new IllegalArgumentException("plan step not found"));
+                if (!"USER_APPROVAL".equals(current.type()) || !"WAITING_APPROVAL".equals(current.status())) {
+                    throw new IllegalStateException("only waiting USER_APPROVAL steps can be decided");
+                }
+                String now = Instant.now().toString();
+                boolean approved = "APPROVED".equals(resolvedDecision);
+                String status = approved ? "COMPLETED" : "FAILED";
+                String resolvedReason = blank(reason)
+                        ? approved ? "approved by user" : "rejected by user"
+                        : value(reason, 1_000);
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
+                                "last_failure_class=?,claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL," +
+                                "updated_at=? WHERE id=?")) {
+                    ps.setString(1, status);
+                    ps.setString(2, approved ? resolvedReason : null);
+                    ps.setString(3, approved ? null : resolvedReason);
+                    ps.setString(4, now);
+                    ps.setString(5, approved ? null : "APPROVAL_REJECTED");
+                    ps.setString(6, now);
+                    ps.setString(7, stepId);
+                    ps.executeUpdate();
+                }
+                finishStepChecks(c, stepId, approved ? "PASSED" : "FAILED",
+                        approved ? "" : resolvedReason, resolvedReason, now);
+                appendEvent(c, current.planId(), stepId,
+                        approved ? "plan_step.approval_approved" : "plan_step.approval_rejected",
+                        "{\"decision\":\"" + resolvedDecision + "\",\"reason\":\"" +
+                                escape(resolvedReason) + "\"}", now);
+                markReadySteps(c, current.planId(), now);
+                finishPlanIfTerminal(c, current.planId(), now);
+                c.commit();
+                return findStep(stepId).orElseThrow();
+            } catch (Exception e) {
+                rollback(c);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("decide approval plan step", e);
+        }
+    }
+
     public AsyncJob createAsyncJob(String planId, String stepId, String runId, String projectKey,
                                    String kind, String payloadJson, String idempotencyKey) {
         Optional<AsyncJob> existing = findAsyncJobByKey(idempotencyKey);
@@ -932,15 +1041,17 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
-                                "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? " +
+                                "last_failure_class=?,claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL," +
+                                "updated_at=? " +
                                 "WHERE id=? AND status NOT IN " +
                                 "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(resultSummary));
                     ps.setString(3, nullable(reason));
                     ps.setString(4, now);
-                    ps.setString(5, now);
-                    ps.setString(6, stepId);
+                    ps.setString(5, stepFailureClass(status));
+                    ps.setString(6, now);
+                    ps.setString(7, stepId);
                     ps.executeUpdate();
                 }
                 if ("COMPLETED".equals(status)) {
@@ -973,15 +1084,17 @@ public class PlanStore {
                 String now = Instant.now().toString();
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE plan_steps SET status=?,result_summary=?,failure_reason=?,completed_at=?," +
-                                "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? " +
+                                "last_failure_class=?,claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL," +
+                                "updated_at=? " +
                                 "WHERE id=? AND status NOT IN " +
                                 "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')")) {
                     ps.setString(1, status);
                     ps.setString(2, nullable(resultSummary));
                     ps.setString(3, nullable(reason));
                     ps.setString(4, now);
-                    ps.setString(5, now);
-                    ps.setString(6, stepId);
+                    ps.setString(5, stepFailureClass(status));
+                    ps.setString(6, now);
+                    ps.setString(7, stepId);
                     ps.executeUpdate();
                 }
                 finishStepChecks(c, stepId, checkStatus, checkError, evidence, actual, now);
@@ -1109,12 +1222,18 @@ public class PlanStore {
 
     private void insertEdges(Connection c, String planId, List<EdgeDraft> edges, String now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO plan_edges(plan_id,from_step_id,to_step_id,created_at) VALUES(?,?,?,?)")) {
+                "INSERT INTO plan_edges(plan_id,from_step_id,to_step_id,edge_type,condition_expression," +
+                        "priority,max_traversals,traversal_count,created_at) VALUES(?,?,?,?,?,?,?,0,?)")) {
             for (EdgeDraft edge : edges == null ? List.<EdgeDraft>of() : edges) {
                 ps.setString(1, planId);
                 ps.setString(2, edge.fromStepId());
                 ps.setString(3, edge.toStepId());
-                ps.setString(4, now);
+                ps.setString(4, edgeType(edge.type()));
+                ps.setString(5, edgeCondition(edge.conditionExpression()));
+                ps.setInt(6, Math.max(-100, Math.min(edge.priority(), 100)));
+                ps.setInt(7, "REWORK".equalsIgnoreCase(edge.type())
+                        ? Math.max(1, Math.min(edge.maxTraversals(), 10)) : 0);
+                ps.setString(8, now);
                 ps.addBatch();
             }
             ps.executeBatch();
@@ -1205,38 +1324,144 @@ public class PlanStore {
     }
 
     private void markReadySteps(Connection c, String planId, String now) throws SQLException {
+        List<String> skippedConditionalTargets = conditionalTargets(c, planId, false);
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE plan_steps SET status='SKIPPED',failure_reason='no conditional edge matched'," +
+                        "completed_at=?,updated_at=? WHERE plan_id=? AND status='PENDING' " +
+                        "AND EXISTS (SELECT 1 FROM plan_edges e WHERE e.plan_id=plan_steps.plan_id " +
+                        "AND e.to_step_id=plan_steps.id AND e.edge_type='CONDITIONAL') " +
+                        "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                        "WHERE e.plan_id=plan_steps.plan_id AND e.to_step_id=plan_steps.id " +
+                        "AND e.edge_type='CONDITIONAL' AND src.status NOT IN " +
+                        "('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')) " +
+                        "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                        "WHERE e.plan_id=plan_steps.plan_id AND e.to_step_id=plan_steps.id " +
+                        "AND e.edge_type='CONDITIONAL' AND (" + matchedConditionSql("e", "src") + "))")) {
+            ps.setString(1, now);
+            ps.setString(2, now);
+            ps.setString(3, planId);
+            ps.executeUpdate();
+        }
+        for (String stepId : skippedConditionalTargets) {
+            finishStepChecks(c, stepId, "SKIPPED", "", "conditional route not selected",
+                    "no conditional edge matched", now);
+            appendEvent(c, planId, stepId, "plan_edge.condition_unmatched",
+                    "{\"decision\":\"SKIPPED\"}", now);
+        }
+        while (true) {
+            List<String> unreachable = unreachableDependencyTargets(c, planId);
+            if (unreachable.isEmpty()) break;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plan_steps SET status='SKIPPED',failure_reason='dependency branch is unreachable'," +
+                            "completed_at=?,updated_at=? WHERE id=? AND status='PENDING'")) {
+                for (String stepId : unreachable) {
+                    ps.setString(1, now);
+                    ps.setString(2, now);
+                    ps.setString(3, stepId);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            for (String stepId : unreachable) {
+                finishStepChecks(c, stepId, "SKIPPED", "", "dependency branch is unreachable",
+                        "all dependency branches were skipped or failed", now);
+                appendEvent(c, planId, stepId, "plan_edge.dependency_unreachable",
+                        "{\"decision\":\"SKIPPED\"}", now);
+            }
+        }
+        List<String> matchedConditionalTargets = conditionalTargets(c, planId, true);
         try (PreparedStatement ps = c.prepareStatement(
                 "UPDATE plan_steps SET status='READY',updated_at=? WHERE plan_id=? AND status='PENDING' " +
                         "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps dep ON dep.id=e.from_step_id " +
                         "WHERE e.plan_id=plan_steps.plan_id AND e.to_step_id=plan_steps.id " +
-                        "AND dep.status<>'COMPLETED')")) {
+                        "AND e.edge_type='DEPENDENCY' AND dep.status NOT IN ('COMPLETED','SKIPPED')) " +
+                        "AND (NOT EXISTS (SELECT 1 FROM plan_edges e WHERE e.plan_id=plan_steps.plan_id " +
+                        "AND e.to_step_id=plan_steps.id AND e.edge_type='CONDITIONAL') " +
+                        "OR EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                        "WHERE e.plan_id=plan_steps.plan_id AND e.to_step_id=plan_steps.id " +
+                        "AND e.edge_type='CONDITIONAL' AND (" + matchedConditionSql("e", "src") + ")))")) {
             ps.setString(1, now);
             ps.setString(2, planId);
             ps.executeUpdate();
         }
+        for (String stepId : matchedConditionalTargets) {
+            appendEvent(c, planId, stepId, "plan_edge.condition_matched",
+                    "{\"decision\":\"READY\"}", now);
+        }
+    }
+
+    private List<String> conditionalTargets(Connection c, String planId, boolean matched) throws SQLException {
+        String matchClause = matched
+                ? "EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='CONDITIONAL' " +
+                "AND (" + matchedConditionSql("e", "src") + ")) " +
+                "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps dep ON dep.id=e.from_step_id " +
+                "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='DEPENDENCY' " +
+                "AND dep.status NOT IN ('COMPLETED','SKIPPED'))"
+                : "NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='CONDITIONAL' " +
+                "AND src.status NOT IN ('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')) " +
+                "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='CONDITIONAL' " +
+                "AND (" + matchedConditionSql("e", "src") + "))";
+        List<String> values = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT id FROM plan_steps target WHERE plan_id=? AND status='PENDING' " +
+                        "AND EXISTS (SELECT 1 FROM plan_edges e WHERE e.plan_id=target.plan_id " +
+                        "AND e.to_step_id=target.id AND e.edge_type='CONDITIONAL') AND " + matchClause)) {
+            ps.setString(1, planId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(rs.getString(1));
+            }
+        }
+        return values;
+    }
+
+    private List<String> unreachableDependencyTargets(Connection c, String planId) throws SQLException {
+        List<String> values = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT id FROM plan_steps target WHERE plan_id=? AND status='PENDING' " +
+                        "AND EXISTS (SELECT 1 FROM plan_edges e WHERE e.plan_id=target.plan_id " +
+                        "AND e.to_step_id=target.id AND e.edge_type='DEPENDENCY') " +
+                        "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                        "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='DEPENDENCY' " +
+                        "AND src.status NOT IN ('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')) " +
+                        "AND NOT EXISTS (SELECT 1 FROM plan_edges e JOIN plan_steps src ON src.id=e.from_step_id " +
+                        "WHERE e.plan_id=target.plan_id AND e.to_step_id=target.id AND e.edge_type='DEPENDENCY' " +
+                        "AND src.status='COMPLETED')")) {
+            ps.setString(1, planId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(rs.getString(1));
+            }
+        }
+        return values;
     }
 
     private void finishPlanIfTerminal(Connection c, String planId, String now) throws SQLException {
+        List<StepFailure> failures = new ArrayList<>();
         try (PreparedStatement failed = c.prepareStatement(
-                "SELECT failure_reason FROM plan_steps WHERE plan_id=? " +
-                        "AND status IN ('FAILED','VALIDATION_FAILED') ORDER BY updated_at DESC LIMIT 1")) {
+                "SELECT id,status,failure_reason FROM plan_steps WHERE plan_id=? " +
+                        "AND status IN ('FAILED','VALIDATION_FAILED') ORDER BY updated_at DESC")) {
             failed.setString(1, planId);
             try (ResultSet rs = failed.executeQuery()) {
-                if (rs.next()) {
-                    try (PreparedStatement ps = c.prepareStatement(
-                            "UPDATE plans SET status='FAILED',failure_reason=?,completed_at=?,updated_at=? " +
-                                    "WHERE id=? AND status='ACTIVE'")) {
-                        ps.setString(1, rs.getString(1));
-                        ps.setString(2, now);
-                        ps.setString(3, now);
-                        ps.setString(4, planId);
-                        if (ps.executeUpdate() > 0) {
-                            appendEvent(c, planId, null, "plan.failed", "{}", now);
-                        }
-                    }
-                    return;
+                while (rs.next()) failures.add(new StepFailure(rs.getString(1), rs.getString(2), rs.getString(3)));
+            }
+        }
+        for (StepFailure failure : failures) {
+            if (applyReworkRoute(c, planId, failure.stepId(), failure.status(), now)) return;
+            if (hasMatchedConditionalRoute(c, failure.stepId(), failure.status())) continue;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plans SET status='FAILED',failure_reason=?,completed_at=?,updated_at=? " +
+                            "WHERE id=? AND status='ACTIVE'")) {
+                ps.setString(1, failure.reason());
+                ps.setString(2, now);
+                ps.setString(3, now);
+                ps.setString(4, planId);
+                if (ps.executeUpdate() > 0) {
+                    appendEvent(c, planId, null, "plan.failed", "{}", now);
                 }
             }
+            return;
         }
         try (PreparedStatement open = c.prepareStatement(
                 "SELECT COUNT(*) FROM plan_steps WHERE plan_id=? " +
@@ -1327,7 +1552,10 @@ public class PlanStore {
     }
     private static PlanEdge edge(ResultSet r) throws SQLException {
         return new PlanEdge(r.getString("plan_id"), r.getString("from_step_id"),
-                r.getString("to_step_id"), instant(r.getString("created_at")));
+                r.getString("to_step_id"), r.getString("edge_type"),
+                r.getString("condition_expression"), r.getInt("priority"),
+                r.getInt("max_traversals"), r.getInt("traversal_count"),
+                instant(r.getString("created_at")));
     }
     private static PlanEvent event(ResultSet r) throws SQLException {
         return new PlanEvent(r.getLong("id"), r.getString("plan_id"), r.getString("step_id"),
@@ -1380,6 +1608,20 @@ public class PlanStore {
         }
         return x;
     }
+    private static String edgeType(String v) {
+        String x = blank(v) ? "DEPENDENCY" : v.trim().toUpperCase();
+        if (!List.of("DEPENDENCY", "CONDITIONAL", "REWORK").contains(x)) {
+            throw new IllegalArgumentException("unsupported plan edge type: " + v);
+        }
+        return x;
+    }
+    private static String edgeCondition(String v) {
+        String x = blank(v) ? "ON_SUCCESS" : v.trim().toUpperCase();
+        if (!List.of("ALWAYS", "ON_SUCCESS", "ON_FAILURE", "ON_VALIDATION_FAILURE", "ON_SKIPPED").contains(x)) {
+            throw new IllegalArgumentException("unsupported plan edge condition: " + v);
+        }
+        return x;
+    }
     private static String nullable(String v) { return blank(v) ? null : v.trim(); }
     private static boolean blank(String v) { return v == null || v.isBlank(); }
     private static String escape(String v) {
@@ -1404,7 +1646,9 @@ public class PlanStore {
                            String resourceReadSetJson, String resourceWriteSetJson, String isolationStrategy,
                            int maxParallelism, int criticalPathWeight, String workspaceRef,
                            Instant startedAt, Instant completedAt, Instant createdAt, Instant updatedAt) { }
-    public record PlanEdge(String planId, String fromStepId, String toStepId, Instant createdAt) { }
+    public record PlanEdge(String planId, String fromStepId, String toStepId, String type,
+                           String conditionExpression, int priority, int maxTraversals,
+                           int traversalCount, Instant createdAt) { }
     public record PlanEvent(long id, String planId, String stepId, String type, String data,
                             long sequence, Instant createdAt) { }
     public record AsyncJob(String id, String planId, String stepId, String runId, String projectKey,
@@ -1424,5 +1668,149 @@ public class PlanStore {
                     "[]", "[]", "SHARED_SESSION", 1, 0);
         }
     }
-    public record EdgeDraft(String fromStepId, String toStepId) { }
+
+    private boolean applyReworkRoute(Connection c, String planId, String failedStepId, String failedStatus,
+                                     String now) throws SQLException {
+        List<PlanEdge> candidates = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM plan_edges WHERE plan_id=? AND from_step_id=? AND edge_type='REWORK' " +
+                        "AND traversal_count<max_traversals ORDER BY priority DESC,to_step_id")) {
+            ps.setString(1, planId);
+            ps.setString(2, failedStepId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) candidates.add(edge(rs));
+            }
+        }
+        for (PlanEdge candidate : candidates) {
+            if (!conditionMatches(candidate.conditionExpression(), failedStatus)) continue;
+            Set<String> branch = descendantSteps(c, planId, candidate.toStepId());
+            boolean active = false;
+            for (String stepId : branch) {
+                PlanStep step = findStep(c, stepId).orElseThrow();
+                if (List.of("RUNNING", "WAITING_APPROVAL", "WAITING_JOB", "VALIDATING").contains(step.status())) {
+                    active = true;
+                    break;
+                }
+            }
+            if (active) continue;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plan_steps SET status='PENDING',run_id=NULL,result_summary=NULL,failure_reason=NULL," +
+                            "claim_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,not_before=NULL," +
+                            "last_failure_class=NULL,dispatch_idempotency_key=NULL,workspace_ref=NULL," +
+                            "started_at=NULL,completed_at=NULL,updated_at=? WHERE id=?")) {
+                for (String stepId : branch) {
+                    ps.setString(1, now);
+                    ps.setString(2, stepId);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE validation_checks SET status='PENDING',actual='',evidence='',error=NULL," +
+                            "completed_at=NULL,updated_at=? WHERE step_id=?")) {
+                for (String stepId : branch) {
+                    ps.setString(1, now);
+                    ps.setString(2, stepId);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plan_edges SET traversal_count=traversal_count+1 WHERE plan_id=? " +
+                            "AND from_step_id=? AND to_step_id=?")) {
+                ps.setString(1, planId);
+                ps.setString(2, candidate.fromStepId());
+                ps.setString(3, candidate.toStepId());
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE plans SET status='ACTIVE',failure_reason=NULL,completed_at=NULL,updated_at=? WHERE id=?")) {
+                ps.setString(1, now);
+                ps.setString(2, planId);
+                ps.executeUpdate();
+            }
+            appendEvent(c, planId, failedStepId, "plan_edge.rework_routed",
+                    "{\"fromStepId\":\"" + escape(failedStepId) + "\",\"toStepId\":\"" +
+                            escape(candidate.toStepId()) + "\",\"condition\":\"" +
+                            escape(candidate.conditionExpression()) + "\"}", now);
+            markReadySteps(c, planId, now);
+            return true;
+        }
+        return false;
+    }
+
+    private Set<String> descendantSteps(Connection c, String planId, String rootStepId) throws SQLException {
+        Set<String> values = new LinkedHashSet<>();
+        ArrayDeque<String> queue = new ArrayDeque<>();
+        queue.add(rootStepId);
+        while (!queue.isEmpty()) {
+            String current = queue.removeFirst();
+            if (!values.add(current)) continue;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT to_step_id FROM plan_edges WHERE plan_id=? AND from_step_id=? " +
+                            "AND edge_type<>'REWORK'")) {
+                ps.setString(1, planId);
+                ps.setString(2, current);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) queue.addLast(rs.getString(1));
+                }
+            }
+        }
+        return values;
+    }
+
+    private boolean hasMatchedConditionalRoute(Connection c, String stepId, String status) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT condition_expression FROM plan_edges WHERE from_step_id=? AND edge_type='CONDITIONAL'")) {
+            ps.setString(1, stepId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if (conditionMatches(rs.getString(1), status)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean conditionMatches(String condition, String status) {
+        String resolved = edgeCondition(condition);
+        return switch (resolved) {
+            case "ALWAYS" -> List.of("COMPLETED", "FAILED", "VALIDATION_FAILED", "SKIPPED", "CANCELED")
+                    .contains(status);
+            case "ON_SUCCESS" -> "COMPLETED".equals(status);
+            case "ON_FAILURE" -> List.of("FAILED", "VALIDATION_FAILED", "CANCELED").contains(status);
+            case "ON_VALIDATION_FAILURE" -> "VALIDATION_FAILED".equals(status);
+            case "ON_SKIPPED" -> "SKIPPED".equals(status);
+            default -> false;
+        };
+    }
+
+    private static String stepFailureClass(String status) {
+        return switch (status) {
+            case "FAILED" -> "EXECUTION_FAILED";
+            case "VALIDATION_FAILED" -> "VALIDATION_FAILED";
+            case "CANCELED" -> "CANCELED";
+            default -> null;
+        };
+    }
+
+    private static String matchedConditionSql(String edgeAlias, String stepAlias) {
+        return "(" + edgeAlias + ".condition_expression='ALWAYS' AND " +
+                stepAlias + ".status IN ('COMPLETED','FAILED','VALIDATION_FAILED','SKIPPED','CANCELED')) OR " +
+                "(" + edgeAlias + ".condition_expression='ON_SUCCESS' AND " +
+                stepAlias + ".status='COMPLETED') OR " +
+                "(" + edgeAlias + ".condition_expression='ON_FAILURE' AND " +
+                stepAlias + ".status IN ('FAILED','VALIDATION_FAILED','CANCELED')) OR " +
+                "(" + edgeAlias + ".condition_expression='ON_VALIDATION_FAILURE' AND " +
+                stepAlias + ".status='VALIDATION_FAILED') OR " +
+                "(" + edgeAlias + ".condition_expression='ON_SKIPPED' AND " +
+                stepAlias + ".status='SKIPPED')";
+    }
+    public record EdgeDraft(String fromStepId, String toStepId, String type,
+                            String conditionExpression, int priority, int maxTraversals) {
+        public EdgeDraft(String fromStepId, String toStepId) {
+            this(fromStepId, toStepId, "DEPENDENCY", "ON_SUCCESS", 0, 0);
+        }
+    }
+    private record StepFailure(String stepId, String status, String reason) { }
 }

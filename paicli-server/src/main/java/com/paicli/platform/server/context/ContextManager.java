@@ -140,12 +140,12 @@ public class ContextManager {
         StringBuilder value = new StringBuilder("<agent_profile id=\"")
                 .append(escapeAttribute(agentProfile.id())).append("\" name=\"")
                 .append(escapeAttribute(agentProfile.name())).append("\">\n")
-                .append("Role: ").append(agentProfile.collaborationRole()).append("\n")
-                .append("Handoff policy: ").append(agentProfile.handoffPolicy()).append("\n")
-                .append("Workspace scope: ").append(agentProfile.workspaceScope()).append("\n")
-                .append("Approval policy: ").append(agentProfile.approvalPolicy()).append("\n");
+                .append("协作角色：").append(agentProfile.collaborationRole()).append("\n")
+                .append("交接策略：").append(agentProfile.handoffPolicy()).append("\n")
+                .append("工作区范围：").append(agentProfile.workspaceScope()).append("\n")
+                .append("审批策略：").append(agentProfile.approvalPolicy()).append("\n");
         if (!agentProfile.description().isBlank()) {
-            value.append("Description: ").append(agentProfile.description()).append("\n");
+            value.append("专家说明：").append(agentProfile.description()).append("\n");
         }
         value.append("\n<expert_instructions>\n")
                 .append(agentProfile.systemPrompt()).append("\n</expert_instructions>\n");

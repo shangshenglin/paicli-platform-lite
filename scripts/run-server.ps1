@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-. (Join-Path $PSScriptRoot "load-env.ps1") -Root $root
+. (Join-Path $PSScriptRoot "load-env.ps1") -Root $root -OverrideExisting
 
 Push-Location $root
 try {

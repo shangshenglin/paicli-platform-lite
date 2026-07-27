@@ -35,7 +35,7 @@ paicli:
   security:
     api-key: ${PAICLI_API_KEY:}
     require-api-key: ${PAICLI_SECURITY_REQUIRE_API_KEY:false}
-    protect-management: ${PAICLI_SECURITY_PROTECT_MANAGEMENT:true}
+    protect-management: ${PAICLI_SECURITY_PROTECT_MANAGEMENT:false}
   model:
     provider: ${PAICLI_MODEL_PROVIDER:demo}
     base-url: ${PAICLI_MODEL_BASE_URL:https://api.openai.com/v1}
@@ -54,7 +54,7 @@ paicli:
     requests-per-minute: ${PAICLI_MODEL_REQUESTS_PER_MINUTE:60}
     fallback-model: ${PAICLI_MODEL_FALLBACK_NAME:}
     max-run-steps: ${PAICLI_MODEL_MAX_RUN_STEPS:30}
-    max-run-tokens: ${PAICLI_MODEL_MAX_RUN_TOKENS:200000}
+    max-run-tokens: ${PAICLI_MODEL_MAX_RUN_TOKENS:0}
     stream-idle-timeout-seconds: ${PAICLI_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:45}
     circuit-failure-threshold: ${PAICLI_MODEL_CIRCUIT_FAILURE_THRESHOLD:5}
     circuit-open-seconds: ${PAICLI_MODEL_CIRCUIT_OPEN_SECONDS:30}
@@ -72,7 +72,7 @@ paicli:
     startup-timeout-seconds: 30
     command-timeout-seconds: 90
   web:
-    enabled: ${PAICLI_WEB_ENABLED:true}
+    enabled: ${PAICLI_WEB_ENABLED:false}
     search-url: ${PAICLI_WEB_SEARCH_URL:}
     api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
     api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}

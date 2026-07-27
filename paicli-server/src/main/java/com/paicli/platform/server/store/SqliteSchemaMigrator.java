@@ -30,7 +30,10 @@ final class SqliteSchemaMigrator {
             new Migration(18, "delegated runs can target agent profiles"),
             new Migration(19, "plan step lease and recovery metadata"),
             new Migration(20, "typed memory rag planning and plan bound delegation metadata"),
-            new Migration(21, "controlled parallel plan execution and closed loop feedback")
+            new Migration(21, "controlled parallel plan execution and closed loop feedback"),
+            new Migration(22, "expert thinking controls and persistent session workspace ownership"),
+            new Migration(23, "typed plan graph edges and deterministic routing"),
+            new Migration(24, "reusable expert collaboration teams")
     );
 
     private SqliteSchemaMigrator() { }

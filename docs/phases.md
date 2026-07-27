@@ -165,6 +165,16 @@
 - [x] 新增 Plan 验证、资源冲突、Agent Feedback 和验证 Memory Micrometer 指标，便于 Actuator/Prometheus 观测闭环效果。
 - [x] 补充回归测试，覆盖资源冲突推迟、隔离 workspace 引用、workspace owner 映射、Agent Feedback 幂等写入和验证 Memory 生成。
 
+## 阶段 18：类型化 Graph Runtime
+
+- [x] `plan_edges` 增加边类型、确定性条件、优先级、最大回流次数和回流计数；Schema 迁移 23，旧边兼容为 `DEPENDENCY + ON_SUCCESS`。
+- [x] Plan JSON 支持可选 `edges`，解析并校验 `DEPENDENCY`、`CONDITIONAL`、`REWORK`，回流边不参与 DAG 循环判断且必须具有有限次数。
+- [x] 条件路由由 Server 按 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE`、`ON_SKIPPED` 确定性判断；命中与未命中都记录 Plan Event，未选分支和 Validation Check 同步跳过。
+- [x] `REWORK` 只重置目标节点及其下游分支，保留无关分支；每次回流持久化计数，耗尽后恢复原失败终态。
+- [x] 新增结构化 `PlanState` 与 `/v1/plans/{id}/state`，汇总步骤状态、READY/活跃/人工节点、阻塞原因、Token 和最后事件序号。
+- [x] `USER_APPROVAL` 升级为持久化 Human Node，新增 `/v1/plan-steps/{id}/decision` 批准/拒绝接口；Console Plan 详情可查看边、状态与处理人工节点。
+- [x] 补充迁移、条件分支、人工决策、回流上限、事件审计和状态快照回归测试。
+
 ### 阶段 16 后续工作
 
 - [ ] Memory conflict 的人工解决 API 与 Console 审计入口。

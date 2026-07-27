@@ -182,6 +182,43 @@ class OpenAiCompatibleModelClientTest {
     }
 
     @Test
+    void retriesWithoutImagesWhenProviderRejectsMultimodalContent() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<String> fallbackBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (requests.incrementAndGet() == 1) {
+                byte[] error = "This model does not support image input".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(400, error.length);
+                exchange.getResponseBody().write(error);
+            } else {
+                fallbackBody.set(body);
+                byte[] stream = "data: {\"choices\":[{\"delta\":{\"content\":\"请切换视觉模型\"}}]}\n\ndata: [DONE]\n\n"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, stream.length);
+                exchange.getResponseBody().write(stream);
+            }
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "text-model",
+                8_000, 1_000, 0.75, 6, 1_000, 30, "auto", "",
+                1, 1, 10_000, "", 30, 200_000);
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, new ObjectMapper());
+        client.initialize();
+        ModelMessage message = new ModelMessage("user", "分析图片", null, List.of(), "",
+                List.of(new ModelImage("image/png", "aGVsbG8=", "screen.png")));
+
+        ModelResponse response = client.complete(new ModelRequest(List.of(message), List.of(), 1_000));
+
+        assertThat(requests).hasValue(2);
+        assertThat(response.content()).contains("切换视觉模型");
+        assertThat(fallbackBody.get()).doesNotContain("image_url").contains("当前模型接口不支持图像输入");
+    }
+
+    @Test
     void cancelClosesAnActiveStreamingRequest() throws Exception {
         CountDownLatch streaming = new CountDownLatch(1);
         CountDownLatch finishHandler = new CountDownLatch(1);

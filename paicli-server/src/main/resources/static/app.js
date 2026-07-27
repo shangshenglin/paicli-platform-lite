@@ -17,14 +17,20 @@ const state = {
   templates: [],
   modelProfiles: [],
   agentProfiles: [],
+  agentTeams: [],
   availableSkills: [],
   editingAgentProfileId: '',
+  editingAgentTeamId: '',
+  selectedAgentTeamId: '',
   homeMode: localStorage.getItem('paicli_home_mode') || 'chat',
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
   agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
   notifiedRunId: '',
+  notifiedApprovalIds: new Set(),
   planRefreshTimer: 0,
-  detailOpen: innerWidth > 1000
+  approvalRefreshTimer: 0,
+  detailOpen: innerWidth > 1000,
+  messageScroll: new Map()
 };
 const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELED']);
 const statusNames = {
@@ -101,8 +107,9 @@ function element(tag, className, text) {
 }
 
 function showNotice(text, error = false) {
-  $('notice').textContent = text;
-  $('notice').className = `notice${error ? ' error' : ''}`;
+  $('notice').textContent = 'Enter 发送，Shift + Enter 换行';
+  $('notice').className = 'notice';
+  window.alert(error ? `需要处理：\n${text}` : text);
 }
 
 function setStatus(value = '') {
@@ -115,6 +122,7 @@ function setStatus(value = '') {
   const retryable = Boolean(state.runId && terminal.has(value));
   $('retryRun').hidden = !retryable;
   $('branchRun').hidden = !retryable;
+  configureApprovalPolling(Boolean(state.runId));
   if ((terminal.has(value) || value === 'WAITING_APPROVAL' || value === 'WAITING_AGENT') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
     state.notifiedRunId = `${state.runId}:${value}`;
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
@@ -125,6 +133,51 @@ function setStatus(value = '') {
 
 function scrollBottom() {
   requestAnimationFrame(() => $('messages').scrollTop = $('messages').scrollHeight);
+}
+
+function messagesNearBottom(offset = 80) {
+  const container = $('messages');
+  return container.scrollHeight - container.scrollTop - container.clientHeight < offset;
+}
+
+function restoreMessageScroll(previousTop, previousHeight) {
+  requestAnimationFrame(() => {
+    const container = $('messages');
+    container.scrollTop = Math.max(0, Math.min(previousTop, container.scrollHeight - container.clientHeight));
+  });
+}
+
+function rememberMessageScroll(sessionId = state.sessionId) {
+  if (!sessionId) return;
+  const container = $('messages');
+  state.messageScroll.set(sessionId, {
+    top: container.scrollTop,
+    atBottom: messagesNearBottom(),
+    height: container.scrollHeight
+  });
+  sessionStorage.setItem(`paicli_message_scroll_${sessionId}`,
+    JSON.stringify(state.messageScroll.get(sessionId)));
+}
+
+function savedMessageScroll(sessionId) {
+  if (state.messageScroll.has(sessionId)) return state.messageScroll.get(sessionId);
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(`paicli_message_scroll_${sessionId}`) || 'null');
+    if (saved && Number.isFinite(saved.top)) {
+      state.messageScroll.set(sessionId, saved);
+      return saved;
+    }
+  } catch (_) { }
+  return null;
+}
+
+function configureApprovalPolling(enabled) {
+  clearInterval(state.approvalRefreshTimer);
+  state.approvalRefreshTimer = 0;
+  if (!enabled || !state.runId) return;
+  state.approvalRefreshTimer = setInterval(() => {
+    if (state.runId) loadApprovals();
+  }, 2500);
 }
 
 function updateComposerVisibility() {
@@ -179,6 +232,25 @@ function renderHomeCollaboration() {
     element('p', '', '输入一句话目标，由 Leader 查看专家目录、分派子任务并汇总结果。')
   );
   head.append(element('div', 'logo', 'π'), copy);
+  const teamField = element('label', 'form-field full');
+  teamField.append(element('span', '', '执行小队'));
+  const teamRow = element('div', 'team-select-row');
+  const team = element('select');
+  team.id = 'homeCollaborationTeam';
+  team.append(new Option('临时组合专家', ''));
+  state.agentTeams.filter(value => value.enabled)
+    .forEach(value => team.append(new Option(value.name, value.id)));
+  team.value = state.agentTeams.some(value => value.id === state.selectedAgentTeamId)
+    ? state.selectedAgentTeamId : '';
+  team.onchange = () => {
+    state.selectedAgentTeamId = team.value;
+    applySelectedAgentTeam();
+  };
+  const manageTeams = element('button', 'secondary', '管理小队');
+  manageTeams.type = 'button';
+  manageTeams.onclick = openAgentStudio;
+  teamRow.append(team, manageTeams);
+  teamField.append(teamRow);
   const leaderField = element('label', 'form-field full');
   leaderField.append(element('span', '', 'Leader'));
   const leader = element('select');
@@ -212,7 +284,7 @@ function renderHomeCollaboration() {
   maxExperts.id = 'homeCollaborationMaxExperts';
   maxExperts.type = 'number';
   maxExperts.min = '0';
-  maxExperts.max = '6';
+  maxExperts.max = '20';
   maxExperts.value = '3';
   maxField.append(maxExperts);
   policy.append(complexityField, riskField, maxField);
@@ -233,8 +305,23 @@ function renderHomeCollaboration() {
   start.id = 'homeStartCollaboration';
   start.onclick = startCollaboration;
   actions.append(manage, start);
-  panel.append(head, leaderField, objectiveField, policy, checks, allowed, error, actions);
+  panel.append(head, teamField, leaderField, objectiveField, policy, checks, allowed, error, actions);
+  requestAnimationFrame(applySelectedAgentTeam);
   return panel;
+}
+
+function applySelectedAgentTeam() {
+  const team = state.agentTeams.find(value => value.id === state.selectedAgentTeamId && value.enabled);
+  if (!team || !$('homeCollaborationLeader')) return;
+  $('homeCollaborationLeader').value = team.leaderAgentProfileId;
+  const members = new Set(parseStringListJson(team.memberAgentProfileIdsJson));
+  document.querySelectorAll('[data-collaboration-agent]').forEach(input => {
+    input.checked = members.has(input.value);
+  });
+  $('homeCollaborationMaxExperts').value = String(team.maxExperts || Math.max(1, members.size));
+  $('homeCollaborationRequireReviewer').checked = Boolean(team.requireReviewer);
+  $('homeCollaborationRequireRunner').checked = Boolean(team.requireRunner);
+  $('homeCollaborationAllowExpertDelegation').checked = Number(team.maxDepth || 1) > 1;
 }
 
 function checkboxControl(id, label, checked = false) {
@@ -269,9 +356,342 @@ function renderCollaborationAgentChoices() {
 
 function homeLeaders() {
   const enabled = state.agentProfiles.filter(value => value.enabled);
-  const leaders = enabled.filter(value => (value.collaborationRole || '').toUpperCase() === 'LEADER');
-  const experts = enabled.filter(value => (value.collaborationRole || '').toUpperCase() !== 'LEADER');
-  return leaders.concat(experts);
+  return enabled.filter(value => (value.collaborationRole || '').toUpperCase() === 'LEADER');
+}
+
+function renderRichText(text, className = 'text') {
+  const root = element('div', `${className} rich-text`);
+  const source = text || '';
+  if (!source.trim()) return root;
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) { index++; continue; }
+    if (trimmed.startsWith('```')) {
+      const code = [];
+      index++;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) code.push(lines[index++]);
+      if (index < lines.length) index++;
+      const pre = element('pre', 'code-block');
+      pre.append(element('code', '', code.join('\n')));
+      root.append(pre);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      const node = element(`h${Math.min(4, heading[1].length + 2)}`, 'md-heading');
+      appendInline(node, heading[2]);
+      root.append(node);
+      index++;
+      continue;
+    }
+    if (/^\|.+\|$/.test(trimmed) && index + 1 < lines.length && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[index + 1].trim())) {
+      const tableLines = [trimmed];
+      index += 2;
+      while (index < lines.length && /^\|.+\|$/.test(lines[index].trim())) tableLines.push(lines[index++].trim());
+      root.append(renderMarkdownTable(tableLines));
+      continue;
+    }
+    if (/^[-*]\s+/.test(trimmed)) {
+      const list = element('ul', 'md-list');
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        const item = element('li');
+        appendInline(item, lines[index].trim().replace(/^[-*]\s+/, ''));
+        list.append(item);
+        index++;
+      }
+      root.append(list);
+      continue;
+    }
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const list = element('ol', 'md-list');
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        const item = element('li');
+        appendInline(item, lines[index].trim().replace(/^\d+\.\s+/, ''));
+        list.append(item);
+        index++;
+      }
+      root.append(list);
+      continue;
+    }
+    if (/^>\s?/.test(trimmed)) {
+      const quote = element('blockquote', 'md-quote');
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        const part = element('p');
+        appendInline(part, lines[index].trim().replace(/^>\s?/, ''));
+        quote.append(part);
+        index++;
+      }
+      root.append(quote);
+      continue;
+    }
+    const paragraph = element('p');
+    let first = true;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index], lines[index + 1])) {
+      if (!first) paragraph.append(document.createTextNode(' '));
+      appendInline(paragraph, lines[index].trim());
+      first = false;
+      index++;
+    }
+    root.append(paragraph);
+  }
+  return root;
+}
+
+function isMarkdownBlockStart(line, nextLine = '') {
+  const trimmed = (line || '').trim();
+  return trimmed.startsWith('```') || /^(#{1,4})\s+/.test(trimmed) || /^[-*]\s+/.test(trimmed)
+    || /^\d+\.\s+/.test(trimmed) || /^>\s?/.test(trimmed)
+    || (/^\|.+\|$/.test(trimmed) && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test((nextLine || '').trim()));
+}
+
+function renderMarkdownTable(tableLines) {
+  const table = element('table', 'md-table');
+  const thead = element('thead');
+  const header = element('tr');
+  splitTableRow(tableLines[0]).forEach(value => {
+    const th = element('th');
+    appendInline(th, value);
+    header.append(th);
+  });
+  thead.append(header);
+  const tbody = element('tbody');
+  tableLines.slice(1).forEach(line => {
+    const row = element('tr');
+    splitTableRow(line).forEach(value => {
+      const cell = element('td');
+      appendInline(cell, value);
+      row.append(cell);
+    });
+    tbody.append(row);
+  });
+  table.append(thead, tbody);
+  return table;
+}
+
+function splitTableRow(line) {
+  return line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(value => value.trim());
+}
+
+function appendInline(parent, text) {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>()]+|(?:[A-Za-z]:\\|\\\\)[^\n\r\t<>|"']+|artifact_[A-Za-z0-9_]+)/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+    appendInlineToken(parent, match[0]);
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+}
+
+function appendInlineToken(parent, token) {
+  const markdownLink = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+  if (markdownLink) {
+    parent.append(createSmartLink(markdownLink[2], markdownLink[1]));
+    return;
+  }
+  if (token.startsWith('`') && token.endsWith('`')) {
+    parent.append(element('code', 'inline-code', token.slice(1, -1)));
+    return;
+  }
+  if (token.startsWith('**') && token.endsWith('**')) {
+    const strong = element('strong');
+    appendInline(strong, token.slice(2, -2));
+    parent.append(strong);
+    return;
+  }
+  const {value, suffix} = trimLinkToken(token);
+  parent.append(createSmartLink(value, value));
+  if (suffix) parent.append(document.createTextNode(suffix));
+}
+
+function createSmartLink(target, label) {
+  if (/^artifact_[A-Za-z0-9_]+$/.test(target)) return artifactAnchor(target, label);
+  const link = element('a', 'content-link', label || target);
+  if (/^https?:\/\//i.test(target)) {
+    link.href = target;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  } else if (isLocalFileTarget(target)) {
+    link.href = localFileHref(target);
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.classList.add('local-file-link');
+  } else {
+    link.href = target;
+  }
+  return link;
+}
+
+function artifactAnchor(artifactId, label = artifactId) {
+  const link = element('a', 'content-link artifact-link', label);
+  link.href = `/v1/artifacts/${encodeURIComponent(artifactId)}/download`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
+function trimLinkToken(token) {
+  const match = /^(.*?)([.,;:!?，。；：！？）)]*)$/.exec(token);
+  return {value: match && match[1] ? match[1] : token, suffix: match ? match[2] : ''};
+}
+
+function isLocalFileTarget(value) {
+  return /^file:\/\//i.test(value || '') || /^[A-Za-z]:\\/.test(value || '') || /^\\\\/.test(value || '');
+}
+
+function localFileHref(value) {
+  if (/^file:\/\//i.test(value)) return value;
+  if (/^\\\\/.test(value)) return `file:${value.replaceAll('\\', '/')}`;
+  return `file:///${value.replaceAll('\\', '/')}`;
+}
+
+function renderDeliverables(message) {
+  if (message.role !== 'assistant' || !message.finalAssistantForRun) return null;
+  const artifacts = (message.runArtifacts || []).filter(isFinalArtifact);
+  const urls = collectMatches(message.content || '', /https?:\/\/[^\s<>()]+/g);
+  const paths = collectMatches(message.content || '', /(?:[A-Za-z]:\\|\\\\)[^\n\r\t<>|"']+/g)
+    .filter(value => !/^https?:/i.test(value));
+  const workspaceFiles = collectWorkspaceFiles(message.content || '');
+  const artifactIds = collectMatches(message.content || '', /artifact_[A-Za-z0-9_]+/g)
+    .filter(id => !artifacts.some(artifact => artifact.id === id));
+  if (!artifacts.length && !urls.length && !paths.length && !workspaceFiles.length && !artifactIds.length) return null;
+  const panel = element('section', 'deliverables');
+  panel.append(element('div', 'deliverables-title', '交付成果'));
+  const grid = element('div', 'deliverables-grid');
+  artifacts.forEach(artifact => grid.append(renderArtifactCard(artifact)));
+  artifactIds.forEach(id => grid.append(renderArtifactIdCard(id)));
+  urls.forEach(url => grid.append(renderLinkCard('网址', url, url, 'url')));
+  workspaceFiles.forEach(path => grid.append(renderWorkspaceFileCard(message.runId, path)));
+  paths.forEach(path => grid.append(renderLocalFileCard(path)));
+  panel.append(grid);
+  return panel;
+}
+
+function isFinalArtifact(artifact) {
+  const type = (artifact.type || '').toLowerCase();
+  if (type === 'tool_result') return false;
+  const name = artifact.name || '';
+  if (['read_file', 'read_artifact', 'list_dir', 'execute_command'].includes(name)) return false;
+  return true;
+}
+
+function collectWorkspaceFiles(text) {
+  const values = [];
+  const seen = new Set();
+  const pattern = /(?:^|[\s`"'（(：:])([A-Za-z0-9_.\/-]+\.(?:html|htm|md|txt|pdf|docx?|pptx?|xlsx?|csv|json|xml|png|jpe?g|gif))(?![\w.-])/g;
+  for (const match of text.matchAll(pattern)) {
+    const path = trimLinkToken(match[1]).value.replaceAll('\\', '/');
+    if (!path || path.includes('://') || path.startsWith('/') || path.startsWith('../') || path.includes('/../')) continue;
+    if (!seen.has(path)) {
+      seen.add(path);
+      values.push(path);
+    }
+  }
+  return values.slice(0, 8);
+}
+
+function collectMatches(text, regex) {
+  const values = [];
+  const seen = new Set();
+  for (const match of text.matchAll(regex)) {
+    const token = trimLinkToken(match[0]).value.trim();
+    if (token && !seen.has(token)) {
+      seen.add(token);
+      values.push(token);
+    }
+  }
+  return values.slice(0, 12);
+}
+
+function renderArtifactCard(artifact) {
+  const card = element('article', 'deliverable-card artifact');
+  card.append(element('strong', '', artifact.name || artifact.id));
+  card.append(element('small', '', `${artifact.type || 'artifact'} · ${formatBytes(artifact.size || 0)}`));
+  const actions = element('div', 'deliverable-actions');
+  const open = element('button', 'secondary', '打开');
+  open.onclick = () => openArtifactPreview(artifact.id);
+  const download = element('button', 'secondary', '下载');
+  download.onclick = () => downloadArtifact(artifact.id);
+  const preview = element('button', 'secondary', '预览');
+  preview.onclick = async () => {
+    try {
+      const existing = card.querySelector('.artifact-preview');
+      if (existing) { existing.remove(); return; }
+      const value = await api(`/v1/artifacts/${encodeURIComponent(artifact.id)}/content?limit=12000`);
+      card.append(element('pre', 'artifact-preview', value.content || ''));
+    } catch (error) {
+      showNotice(`Artifact 预览失败：${error.message}`, true);
+    }
+  };
+  actions.append(open, download, preview);
+  card.append(actions);
+  return card;
+}
+
+function renderArtifactIdCard(id) {
+  const card = element('article', 'deliverable-card artifact');
+  card.append(element('strong', '', id));
+  card.append(element('small', '', 'Artifact 引用'));
+  const actions = element('div', 'deliverable-actions');
+  const open = element('button', 'secondary', '打开');
+  open.onclick = () => openArtifactPreview(id);
+  const download = element('button', 'secondary', '下载');
+  download.onclick = () => downloadArtifact(id);
+  actions.append(open, download);
+  card.append(actions);
+  return card;
+}
+
+function renderLinkCard(kind, label, href, type) {
+  const card = element('article', `deliverable-card ${type || ''}`);
+  card.append(element('strong', '', kind));
+  const link = element('a', 'content-link', label);
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  card.append(link);
+  return card;
+}
+
+function renderLocalFileCard(path) {
+  const card = renderLinkCard('本地文件', path, localFileHref(path), 'file');
+  card.append(element('small', '', '浏览器允许 file 链接时可直接打开'));
+  const actions = element('div', 'deliverable-actions');
+  const copy = element('button', 'secondary', '复制路径');
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(path);
+      showNotice('路径已复制');
+    } catch {
+      showNotice(path);
+    }
+  };
+  actions.append(copy);
+  card.append(actions);
+  return card;
+}
+
+function renderWorkspaceFileCard(runId, path) {
+  const card = element('article', 'deliverable-card workspace-file');
+  card.append(element('strong', '', path));
+  card.append(element('small', '', '工作区文件'));
+  const actions = element('div', 'deliverable-actions');
+  const open = element('button', 'secondary', '打开');
+  open.onclick = () => openWorkspaceFilePreview(runId, path);
+  const download = element('button', 'secondary', '下载');
+  download.onclick = () => downloadWorkspaceFile(runId, path);
+  actions.append(open, download);
+  card.append(actions);
+  return card;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function renderMessage(message) {
@@ -290,8 +710,10 @@ function renderMessage(message) {
   const body = element('div', 'body');
   body.append(
     element('div', 'who', message.role === 'user' ? '你' : 'PaiCLI'),
-    element('div', 'text', message.content || '')
+    renderRichText(message.content || '', 'text')
   );
+  const deliverables = renderDeliverables(message);
+  if (deliverables) body.append(deliverables);
   if (message.reasoningContent) {
     const reasoning = element('details', 'reason');
     reasoning.append(
@@ -304,16 +726,38 @@ function renderMessage(message) {
   $('stack').append(row);
 }
 
-async function loadMessages() {
+async function loadMessages(options = {}) {
   if (!state.sessionId) return renderEmpty();
+  const forceScroll = Boolean(options.forceScroll);
+  const saved = options.restoreSaved ? savedMessageScroll(state.sessionId) : null;
+  const shouldFollow = forceScroll || (!saved && messagesNearBottom());
+  const previousTop = $('messages').scrollTop;
+  const previousHeight = $('messages').scrollHeight;
   const messages = await api(`/v1/sessions/${state.sessionId}/messages`);
+  markFinalAssistantMessages(messages);
   $('stack').replaceChildren();
   const hasPlans = await renderSessionPlanPanel();
   await renderCollaborationBoard();
   messages.forEach(renderMessage);
   if (!$('stack').children.length) renderEmpty();
   configurePlanPolling(hasPlans);
-  scrollBottom();
+  if (saved) {
+    if (saved.atBottom) scrollBottom();
+    else restoreMessageScroll(saved.top, saved.height);
+  } else if (shouldFollow) scrollBottom();
+  else restoreMessageScroll(previousTop, previousHeight);
+}
+
+function markFinalAssistantMessages(messages) {
+  const finalByRun = new Map();
+  messages.forEach(message => {
+    if (message.role === 'assistant' && message.runId && message.content && message.content.trim()) {
+      finalByRun.set(message.runId, message.id);
+    }
+  });
+  messages.forEach(message => {
+    message.finalAssistantForRun = Boolean(message.runId && finalByRun.get(message.runId) === message.id);
+  });
 }
 
 async function renderSessionPlanPanel() {
@@ -330,8 +774,7 @@ async function renderSessionPlanPanel() {
     values.forEach(view => list.append(renderSessionPlanItem(view)));
     panel.append(title, list);
     $('stack').append(panel);
-    return values.some(view => ['ACTIVE', 'WAITING_APPROVAL'].includes(view.plan.status)
-      || (view.steps || []).some(step => !['COMPLETED', 'FAILED', 'SKIPPED', 'CANCELED'].includes(step.status)));
+    return values.some(view => ['ACTIVE', 'WAITING_APPROVAL'].includes(view.plan.status));
   } catch (error) {
     const panel = element('section', 'session-plan-panel');
     panel.append(element('div', 'form-error', `Plan 面板加载失败：${error.message}`));
@@ -390,6 +833,14 @@ async function renderCollaborationBoard() {
     if (!board.enabled && !board.tasks.length) return;
     const panel = element('section', 'collaboration-board');
     const policy = board.policy || {};
+    if (board.parent?.sessionId) {
+      const navigation = element('div', 'collaboration-navigation');
+      navigation.append(
+        element('span', '', `当前为子专家会话 · ${board.parent.agentName || '协作任务'}`),
+        actionButtonElement('返回父专家', () => openParentSession(board.parent))
+      );
+      panel.append(navigation);
+    }
     const title = element('div', 'section-title');
     title.append(
       element('h3', '', '协作任务看板'),
@@ -416,15 +867,97 @@ function renderCollaborationTask(task) {
     element('span', `status ${terminal.has(task.status) ? '' : 'active'}`, task.status || 'UNKNOWN')
   );
   item.append(head);
-  item.append(element('div', 'hint', `${profile.role || 'EXPERT'} · ${task.childRunId}`));
+  item.append(element('div', 'hint',
+    `${profile.role || 'EXPERT'} · ${task.childRunId} · step ${task.currentStep || 0} · session ${task.childSessionId}`));
   item.append(element('p', '', task.task || ''));
+  const actions = element('div', 'collaboration-actions');
+  const openChild = element('button', 'secondary', '打开子会话');
+  openChild.onclick = () => openChildSession(task.childSessionId);
+  const mountTrace = element('button', 'secondary', '挂载到执行详情');
+  mountTrace.onclick = () => mountChildTrace(task);
+  actions.append(openChild, mountTrace);
+  item.append(actions);
+  (task.pendingApprovals || []).forEach(approval => item.append(renderChildApproval(approval)));
   if (task.error) item.append(element('div', 'form-error', task.error));
+  if ((task.toolCalls || []).length || (task.events || []).length) {
+    const details = element('details', 'collaboration-trace');
+    const blocked = (task.pendingApprovals || []).length ? ' · 有待审批' : '';
+    details.append(element('summary', '', `子执行链路${blocked}`));
+    const trace = element('div', 'child-trace');
+    (task.toolCalls || []).forEach(call => trace.append(renderTraceLine('tool', `${call.status} · ${call.name}`, call.error)));
+    (task.events || []).forEach(event => trace.append(renderTraceLine('event', `${event.type} #${event.id}`, event.data)));
+    details.append(trace);
+    item.append(details);
+  }
   if (task.result) {
     const details = element('details', 'collaboration-result');
     details.append(element('summary', '', '查看专家结果'), element('pre', '', task.result));
     item.append(details);
   }
   return item;
+}
+
+function actionButtonElement(label, action) {
+  const button = element('button', 'secondary', label);
+  button.type = 'button';
+  button.onclick = action;
+  return button;
+}
+
+async function openParentSession(parent) {
+  if (!parent?.sessionId) return;
+  await openChildSession(parent.sessionId);
+}
+
+function renderChildApproval(approval) {
+  const card = element('div', 'approval child-approval');
+  card.append(element('strong', '', '子 Agent 等待确认'), element('div', '', approval.reason || '需要审批'));
+  const actions = element('div', 'actions');
+  const approve = element('button', 'primary', '允许');
+  const deny = element('button', 'primary deny', '拒绝');
+  approve.onclick = () => resolveApproval(approval.id, 'APPROVED');
+  deny.onclick = () => resolveApproval(approval.id, 'DENIED');
+  actions.append(approve, deny);
+  card.append(actions);
+  return card;
+}
+
+function renderTraceLine(kind, title, detail = '') {
+  const line = element('div', `trace-line ${kind}`);
+  line.append(element('span', '', title));
+  if (detail) line.append(element('small', '', String(detail).slice(0, 260)));
+  return line;
+}
+
+async function openChildSession(sessionId) {
+  if (!sessionId) return;
+  let session = state.sessions.find(item => item.id === sessionId);
+  if (!session) {
+    try { session = await api(`/v1/sessions/${sessionId}`); }
+    catch (error) { return showNotice(`打开子会话失败：${error.message}`, true); }
+  }
+  await selectSession(session.id, false);
+  $('chatTitle').textContent = session.title || '子 Agent 会话';
+}
+
+function mountChildTrace(task) {
+  if (!task) return;
+  clearEvents();
+  const header = {id: '', type: 'agent.mounted', data: JSON.stringify({
+    agentName: task.agentName, childRunId: task.childRunId, childSessionId: task.childSessionId,
+    status: task.status, currentStep: task.currentStep
+  })};
+  addEvent(header, parseData(header.data));
+  (task.pendingApprovals || []).forEach(approval => addEvent({
+    id: approval.id, type: 'agent.approval.pending', data: JSON.stringify(approval)
+  }, approval));
+  (task.toolCalls || []).forEach(call => addEvent({
+    id: call.id, type: `agent.tool.${String(call.status || '').toLowerCase()}`, data: JSON.stringify(call)
+  }, call));
+  (task.events || []).forEach(event => addEvent({
+    id: event.id, type: `agent.${event.type}`, data: event.data || '{}'
+  }, parseData(event.data)));
+  showNotice('已挂载子 Agent 执行链路');
 }
 
 function renderSessions() {
@@ -509,6 +1042,7 @@ async function refreshSessions() {
 async function selectSession(id, rerender = true) {
   state.stream?.abort();
   const previousSession = state.sessionId;
+  if (previousSession) rememberMessageScroll(previousSession);
   if (previousSession && previousSession !== id && state.pendingAttachments.length) {
     await Promise.allSettled(state.pendingAttachments.map(attachment =>
       api(`/v1/sessions/${previousSession}/attachments/${attachment.id}`, {method: 'DELETE'})));
@@ -519,7 +1053,11 @@ async function selectSession(id, rerender = true) {
   clearPendingAttachments();
   localStorage.setItem('paicli_session', id);
   if (rerender) renderSessions();
-  const session = state.sessions.find(item => item.id === id);
+  let session = state.sessions.find(item => item.id === id);
+  if (!session) {
+    try { session = await api(`/v1/sessions/${id}`); }
+    catch (_) { session = null; }
+  }
   $('chatTitle').textContent = session?.title || '对话';
   $('runMeta').textContent = session ? `项目 · ${session.projectKey}` : '尚未开始';
   $('input').value = localStorage.getItem(`paicli_draft_${id}`) || '';
@@ -528,16 +1066,30 @@ async function selectSession(id, rerender = true) {
   await refreshComposerOptions();
   setStatus();
   clearEvents();
-  await loadMessages();
-  const runs = await api(`/v1/sessions/${id}/runs`);
-  if (runs.length) {
-    state.runId = runs[0].id;
-    $('runMeta').textContent = state.runId;
-    setStatus(runs[0].status);
-    await loadApprovals();
-    watch(state.runId);
-  }
+  await syncLatestRun({watch: false});
+  await loadMessages({restoreSaved: true, forceScroll: !savedMessageScroll(id)});
+  if (state.runId && state.runStatus && !terminal.has(state.runStatus)) watch(state.runId);
   $('sidebar').classList.remove('open');
+}
+
+async function syncLatestRun(options = {}) {
+  if (!state.sessionId) return null;
+  const runs = await api(`/v1/sessions/${state.sessionId}/runs`);
+  if (!runs.length) {
+    state.runId = '';
+    $('runMeta').textContent = '尚未开始';
+    setStatus();
+    await loadApprovals();
+    return null;
+  }
+  const run = runs[0];
+  const changed = state.runId !== run.id;
+  state.runId = run.id;
+  $('runMeta').textContent = run.id;
+  setStatus(run.status);
+  await loadApprovals();
+  if (options.watch !== false && !terminal.has(run.status) && (changed || !state.stream)) watch(run.id);
+  return run;
 }
 
 async function createSession() {
@@ -664,7 +1216,7 @@ async function sendMessage() {
     state.runId = run.id;
     $('runMeta').textContent = run.id;
     setStatus(run.status);
-    await loadMessages();
+    await loadMessages({forceScroll: true});
     clearEvents();
     watch(run.id);
   } catch (error) {
@@ -693,13 +1245,17 @@ async function createPlanFromComposer(text = null, autoStart = true) {
     clearPendingAttachments();
     resizeInput();
     if (autoStart) {
-      await api(`/v1/plans/${view.plan.id}/start`, {method: 'POST', body: '{}'});
-      const report = await api(`/v1/plans/${view.plan.id}/dispatch`, {method: 'POST', body: '{}'});
-      showNotice(`Plan 已创建并调度：启动 ${report.startedSteps} 步`);
+      const started = await api(`/v1/plans/${view.plan.id}/start`, {method: 'POST', body: '{}'});
+      const activeSteps = (started.steps || []).filter(step =>
+        ['RUNNING', 'WAITING_JOB', 'VALIDATING', 'COMPLETED'].includes(step.status)).length;
+      showNotice(activeSteps
+        ? `Plan 已创建并启动：首批 ${activeSteps} 步已进入执行`
+        : 'Plan 已创建并启动：调度器正在领取首批步骤');
     } else {
       showNotice('Plan 已创建');
     }
-    await loadMessages();
+    await loadMessages({forceScroll: true});
+    await syncLatestRun();
     await loadPlans();
   } catch (error) {
     showNotice(`Plan 创建失败：${error.message}`, true);
@@ -1009,9 +1565,10 @@ function flushLiveText() {
   if (state.textFrame) cancelAnimationFrame(state.textFrame);
   state.textFrame = 0;
   if (!state.pendingText) return;
+  const shouldFollow = messagesNearBottom();
   liveAssistant().text.textContent += state.pendingText;
   state.pendingText = '';
-  scrollBottom();
+  if (shouldFollow) scrollBottom();
 }
 
 function queueLiveText(text) {
@@ -1195,6 +1752,7 @@ async function watch(runId) {
 
 async function retryRun(branch) {
   if (!state.runId || !terminal.has(state.runStatus)) return;
+  if (branch) return branchRun();
   try {
     const result = await api(`/v1/runs/${state.runId}/retry`, {
       method: 'POST', body: JSON.stringify({
@@ -1203,17 +1761,21 @@ async function retryRun(branch) {
         agentProfileId: state.agentProfileId || null
       })
     });
-    if (branch) {
-      await refreshSessions();
-      await selectSession(result.sessionId);
-    } else {
-      state.runId = result.run.id;
-      $('runMeta').textContent = result.run.id;
-      setStatus(result.run.status);
-      await loadMessages();
-      watch(result.run.id);
-    }
-    showNotice(branch ? '已创建分支并重新执行' : '已重新执行');
+    state.runId = result.run.id;
+    $('runMeta').textContent = result.run.id;
+    setStatus(result.run.status);
+    await loadMessages({forceScroll: true});
+    watch(result.run.id);
+    showNotice('已重新执行');
+  } catch (error) { showNotice(`操作失败：${error.message}`, true); }
+}
+
+async function branchRun() {
+  try {
+    const session = await api(`/v1/runs/${state.runId}/branch`, {method: 'POST', body: '{}'});
+    await refreshSessions();
+    await selectSession(session.id);
+    showNotice('已创建分支，等待你的下一条消息');
   } catch (error) { showNotice(`操作失败：${error.message}`, true); }
 }
 
@@ -1425,10 +1987,11 @@ async function resolveEvaluationApproval(id, decision, executionId) {
 async function refreshComposerOptions() {
   try {
     const project = encodeURIComponent(currentProjectKey());
-    [state.templates, state.modelProfiles, state.agentProfiles] = await Promise.all([
+    [state.templates, state.modelProfiles, state.agentProfiles, state.agentTeams] = await Promise.all([
       api(`/v1/productivity/templates?projectKey=${project}`),
       api(`/v1/productivity/model-profiles?projectKey=${project}`),
-      api(`/v1/productivity/agent-profiles?projectKey=${project}`)
+      api(`/v1/productivity/agent-profiles?projectKey=${project}`),
+      api(`/v1/productivity/agent-teams?projectKey=${project}`)
     ]);
     const template = $('quickTemplate');
     template.replaceChildren(element('option', '', '快捷指令'));
@@ -1495,18 +2058,21 @@ async function applyTemplate(id) {
 async function loadProductivityData() {
   const project = encodeURIComponent(currentProjectKey());
   try {
-    const [usage, templates, profiles, agents, skills, queue, schedules, notifications] = await Promise.all([
+    const [usage, templates, profiles, agents, teams, skills, queue, schedules, notifications] = await Promise.all([
       api(`/v1/productivity/usage?projectKey=${project}&days=30`),
       api(`/v1/productivity/templates?projectKey=${project}`),
       api(`/v1/productivity/model-profiles?projectKey=${project}`),
       api(`/v1/productivity/agent-profiles?projectKey=${project}`),
+      api(`/v1/productivity/agent-teams?projectKey=${project}`),
       api(`/v1/skills?projectKey=${project}`),
       api(`/v1/productivity/queue?projectKey=${project}`),
       api(`/v1/productivity/schedules?projectKey=${project}`),
       api(`/v1/productivity/notifications?projectKey=${project}`)
     ]);
-    state.templates = templates; state.modelProfiles = profiles; state.agentProfiles = agents; state.availableSkills = skills;
-    renderUsage(usage); renderTemplates(templates); renderAgentStudio(agents); renderProfiles(profiles); renderQueue(queue);
+    state.templates = templates; state.modelProfiles = profiles; state.agentProfiles = agents;
+    state.agentTeams = teams; state.availableSkills = skills;
+    renderUsage(usage); renderTemplates(templates); renderAgentStudio(agents); renderAgentTeams(teams);
+    renderProfiles(profiles); renderQueue(queue);
     renderSchedules(schedules, templates); renderNotifications(notifications);
   } catch (error) { showNotice(`效率工作台加载失败：${error.message}`, true); }
 }
@@ -1581,6 +2147,7 @@ function renderAgentStudio(values = state.agentProfiles) {
       `角色 ${value.collaborationRole || 'EXPERT'}`,
       value.templateKey ? `模板 ${value.templateKey}@v${value.templateVersion || 0}` : '自定义专家',
       model ? `模型 ${model.name}` : '项目默认模型',
+      value.thinkingMode ? `思考 ${value.thinkingMode === 'enabled' ? (value.reasoningEffort || 'high') : '关闭'}` : '思考跟随对话',
       tools.length ? `工具 ${tools.slice(0, 8).join(', ')}` : '工具不限制'
     ].join(' · ');
     const selected = state.agentProfileId === value.id;
@@ -1593,6 +2160,38 @@ function renderAgentStudio(values = state.agentProfiles) {
     return item;
   }));
   if (!values.length) list.append(element('div', 'hint', '暂无专家模板；点击“补齐专家模板”安装 Leader、需求、实现、测试、审查和文档专家。'));
+}
+
+function renderAgentTeams(values = state.agentTeams) {
+  const list = $('agentTeamList');
+  if (!list) return;
+  list.replaceChildren(...values.map(team => {
+    const leader = state.agentProfiles.find(value => value.id === team.leaderAgentProfileId);
+    const members = parseStringListJson(team.memberAgentProfileIdsJson)
+      .map(id => state.agentProfiles.find(value => value.id === id)?.name || id);
+    const item = workbenchItem(
+      `${team.enabled ? '●' : '○'} ${team.name}`,
+      `${leader ? `Leader ${leader.name}` : 'Leader 已失效'} · ${members.length ? members.join('、') : '暂无成员'} · 最多 ${team.maxExperts} 人`
+    );
+    if (team.enabled) actionButton(item, '用于协作', () => useAgentTeam(team), true);
+    actionButton(item, '编辑', () => openAgentTeamDialog(team));
+    actionButton(item, '删除', async () => {
+      if (!confirm(`删除执行小队“${team.name}”？`)) return;
+      await api(`/v1/productivity/agent-teams/${team.id}`, {method: 'DELETE'});
+      if (state.selectedAgentTeamId === team.id) state.selectedAgentTeamId = '';
+      await refreshAgentStudio();
+    });
+    return item;
+  }));
+  if (!values.length) list.append(element('div', 'hint', '暂无执行小队；新建后可在专家协作首页一键套用。'));
+}
+
+function useAgentTeam(team) {
+  state.selectedAgentTeamId = team.id;
+  state.homeMode = 'collaboration';
+  localStorage.setItem('paicli_home_mode', 'collaboration');
+  $('agentStudioDialog').close();
+  showHome();
 }
 
 function selectAgentForChat(value) {
@@ -1633,15 +2232,18 @@ function agentStudioMetric(name, value) {
 
 async function refreshAgentStudio() {
   const project = encodeURIComponent(currentProjectKey());
-  const [profiles, agents, skills] = await Promise.all([
+  const [profiles, agents, skills, teams] = await Promise.all([
     api(`/v1/productivity/model-profiles?projectKey=${project}`),
     api(`/v1/productivity/agent-profiles?projectKey=${project}`),
-    api(`/v1/skills?projectKey=${project}`)
+    api(`/v1/skills?projectKey=${project}`),
+    api(`/v1/productivity/agent-teams?projectKey=${project}`)
   ]);
   state.modelProfiles = profiles;
   state.agentProfiles = agents;
   state.availableSkills = skills;
+  state.agentTeams = teams;
   renderAgentStudio(agents);
+  renderAgentTeams(teams);
 }
 
 async function openAgentStudio() {
@@ -1678,12 +2280,15 @@ async function startCollaboration() {
   if (!leader) return setFormError(ids.error, '没有可用 Leader，请先到“专家创建”补齐或创建专家模板');
   const allowedAgentProfileIds = [...document.querySelectorAll('[data-collaboration-agent]:checked')]
       .map(input => input.value).filter(Boolean);
+  const selectedTeam = state.agentTeams.find(value =>
+    value.id === state.selectedAgentTeamId && value.enabled);
   const complexity = $('homeCollaborationComplexity').value;
   const risk = $('homeCollaborationRisk').value;
-  const maxExperts = Math.max(0, Math.min(Number($('homeCollaborationMaxExperts').value || 3), 6));
+  const maxExperts = Math.max(1, Math.min(Number($('homeCollaborationMaxExperts').value || 3), 20));
   const title = `协作：${objective.slice(0, 42)}`;
   const prompt = [
     `协作目标：${objective}`,
+    selectedTeam ? `执行小队：${selectedTeam.name}。` : '执行小队：本次临时组合。',
     `任务复杂度：${complexity}；风险等级：${risk}；最多可派发专家数：${maxExperts}。`,
     allowedAgentProfileIds.length ? `本次只允许从这些 agent_profile_id 中选择：${allowedAgentProfileIds.join(', ')}` : '本次允许从全部启用专家中选择。',
     '',
@@ -1714,7 +2319,8 @@ async function startCollaboration() {
           risk,
           allowedAgentProfileIds,
           maxExperts,
-          maxDepth: $('homeCollaborationAllowExpertDelegation').checked ? 2 : 1,
+          maxDepth: selectedTeam?.maxDepth
+            || ($('homeCollaborationAllowExpertDelegation').checked ? 2 : 1),
           maxChildRuns: Math.max(maxExperts, 1),
           allowExpertDelegation: $('homeCollaborationAllowExpertDelegation').checked,
           requireReviewer: $('homeCollaborationRequireReviewer').checked,
@@ -1879,6 +2485,9 @@ function openAgentProfileDialog(profile = null) {
   fillSelect($('agentModelProfile'), state.modelProfiles.map(value => ({id: value.id, label: `${value.name} · ${value.model}`})), '使用项目默认模型');
   if (editing) $('agentModelProfile').value = profile.modelProfileId || '';
   else if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('agentModelProfile').value = state.modelProfileId;
+  $('agentThinkingMode').value = editing ? profile.thinkingMode || '' : '';
+  $('agentReasoningEffort').value = editing ? profile.reasoningEffort || '' : '';
+  $('agentReasoningEffort').disabled = $('agentThinkingMode').value === 'disabled';
   fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
       editing ? parseStringListJson(profile.toolNamesJson) : defaultToolsForRole($('agentRole').value));
   fillTagPicker($('agentSkills'), $('agentSkillsPicker'), state.availableSkills.map(value => ({id: value.name, label: `${value.name} · ${value.description || value.source || ''}`})),
@@ -1901,6 +2510,8 @@ async function submitAgentProfile(event) {
       description: $('agentDescription').value.trim(),
       systemPrompt: $('agentPrompt').value.trim(),
       modelProfileId: $('agentModelProfile').value || null,
+      thinkingMode: $('agentThinkingMode').value,
+      reasoningEffort: $('agentThinkingMode').value === 'disabled' ? '' : $('agentReasoningEffort').value,
       toolNames: selectedValues($('agentTools')),
       skillNames: selectedValues($('agentSkills')),
       outputSchema: $('agentOutputSchema').value.trim(),
@@ -1916,6 +2527,80 @@ async function submitAgentProfile(event) {
     showNotice(id ? '智能体专家已保存' : '智能体专家已创建');
   } catch (error) { setFormError('agentProfileFormError', error.message); }
   finally { button.disabled = false; }
+}
+
+function openAgentTeamDialog(team = null) {
+  const editing = Boolean(team);
+  state.editingAgentTeamId = editing ? team.id : '';
+  $('agentTeamForm').reset();
+  $('agentTeamDialogTitle').textContent = editing ? '编辑执行小队' : '新建执行小队';
+  $('saveAgentTeam').textContent = editing ? '保存小队' : '创建小队';
+  $('agentTeamName').value = editing ? team.name : '';
+  $('agentTeamDescription').value = editing ? team.description || '' : '';
+  const leaders = state.agentProfiles
+    .filter(value => value.enabled && (value.collaborationRole || '').toUpperCase() === 'LEADER')
+    .map(value => ({id: value.id, label: value.name}));
+  fillSelect($('agentTeamLeader'), leaders, '选择 Leader');
+  if (editing) $('agentTeamLeader').value = team.leaderAgentProfileId;
+  const selectedMembers = new Set(editing ? parseStringListJson(team.memberAgentProfileIdsJson) : []);
+  const memberNodes = state.agentProfiles
+    .filter(value => value.enabled && (value.collaborationRole || '').toUpperCase() !== 'LEADER')
+    .map(value => {
+      const label = element('label', 'agent-choice');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = value.id;
+      input.dataset.agentTeamMember = 'true';
+      input.checked = selectedMembers.has(value.id);
+      label.append(input, element('strong', '', value.name),
+        element('small', '', `${value.collaborationRole || 'EXPERT'} · ${value.description || '未填写说明'}`));
+      return label;
+    });
+  $('agentTeamMembers').replaceChildren(...memberNodes);
+  if (!memberNodes.length) $('agentTeamMembers').append(element('div', 'hint', '暂无可用成员专家'));
+  $('agentTeamMaxExperts').value = String(editing ? team.maxExperts : 3);
+  $('agentTeamMaxDepth').value = String(editing ? team.maxDepth : 1);
+  $('agentTeamRequireReviewer').checked = editing && team.requireReviewer;
+  $('agentTeamRequireRunner').checked = editing && team.requireRunner;
+  $('agentTeamEnabled').checked = editing ? team.enabled : true;
+  setFormError('agentTeamFormError', leaders.length ? '' : '请先创建并启用一个 Leader');
+  $('agentTeamDialog').showModal();
+  $('agentTeamName').focus();
+}
+
+async function submitAgentTeam(event) {
+  event.preventDefault();
+  setFormError('agentTeamFormError');
+  const button = $('saveAgentTeam');
+  button.disabled = true;
+  try {
+    const id = state.editingAgentTeamId;
+    const members = [...document.querySelectorAll('[data-agent-team-member]:checked')]
+      .map(input => input.value);
+    await api(id ? `/v1/productivity/agent-teams/${id}` : '/v1/productivity/agent-teams', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify({
+        projectKey: currentProjectKey(),
+        name: $('agentTeamName').value.trim(),
+        description: $('agentTeamDescription').value.trim(),
+        leaderAgentProfileId: $('agentTeamLeader').value,
+        memberAgentProfileIds: members,
+        maxExperts: Number($('agentTeamMaxExperts').value || 1),
+        maxDepth: Number($('agentTeamMaxDepth').value || 1),
+        requireReviewer: $('agentTeamRequireReviewer').checked,
+        requireRunner: $('agentTeamRequireRunner').checked,
+        enabled: $('agentTeamEnabled').checked
+      })
+    });
+    $('agentTeamDialog').close();
+    state.editingAgentTeamId = '';
+    await Promise.all([refreshAgentStudio(), refreshComposerOptions()]);
+    showNotice(id ? '执行小队已保存' : '执行小队已创建');
+  } catch (error) {
+    setFormError('agentTeamFormError', error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderProfiles(values) {
@@ -2161,19 +2846,70 @@ async function sendKnowledgeFeedback(result, helpful) {
 async function loadManagedMemories() {
   try {
     const values = await api(`/v1/memories/managed?projectKey=${encodeURIComponent(currentProjectKey())}&limit=200`);
-    $('memoryList').replaceChildren(...values.map(memory => {
-      const source = memory.origin === 'automatic' ? `自动 · 置信度 ${Math.round(memory.confidence * 100)}%` : '人工';
-      const item = workbenchItem(`${memory.pinned ? '📌 ' : ''}${memory.memoryKey}`,
-        `${source} · ${memory.layer}/${memory.memoryType} · ${memory.content}`);
-      actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
-      actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
-      actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
-      if (values.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, values));
-      actionButton(item, '修订', () => openMemoryRevision(memory));
-      return item;
-    }));
-    if (!values.length) $('memoryList').append(element('div', 'hint', '暂无启用的 Memory'));
+    renderManagedMemories(values);
   } catch (error) { showNotice(`Memory 加载失败：${error.message}`, true); }
+}
+
+const MEMORY_LAYER_ORDER = ['L1', 'L2', 'L3'];
+const MEMORY_LAYER_LABELS = {
+  L1: 'L1 短期事实',
+  L2: 'L2 过程经验',
+  L3: 'L3 长期偏好'
+};
+
+function renderManagedMemories(values) {
+  const container = $('memoryList');
+  container.replaceChildren();
+  if (!values.length) {
+    container.append(element('div', 'hint', '暂无启用的 Memory'));
+    return;
+  }
+  const byLayer = new Map(MEMORY_LAYER_ORDER.map(layer => [layer, []]));
+  values.forEach(memory => {
+    const layer = MEMORY_LAYER_ORDER.includes(memory.layer) ? memory.layer : 'L3';
+    byLayer.get(layer).push(memory);
+  });
+  MEMORY_LAYER_ORDER.forEach(layer => {
+    const memories = [...byLayer.get(layer)].sort((left, right) =>
+      memoryConfidence(right) - memoryConfidence(left)
+      || String(left.memoryKey || '').localeCompare(String(right.memoryKey || ''), 'zh-Hans-CN'));
+    container.append(memoryLayerSection(layer, memories, values));
+  });
+}
+
+function memoryLayerSection(layer, memories, allMemories) {
+  const section = element('section', 'memory-layer-block');
+  const average = memories.length
+    ? Math.round(memories.reduce((sum, memory) => sum + memoryConfidence(memory), 0) / memories.length * 100)
+    : 0;
+  const title = element('div', 'memory-layer-title');
+  title.append(
+    element('strong', '', MEMORY_LAYER_LABELS[layer] || layer),
+    element('small', '', memories.length ? `${memories.length} 条 · 平均置信度 ${average}%` : '暂无 Memory')
+  );
+  const list = element('div', 'managed-list memory-layer-list');
+  if (memories.length) list.append(...memories.map(memory => memoryItem(memory, allMemories)));
+  else list.append(element('div', 'hint', `${layer} 暂无 Memory`));
+  section.append(title, list);
+  return section;
+}
+
+function memoryItem(memory, allMemories) {
+  const confidence = Math.round(memoryConfidence(memory) * 100);
+  const source = memory.origin === 'automatic' ? `自动 · 置信度 ${confidence}%` : `人工 · 置信度 ${confidence}%`;
+  const item = workbenchItem(`${memory.pinned ? '📌 ' : ''}${memory.memoryKey}`,
+    `${source} · ${memory.layer}/${memory.memoryType} · ${memory.content}`);
+  actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
+  actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
+  actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
+  if (allMemories.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, allMemories));
+  actionButton(item, '修订', () => openMemoryRevision(memory));
+  return item;
+}
+
+function memoryConfidence(memory) {
+  const value = Number(memory?.confidence);
+  return Number.isFinite(value) ? value : 0;
 }
 
 async function setMemoryState(id, value) {
@@ -2337,6 +3073,99 @@ async function downloadArtifact(id) {
   } catch (error) { showNotice(`下载失败：${error.message}`, true); }
 }
 
+async function openArtifactPreview(id) {
+  const preview = preparePreviewWindow('正在打开 Artifact...');
+  if (!preview) return showNotice('浏览器拦截了预览窗口，请允许弹窗后再试', true);
+  try {
+    const response = await fetch(`/v1/artifacts/${id}/download`, {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    await openBlobResponse(response, `artifact-${id}.txt`, preview);
+  } catch (error) {
+    preview.close();
+    showNotice(`打开 Artifact 失败：${error.message}`, true);
+  }
+}
+
+async function openWorkspaceFilePreview(runId, path) {
+  const preview = preparePreviewWindow('正在打开成果...');
+  if (!preview) return showNotice('浏览器拦截了预览窗口，请允许弹窗后再试', true);
+  try {
+    const response = await fetch(workspaceFileUrl(runId, path), {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    await openBlobResponse(response, path.split('/').pop() || 'workspace-file', preview);
+  } catch (error) {
+    preview.close();
+    showNotice(`打开文件失败：${error.message}`, true);
+  }
+}
+
+function preparePreviewWindow(message) {
+  const preview = window.open('about:blank', '_blank');
+  if (!preview) return null;
+  preview.opener = null;
+  try {
+    preview.document.title = 'PaiCLI 成果预览';
+    preview.document.body.style.cssText = 'margin:0;padding:18px;font:14px system-ui;background:#0f1115;color:#edf1f7;';
+    preview.document.body.textContent = message;
+  } catch (_) { }
+  return preview;
+}
+
+async function openArtifact(id) {
+  try {
+    const response = await fetch(`/v1/artifacts/${id}/download`, {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    await openBlobResponse(response, `artifact-${id}.txt`);
+  } catch (error) { showNotice(`打开 Artifact 失败：${error.message}`, true); }
+}
+
+async function openWorkspaceFile(runId, path) {
+  try {
+    const response = await fetch(workspaceFileUrl(runId, path), {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    await openBlobResponse(response, path.split('/').pop() || 'workspace-file');
+  } catch (error) { showNotice(`打开文件失败：${error.message}`, true); }
+}
+
+async function downloadWorkspaceFile(runId, path) {
+  try {
+    const response = await fetch(workspaceFileUrl(runId, path), {headers: headers(false)});
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    await downloadBlobResponse(response, path.split('/').pop() || 'workspace-file');
+  } catch (error) { showNotice(`下载文件失败：${error.message}`, true); }
+}
+
+function workspaceFileUrl(runId, path) {
+  return `/v1/runs/${encodeURIComponent(runId)}/workspace-file?path=${encodeURIComponent(path)}`;
+}
+
+async function openBlobResponse(response, fallbackName, previewWindow = null) {
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  if (previewWindow) previewWindow.location.href = url;
+  else showNotice('浏览器拦截了预览窗口，请允许弹窗后再试', true);
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+async function downloadBlobResponse(response, fallbackName) {
+  downloadBlob(await response.blob(), filenameFromResponse(response, fallbackName));
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function filenameFromResponse(response, fallbackName) {
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  return encoded ? decodeURIComponent(encoded) : fallbackName;
+}
+
 async function reuseArtifact(id) {
   if (!state.sessionId) return showNotice('请先选择或创建一个对话', true);
   try {
@@ -2394,10 +3223,24 @@ async function inspectPlan(id) {
       api(`/v1/plans/${id}/dag/batches`)
     ]);
     const steps = view.steps.map(step => `${step.status} · ${step.clientId} · ${step.title}${step.runId ? ` · run ${step.runId}` : ''}`).join('\n');
+    const edges = view.edges.map(edge => `${edge.type} · ${edge.fromStepId} → ${edge.toStepId} · ${edge.conditionExpression}${edge.type === 'REWORK' ? ` · ${edge.traversalCount}/${edge.maxTraversals}` : ''}`).join('\n') || '无';
+    const stateText = Object.entries(view.state.stepCounts || {}).map(([status, count]) => `${status}=${count}`).join(' · ') || '无步骤';
+    const blockerText = (view.state.blockers || []).map(blocker => `${blocker.kind} · ${blocker.stepId} · ${blocker.detail}`).join('\n') || '无';
     const jobText = jobs.map(job => `${job.status} · ${job.kind} · ${job.id}${job.runId ? ` · run ${job.runId}` : ''}`).join('\n') || '无';
     const checkText = checks.map(check => `${check.status} · ${check.name} · ${check.evidence || check.expected}`).join('\n') || '无';
     const batchText = batches.map(batch => `#${batch.ordinal} ${batch.readOnlyEligible ? 'read-only' : 'serial'} · ${batch.stepIds.join(', ')}`).join('\n') || '无';
-    alert(`Plan: ${view.plan.objective}\nStatus: ${view.plan.status}\n\nSteps:\n${steps}\n\nDAG Batches:\n${batchText}\n\nAsync Jobs:\n${jobText}\n\nValidation Checks:\n${checkText}`);
+    alert(`Plan: ${view.plan.objective}\nStatus: ${view.plan.status}\nState: ${stateText}\nTokens: ${view.state.totalTokens} · Event #${view.state.lastEventSequence}\n\nSteps:\n${steps}\n\nEdges:\n${edges}\n\nBlockers:\n${blockerText}\n\nDAG Batches:\n${batchText}\n\nAsync Jobs:\n${jobText}\n\nValidation Checks:\n${checkText}`);
+    const waitingStep = view.steps.find(step => step.status === 'WAITING_APPROVAL' && step.type === 'USER_APPROVAL');
+    if (waitingStep && confirm(`处理人工节点“${waitingStep.title}”？`)) {
+      const decision = (prompt('输入 APPROVED 批准，或 REJECTED 拒绝') || '').trim().toUpperCase();
+      if (!['APPROVED', 'REJECTED'].includes(decision)) return showNotice('未提交人工节点决策');
+      const reason = prompt('填写决策原因（可留空）') || '';
+      await api(`/v1/plan-steps/${waitingStep.id}/decision`, {
+        method: 'POST', body: JSON.stringify({decision, reason})
+      });
+      showNotice(`人工节点已${decision === 'APPROVED' ? '批准' : '拒绝'}`);
+      await loadPlans();
+    }
   } catch (error) { showNotice(`Plan 详情加载失败：${error.message}`, true); }
 }
 
@@ -2417,17 +3260,29 @@ async function loadApprovalPolicies() {
 }
 
 async function loadApprovals() {
-  $('approvals').replaceChildren();
-  if (!state.runId) return;
-  const visibleRunIds = new Set([state.runId]);
+  if (!state.runId) {
+    $('approvals').replaceChildren();
+    return;
+  }
+  const requestedRunId = state.runId;
+  let board = {tasks: []};
   try {
-    const board = await api(`/v1/runs/${state.runId}/collaboration`);
-    (board.tasks || []).forEach(task => visibleRunIds.add(task.childRunId));
+    board = await api(`/v1/runs/${requestedRunId}/collaboration`);
   } catch (_) { /* A normal Run has no collaboration board. */ }
-  const values = (await api('/v1/approvals')).filter(item => visibleRunIds.has(item.runId));
+  const values = await api(`/v1/approvals?runId=${encodeURIComponent(requestedRunId)}`);
+  if (state.runId !== requestedRunId) return;
+  const taskNames = new Map((board.tasks || []).map(task =>
+    [task.childRunId, task.agentName || task.profile?.name || '子专家']));
+  const cards = [];
   for (const approval of values) {
     const card = element('div', 'approval');
-    card.append(element('strong', '', '需要你的确认'), element('div', '', approval.reason));
+    const owner = approval.runId === state.runId ? '当前专家'
+      : taskNames.get(approval.runId) || '协作子专家';
+    card.append(
+      element('strong', '', `${owner}需要你的确认`),
+      element('div', 'approval-context', `Run ${approval.runId}`),
+      element('div', '', approval.reason)
+    );
     const actions = element('div', 'actions');
     const approve = element('button', 'primary', '仅本次允许');
     const approveSession = element('button', 'secondary', '本对话允许');
@@ -2439,8 +3294,18 @@ async function loadApprovals() {
     deny.onclick = () => resolveApproval(approval.id, 'DENIED');
     actions.append(approve, approveSession, approveProject, deny);
     card.append(actions);
-    $('approvals').append(card);
+    cards.push(card);
+    if (!state.notifiedApprovalIds.has(approval.id)) {
+      state.notifiedApprovalIds.add(approval.id);
+      if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('PaiCLI · 子专家等待审批', {body: `${owner}：${approval.reason}`});
+      }
+    }
   }
+  $('approvals').replaceChildren(...cards);
+  $('status').textContent = values.length ? `待审批 ${values.length}` : statusNames[state.runStatus] || '空闲';
+  $('status').className = `status${values.length || (state.runStatus && !terminal.has(state.runStatus)) ? ' active' : ''}`
+    + `${state.runStatus === 'FAILED' ? ' error' : ''}`;
 }
 
 async function resolveApproval(id, decision, rememberScope = null) {
@@ -2448,9 +3313,8 @@ async function resolveApproval(id, decision, rememberScope = null) {
     await api(`/v1/approvals/${id}`, {
       method: 'POST', body: JSON.stringify({decision, rememberScope})
     });
-    $('approvals').replaceChildren();
     showNotice(decision === 'APPROVED' ? '已允许，继续执行' : '已拒绝');
-    if (decision === 'APPROVED') setStatus('QUEUED');
+    await loadApprovals();
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -2539,12 +3403,14 @@ $('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
 $('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
 $('installAgentStarterPack').onclick = installAgentStarterPack;
 $('addAgentFromStudio').onclick = () => openAgentProfileDialog();
+$('addAgentTeam').onclick = () => openAgentTeamDialog();
 $('addTemplate').onclick = openTemplateDialog;
 $('addProfile').onclick = openProfileDialog;
 $('addSchedule').onclick = openScheduleDialog;
 $('addNotification').onclick = openNotificationDialog;
 $('cancelTemplate').onclick = () => $('templateDialog').close();
 $('cancelAgentProfile').onclick = () => { state.editingAgentProfileId = ''; $('agentProfileDialog').close(); };
+$('cancelAgentTeam').onclick = () => { state.editingAgentTeamId = ''; $('agentTeamDialog').close(); };
 $('cancelProfile').onclick = () => $('profileDialog').close();
 $('cancelSchedule').onclick = () => $('scheduleDialog').close();
 $('cancelNotification').onclick = () => $('notificationDialog').close();
@@ -2552,7 +3418,12 @@ $('cancelEvaluationSuite').onclick = () => $('evaluationSuiteDialog').close();
 $('cancelEvaluationCase').onclick = () => $('evaluationCaseDialog').close();
 $('templateForm').onsubmit = submitTemplate;
 $('agentProfileForm').onsubmit = submitAgentProfile;
+$('agentTeamForm').onsubmit = submitAgentTeam;
 $('agentProfileDialog').addEventListener('close', () => { state.editingAgentProfileId = ''; });
+$('agentTeamDialog').addEventListener('close', () => { state.editingAgentTeamId = ''; });
+$('agentThinkingMode').onchange = () => {
+  $('agentReasoningEffort').disabled = $('agentThinkingMode').value === 'disabled';
+};
 $('profileForm').onsubmit = submitProfile;
 $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
@@ -2580,6 +3451,7 @@ $('agentProfile').onchange = () => {
   state.agentProfileId = $('agentProfile').value;
   localStorage.setItem('paicli_agent_profile', state.agentProfileId);
 };
+$('messages').addEventListener('scroll', () => rememberMessageScroll(), {passive: true});
 $('modelProfile').onchange = () => {
   state.modelProfileId = $('modelProfile').value;
   localStorage.setItem('paicli_model_profile', state.modelProfileId);

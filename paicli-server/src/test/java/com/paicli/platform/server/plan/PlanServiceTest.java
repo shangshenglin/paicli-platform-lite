@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,6 +55,74 @@ class PlanServiceTest {
         assertThatThrownBy(() -> service.generate(null, "default", "cycle"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("cycle");
+    }
+
+    @Test
+    void regeneratesModelPlanOnceAfterDependencyValidationFailure() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<String> repairPrompt = new AtomicReference<>();
+        ModelClient model = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                if (calls.incrementAndGet() == 1) return ModelResponse.text(selfDependentPlan());
+                repairPrompt.set(request.messages().get(1).content());
+                return ModelResponse.text(oneStepPlan());
+            }
+
+            @Override
+            public String name() {
+                return "test";
+            }
+        };
+
+        var plan = service(runtime, model).generate(null, "default", "repair invalid plan");
+
+        assertThat(calls).hasValue(2);
+        assertThat(plan.status()).isEqualTo("WAITING_APPROVAL");
+        assertThat(repairPrompt.get()).contains("step_1 cannot depend on itself")
+                .contains("重新生成完整 JSON");
+    }
+
+    @Test
+    void normalizesGeneratedNonInteractiveManualStepToReact() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanService service = service(runtime, new JsonModelClient(manualAnalysisPlan()));
+
+        var plan = service.generate(null, "default", "inspect and repair");
+
+        assertThat(service.view(plan.id()).steps()).singleElement()
+                .satisfies(step -> {
+                    assertThat(step.type()).isEqualTo("ANALYSIS");
+                    assertThat(step.executionMode()).isEqualTo("REACT");
+                });
+    }
+
+    @Test
+    void resumesPreviouslyStuckNonInteractiveManualStep() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(oneStepPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
+        var session = runtime.createSession("stuck-manual-plan", "project-a");
+        var plan = service.create(session.id(), null, null, "inspect and repair",
+                manualAnalysisPlan(), "MANUAL_IMPORT");
+        service.start(plan.id());
+        var step = service.view(plan.id()).steps().get(0);
+        store.claimReadyStep(step.id(), "old-worker", 60).orElseThrow();
+        store.markStepWaitingApproval(step.id());
+
+        var report = execution.dispatchPlan(plan.id(), 1);
+
+        assertThat(report.startedSteps()).isEqualTo(1);
+        assertThat(report.refreshedSteps()).isEqualTo(1);
+        assertThat(service.view(plan.id()).steps()).singleElement()
+                .satisfies(resumed -> {
+                    assertThat(resumed.executionMode()).isEqualTo("REACT");
+                    assertThat(resumed.status()).isEqualTo("RUNNING");
+                    assertThat(resumed.runId()).isNotBlank();
+                });
     }
 
     @Test
@@ -429,6 +499,89 @@ class PlanServiceTest {
         assertThat(batches.get(1).readOnlyEligible()).isFalse();
     }
 
+    @Test
+    void routesConditionalBranchAfterPersistedHumanDecision() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(conditionalApprovalPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
+
+        var plan = service.generate(null, "default", "approve one branch");
+        service.start(plan.id());
+        execution.dispatchPlan(plan.id(), 1);
+
+        var waiting = service.view(plan.id()).steps().stream()
+                .filter(step -> step.type().equals("USER_APPROVAL")).findFirst().orElseThrow();
+        assertThat(waiting.status()).isEqualTo("WAITING_APPROVAL");
+        assertThat(service.state(plan.id()).waitingApprovalStepIds()).containsExactly(waiting.id());
+        assertThat(service.state(plan.id()).blockers()).anySatisfy(blocker ->
+                assertThat(blocker.kind()).isEqualTo("HUMAN_APPROVAL"));
+
+        store.decideApprovalStep(waiting.id(), "APPROVED", "scope accepted");
+
+        var routed = service.view(plan.id());
+        assertThat(routed.edges()).filteredOn(edge -> edge.type().equals("CONDITIONAL"))
+                .hasSize(2);
+        assertThat(routed.steps()).filteredOn(step -> step.title().equals("Approved branch"))
+                .singleElement().satisfies(step -> assertThat(step.status()).isEqualTo("READY"));
+        assertThat(routed.steps()).filteredOn(step -> step.title().equals("Rejected branch"))
+                .singleElement().satisfies(step -> assertThat(step.status()).isEqualTo("SKIPPED"));
+        assertThat(routed.steps()).filteredOn(step -> step.title().equals("Rejected follow-up"))
+                .singleElement().satisfies(step -> assertThat(step.status()).isEqualTo("SKIPPED"));
+
+        var approvedBranch = routed.steps().stream()
+                .filter(step -> step.title().equals("Approved branch")).findFirst().orElseThrow();
+        store.completeStep(approvedBranch.id(), "approved route completed");
+        var merge = service.view(plan.id()).steps().stream()
+                .filter(step -> step.title().equals("Merge result")).findFirst().orElseThrow();
+        assertThat(merge.status()).isEqualTo("READY");
+        store.completeStep(merge.id(), "merged selected route");
+        assertThat(service.view(plan.id()).plan().status()).isEqualTo("COMPLETED");
+        assertThat(store.events(plan.id(), 0, 50)).extracting("type")
+                .contains("plan_step.approval_approved", "plan_edge.condition_matched",
+                        "plan_edge.condition_unmatched", "plan_edge.dependency_unreachable");
+        assertThat(store.validationChecks(plan.id(), 20))
+                .filteredOn(check -> check.stepId().equals(routed.steps().stream()
+                        .filter(step -> step.title().equals("Rejected branch")).findFirst().orElseThrow().id()))
+                .singleElement().satisfies(check -> assertThat(check.status()).isEqualTo("SKIPPED"));
+    }
+
+    @Test
+    void reworksOnlyTheFailedBranchWithinTraversalLimit() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(reworkPlan()), mapper);
+
+        var plan = service.generate(null, "default", "repair then validate");
+        service.start(plan.id());
+        var firstView = service.view(plan.id());
+        var repair = firstView.steps().stream().filter(step -> step.title().equals("Repair"))
+                .findFirst().orElseThrow();
+        var validate = firstView.steps().stream().filter(step -> step.title().equals("Validate"))
+                .findFirst().orElseThrow();
+        store.completeStep(repair.id(), "repair attempt one");
+        store.failStepValidation(validate.id(), "validation failed", "bad", "evidence");
+
+        var retried = service.view(plan.id());
+        assertThat(retried.plan().status()).isEqualTo("ACTIVE");
+        assertThat(retried.steps()).filteredOn(step -> step.id().equals(repair.id()))
+                .singleElement().satisfies(step -> assertThat(step.status()).isEqualTo("READY"));
+        assertThat(retried.steps()).filteredOn(step -> step.id().equals(validate.id()))
+                .singleElement().satisfies(step -> assertThat(step.status()).isEqualTo("PENDING"));
+        assertThat(retried.edges()).filteredOn(edge -> edge.type().equals("REWORK"))
+                .singleElement().satisfies(edge -> assertThat(edge.traversalCount()).isEqualTo(1));
+
+        store.completeStep(repair.id(), "repair attempt two");
+        store.failStepValidation(validate.id(), "validation failed again", "bad", "evidence");
+        assertThat(service.view(plan.id()).plan().status()).isEqualTo("FAILED");
+        assertThat(store.findStep(validate.id()).orElseThrow().lastFailureClass())
+                .isEqualTo("VALIDATION_FAILED");
+        assertThat(store.events(plan.id(), 0, 50)).extracting("type")
+                .contains("plan_edge.rework_routed", "plan.failed");
+    }
+
     private PlanService service(SqliteRuntimeStore runtime, ModelClient model) {
         return new PlanService(new PlanStore(properties()), new PlanParser(mapper), runtime, model, mapper);
     }
@@ -504,6 +657,30 @@ class PlanServiceTest {
                 """;
     }
 
+    private static String selfDependentPlan() {
+        return """
+                {
+                  "objective": "invalid self dependency",
+                  "summary": "Invalid plan.",
+                  "steps": [
+                    {"client_id":"step_1","title":"First","description":"First","type":"ANALYSIS","execution_mode":"REACT","dependencies":["step_1"],"done_criteria":["done"]}
+                  ]
+                }
+                """;
+    }
+
+    private static String manualAnalysisPlan() {
+        return """
+                {
+                  "objective": "inspect and repair",
+                  "summary": "Inspect the existing error before repairing it.",
+                  "steps": [
+                    {"client_id":"step_1","title":"Inspect errors","description":"Read the existing errors and files","type":"ANALYSIS","execution_mode":"MANUAL","dependencies":[],"done_criteria":["run_status:COMPLETED"]}
+                  ]
+                }
+                """;
+    }
+
     private static String twoStepPlan() {
         return """
                 {
@@ -525,6 +702,42 @@ class PlanServiceTest {
                   "steps": [
                     {"client_id":"patch_a","title":"Patch first","description":"Patch first section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":10},
                     {"client_id":"patch_b","title":"Patch second","description":"Patch second section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":1}
+                  ]
+                }
+                """;
+    }
+
+    private static String conditionalApprovalPlan() {
+        return """
+                {
+                  "objective": "approve one branch",
+                  "summary": "Route a persisted human decision.",
+                  "steps": [
+                    {"client_id":"approval","title":"Approve scope","description":"Approve scope","type":"USER_APPROVAL","execution_mode":"MANUAL","dependencies":[],"done_criteria":["approved"]},
+                    {"client_id":"approved","title":"Approved branch","description":"Continue","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":["done"]},
+                    {"client_id":"rejected","title":"Rejected branch","description":"Stop safely","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":["done"]},
+                    {"client_id":"rejected_follow","title":"Rejected follow-up","description":"Only follows rejection","type":"ANALYSIS","execution_mode":"NONE","dependencies":["rejected"],"done_criteria":["done"]},
+                    {"client_id":"merge","title":"Merge result","description":"Merge selected route","type":"SYNTHESIS","execution_mode":"NONE","dependencies":["approved","rejected_follow"],"done_criteria":["done"]}
+                  ],
+                  "edges": [
+                    {"from":"approval","to":"approved","type":"CONDITIONAL","condition":"ON_SUCCESS"},
+                    {"from":"approval","to":"rejected","type":"CONDITIONAL","condition":"ON_FAILURE"}
+                  ]
+                }
+                """;
+    }
+
+    private static String reworkPlan() {
+        return """
+                {
+                  "objective": "repair then validate",
+                  "summary": "Retry the failed branch once.",
+                  "steps": [
+                    {"client_id":"repair","title":"Repair","description":"Repair implementation","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["done"]},
+                    {"client_id":"validate","title":"Validate","description":"Validate implementation","type":"VALIDATION","execution_mode":"REACT","dependencies":["repair"],"done_criteria":["done"]}
+                  ],
+                  "edges": [
+                    {"from":"validate","to":"repair","type":"REWORK","condition":"ON_VALIDATION_FAILURE","max_traversals":1}
                   ]
                 }
                 """;

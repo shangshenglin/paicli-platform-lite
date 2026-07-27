@@ -38,7 +38,7 @@ PaiCLI Server
 
 - 配置 `PAICLI_API_KEY` 后保护 `/v1/**`；Actuator 和 OpenAPI 默认使用同一密钥。生产可设置 `PAICLI_SECURITY_REQUIRE_API_KEY=true`，缺少密钥时拒绝启动。
 - Console 仅把 API Key 保存在当前标签页 `sessionStorage`，并启用 CSP、防嵌套、MIME 嗅探防护、Referrer 与浏览器权限策略。
-- 删除 Session 前拒绝活跃 Run；随后同一事务删除 Approval、ToolCall、Event、Artifact、ModelUsage、MemoryExtraction、Message 和 Run。删除分组只把会话移到未分组。
+- 删除 Session 前拒绝活跃 Run；随后同一事务删除 Approval、ToolCall、Event、Artifact、ModelUsage、ModelAttempt、MemoryExtraction、CollaborationPolicy、AsyncJob、Message 和 Run。删除分组只把会话移到未分组。
 - 模型密钥只留在 Server，不进入 Sandbox、模型上下文或附件目录。
 
 ## P0 业务工作台
@@ -59,7 +59,7 @@ PaiCLI Server
 - 定时任务通过下拉框引用当前项目已保存模板，支持一次性、每日、每周和 Cron，并按周期动态收集时间字段；Cron 的首次与后续执行均按服务端系统时区计算。调度器创建普通 Session/Run，因此继续复用审批、审计、预算、恢复和通知链路。
 - 完成通知支持浏览器通知，以及由 Server 读取环境变量密钥的 Webhook、邮件网关或企业 IM 网关，事件覆盖完成、失败、等待审批和预算不足。
 - Session 可导出 Markdown、JSON 或带 ToolCall、Approval、Event、Artifact 清单的审计包；导出支持隐私脱敏，导入会在另一实例创建新的可继续对话 Session。
-- Skill 生命周期记录来源仓库、Ref、Commit、安装时间和作用域，安装前展示文件清单与权限声明，并支持启停、固定、检查更新、升级和单级回滚。MCP Server 可在 Console 新增、测试、启停和删除，敏感 Header 只保存环境变量名，工具 Schema、健康和熔断状态可见。
+- Skill 生命周期记录来源仓库、Ref、Commit、安装时间和作用域，GitHub tree/blob 链接可从路径推断 Skill 目录名，安装前展示文件清单与权限声明，并支持启停、固定、检查更新、升级和单级回滚。MCP Server 可在 Console 新增、测试、启停和删除，敏感 Header 只保存环境变量名，工具 Schema、健康和熔断状态可见。
 - 首页把效率工作台作为独立入口。用量区域将近 30 天固定指标与最近调用明细分离：指标使用固定网格，明细进入默认收起、限高滚动的表格式区域，避免 Session/模型维度增长时持续撑高页面。
 
 ## Agent 评测中心
@@ -80,7 +80,7 @@ Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把�
 
 - `plans` 保存目标、摘要、项目、可选 Session/Run 关联、状态、版本、来源、原始计划 JSON 和失败原因。
 - `plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、关键路径权重、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、调度幂等键和绑定的普通 `run_id`。Step 是任务层对象，不直接保存工具参数；执行时仍由普通 Run 和 ToolCall 落库真实动作。
-- `plan_edges` 保存 DAG 依赖，方向为“依赖 Step -> 被依赖 Step”。启动 Plan 时只把所有依赖已完成的根 Step 标为 `READY`。
+- `plan_edges` 保存 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类边，方向为“来源 Step -> 目标 Step”，并持久化确定性条件、优先级、最大回流次数和已回流次数。普通依赖满足后推进；条件未命中的分支自动跳过；失败回流只重置目标及其下游且受次数上限控制。
 - `plan_revisions` 保存 Replan 版本原因和原始 JSON；非 ACTIVE 草稿可整体替换，FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部尾部替换，已完成/跳过/取消步骤及其证据会被冻结保留。
 - `plan_events` 保存 Plan/Step 状态事件，供后续 Console 时间线和审计使用。
 - `async_jobs` 保存异步 Step 和外部长任务的状态、幂等键、payload、result、log 与错误，支持 poll 和 cancel。
@@ -88,7 +88,9 @@ Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把�
 
 Planner 调用现有 `ModelClient` 生成结构化 JSON。Server 会清理 Markdown code fence、重新映射模型给出的 step id、限制步骤数量、校验 Step 类型与执行模式、校验依赖存在和循环依赖。校验失败不会创建可执行 Plan。默认 Demo 模型会生成单步分析计划，保证本地无模型 Key 时仍能验证 API。
 
-计划启动后，`PlanExecutionService` 会先回收过期且尚未绑定 Run 的 `RUNNING` Step 租约，再按关键路径权重、下游数量和 ordinal 领取 `READY` Step。调度前会汇总活跃 Step 的资源读写集，阻止写写或读写冲突；冲突 Step 会写入 `RESOURCE_CONFLICT` 并短暂延后，供下一轮恢复调度。`REACT` Step 创建普通 Run；`ASYNC`/`ASYNC_JOB` Step 同时登记 Async Job，并通过 Job 关联 Run；`NONE` Step 可直接完成；`MANUAL`/`USER_APPROVAL` Step 进入等待人工状态。需要隔离的 Step 会创建内部 Session，并写入受控 workspace 引用；`GIT_WORKTREE` 在 Lite 版当前只表示预留的 worktree 隔离目录和引用，真正的 git worktree add/merge 留给后续工具层。Run 绑定成功后清除领取租约，避免恢复任务误判；如果 Worker 在领取后、创建 Run 前中断，下一轮调度会把过期 Step 恢复为 `READY` 并记录 `plan_step.lease_recovered` 事件。Run 进入 `COMPLETED` 只代表执行链路结束，Step 会先进入 `VALIDATING`，再由 `PlanValidator` 按 done criteria 检查最终回答或明确规则；验证结果会写入 `agent_feedback`，验证通过还会沉淀为过程型 Memory。验证通过才标记 Step/Validation Check/Async Job 完成并推进后续依赖，验证失败会进入 `VALIDATION_FAILED` 并让 Plan 失败。当前内置规则支持 `run_status:COMPLETED`、`answer_contains:<text>`、`answer_not_contains:<text>`、`file_exists:<path>`、`file_not_exists:<path>`、`file_contains:<path>::<text>`、`test_report:<path>` 和普通文字验收标准的最终回答证据匹配；文件与测试报告验证只读取受控 workspace root 下的相对路径。
+计划启动后，`PlanExecutionService` 会先回收过期且尚未绑定 Run 的 `RUNNING` Step 租约，再按关键路径权重、下游数量和 ordinal 领取 `READY` Step。调度前会汇总活跃 Step 的资源读写集，阻止写写或读写冲突；冲突 Step 会写入 `RESOURCE_CONFLICT` 并短暂延后。`REACT` Step 创建普通 Run；`ASYNC`/`ASYNC_JOB` Step 同时登记 Async Job；`NONE` Step 可直接完成；只有 `USER_APPROVAL` 进入 Human Node 等待状态，并通过持久化 decision API 决定后续条件边。条件命中、未命中和失败回流都写入 `plan_events`，未选分支及其 Validation Check 一起标记 `SKIPPED`。`REWORK` 命中时只重置目标节点和非回流边可达的下游分支，保留其他已完成分支；超过 `max_traversals` 后不再自动回流。Run 进入 `COMPLETED` 只代表执行链路结束，Step 会先进入 `VALIDATING`，验证通过才推进后续边；未被条件边处理且无法回流的失败才终止 Plan。
+
+`PlanState` 是从 Plan、Step、Edge、Event 和 ModelUsage 生成的结构化运行快照，包含状态计数、可运行/活跃/等待人工节点、阻塞原因、累计 Token 和最后事件序号。Console、恢复 Worker、API 客户端和后续 Evaluation 可以共享同一状态视图，不需要各自从聊天文本推断进度。
 
 本阶段已提供 `/v1/plans`、`/v1/plans/generate`、`/v1/plans/{id}/approve|start|dispatch|cancel|replan`、`/v1/plans/{id}/steps|events|jobs|validation-checks`、`/v1/plans/{id}/dag/batches`、`/v1/plan-steps/{id}/retry|skip` 和 `/v1/async-jobs`。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
 
@@ -102,7 +104,7 @@ Leader 通过 `get_agent_result` 读取子 Run 结果。该工具会把子 Run �
 
 阶段 5/6 增加的 `agent_feedback` 是 Plan 与 Agent Harness 的反馈层：每个绑定 Step 的 Run 终态都会记录验证状态、得分、失败分类和证据质量；验证通过时还会写过程型 Memory。这样后续调度、专家评分和人工复盘可以基于结构化事实，而不是翻聊天记录。
 
-更完整的链路、字段、状态机和边界已合并到 [PaiCLI Platform Lite 技术架构与面试讲解](../PaiCLI%20Platform%20Lite%20技术架构与面试讲解.md) 的“Plan Runtime、Multi-Agent 与 Agent Harness”章节。
+更完整的链路、字段、状态机、企业差距和面试表达见 [PaiCLI Platform Lite 技术架构与面试指南](../PaiCLI%20Platform%20Lite%20技术架构与面试指南.md) 的“持久化 Multi-Agent Harness”“Plan 与类型化 Graph Runtime”“Step 调度、租约、资源冲突、隔离与 Validation Gate”章节。
 
 ## Memory 与上下文
 
@@ -114,7 +116,7 @@ DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工�
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 21，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 23，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环，22 为专家思考配置和 Session 工作空间归属继承，23 为类型化 Plan Graph Edge 与确定性路由。
 
 连接策略和迁移目录与领域 Store 分离。定时维护执行被动 WAL checkpoint，并按显式配置清理过期 Event/Audit、孤儿 Artifact 和临时文件。Knowledge、Attachment 和 Artifact 采用临时文件、fsync、原子替换；索引中断后可按正文元数据重建。
 
@@ -137,7 +139,7 @@ Run 状态更新与对应 Event 在同一事务提交；终态不可回退。模
 
 ## 多模态与文档输入
 
-Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真实图片字节、尺寸与大小，必要时压缩；创建 Run 时把附件 id 原子绑定到 user Message，不能被另一 Run 重复绑定。只有当前 Run 的图片作为 OpenAI 兼容格式的 `image_url` 注入，历史图片不重复发送。
+Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真实图片字节、尺寸与大小，必要时压缩；创建 Run 时把附件 id 原子绑定到 user Message，不能被另一 Run 重复绑定。只有当前 Run 的图片作为 OpenAI 兼容格式的 `image_url` 注入，历史图片不重复发送。模型接口明确拒绝图片内容时，Client 只降级重试一次纯文本请求，并注入中文能力提示；视觉模型仍走原始多模态请求。
 
 文本、Markdown、PDF、Office、CSV、HTML、JSON、XML、RTF、EPUB 和 OpenDocument 由 Tika 提取并写入当前项目知识库，绑定当前 Run 后作为优先 RAG 来源。普通文档不整体塞入模型；扫描 PDF 在 OCR 不可用时保留为视觉 PDF，只把受限页图像注入当前 Run，也不会误报为已索引。
 

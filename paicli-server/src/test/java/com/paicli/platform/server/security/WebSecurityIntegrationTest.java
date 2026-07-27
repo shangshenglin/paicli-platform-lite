@@ -1,5 +1,9 @@
 package com.paicli.platform.server.security;
 
+import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.common.ToolRequest;
+import com.paicli.platform.server.agent.DelegationToolProvider;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -13,6 +17,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 @SpringBootTest(properties = {
         "paicli.data-dir=target/test-data/web-security",
@@ -28,8 +37,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @DirtiesContext
 class WebSecurityIntegrationTest {
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     @Autowired
     MockMvc mvc;
+
+    @Autowired
+    SqliteRuntimeStore store;
+
+    @Autowired
+    DelegationToolProvider delegationTools;
 
     @Test
     void protectsApiManagementAndOpenApiWithTheSameKey() throws Exception {
@@ -68,7 +84,11 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"agentProfileDialogTitle\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260719-collab-home-compose")))
+                        "id=\"agentThinkingMode\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"agentReasoningEffort\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "20260727-collaboration-teams")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -80,17 +100,76 @@ class WebSecurityIntegrationTest {
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"installEvaluationStarterPack\"")));
+                        "id=\"installEvaluationStarterPack\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("id=\"noticeDialog\""))));
         mvc.perform(get("/app.js"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "sessionStorage.getItem('paicli_api_key')")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "renderRichText")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "renderDeliverables")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "renderCollaborationBoard")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "savedMessageScroll")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "openWorkspaceFile")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "openWorkspaceFilePreview")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "preparePreviewWindow")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "window.alert")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "isFinalArtifact")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "response.status === 401")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openConnectionSettings")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
+    }
+
+    @Test
+    void sessionMessagesExposeRunArtifactsForConsoleDeliverables() throws Exception {
+        var session = store.createSession("deliverables", "deliverables-" + System.nanoTime());
+        var run = store.createRun(session.id(), "create html");
+        store.appendMessage(session.id(), run.id(), "assistant",
+                "Done: https://example.test and E:\\\\workspace\\\\snake.html");
+        var artifact = store.createArtifact(run.id(), "final", "snake.html",
+                run.id() + "/snake.html.txt", 42, "abc123");
+        store.completeRun(run.id());
+
+        mvc.perform(get("/v1/sessions/{sessionId}/messages", session.id())
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[1].content").value(org.hamcrest.Matchers.containsString("https://example.test")))
+                .andExpect(jsonPath("$[1].runArtifacts[0].id").value(artifact.id()))
+                .andExpect(jsonPath("$[1].runArtifacts[0].name").value("snake.html"));
+    }
+
+    @Test
+    void runWorkspaceFileCanBeOpenedWithApiKey() throws Exception {
+        var session = store.createSession("workspace file", "workspace-file-" + System.nanoTime());
+        var run = store.createRun(session.id(), "write html");
+        Path file = Path.of("target/test-data/web-security/workspaces", run.id(), "tetris.html");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "<!doctype html><title>Tetris</title>", StandardCharsets.UTF_8);
+
+        mvc.perform(get("/v1/runs/{runId}/workspace-file", run.id())
+                        .param("path", "tetris.html")
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", org.hamcrest.Matchers.startsWith("text/html")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("<title>Tetris</title>")));
+
+        mvc.perform(get("/v1/runs/{runId}/workspace-file", run.id())
+                        .param("path", "../secret.txt")
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().is4xxClientError());
     }
 
     @Test
@@ -124,5 +203,85 @@ class WebSecurityIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.templateId").value(id))
                 .andExpect(jsonPath("$.nextRunAt").isNotEmpty());
+    }
+
+    @Test
+    void branchEndpointCopiesHistoryWithoutStartingRetryRun() throws Exception {
+        var session = store.createSession("branch api", "branch-api-" + System.nanoTime());
+        var first = store.createRun(session.id(), "first");
+        store.appendMessage(session.id(), first.id(), "assistant", "first answer");
+        store.completeRun(first.id());
+        var source = store.createRun(session.id(), "second");
+        store.completeRun(source.id());
+
+        String body = mvc.perform(post("/v1/runs/{runId}/branch", source.id())
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").isNotEmpty())
+                .andReturn().getResponse().getContentAsString();
+
+        String branchSessionId = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(body).path("id").asText();
+        org.assertj.core.api.Assertions.assertThat(store.runsForSession(branchSessionId)).isEmpty();
+        org.assertj.core.api.Assertions.assertThat(store.messages(branchSessionId))
+                .extracting("content")
+                .containsExactly("first", "first answer");
+    }
+
+    @Test
+    void collaborationEndpointMountsChildRuntimeTraceOnParentRun() throws Exception {
+        var session = store.createSession("collaboration trace", "collab-trace-" + System.nanoTime());
+        var parent = store.createRun(session.id(), "parent");
+        store.saveCollaborationPolicy(parent.id(), true, "MEDIUM", "MEDIUM",
+                "[]", 3, 1, 3, 0, 0, false, false, false);
+        var spawn = store.createToolCall(parent.id(), "call-spawn", "spawn_agent", "{}", "spawn-" + parent.id());
+        var delegation = store.createOrGetDelegation(parent.id(), spawn.id(), "reviewer", "check output",
+                null, null);
+        var childRunId = delegation.childRunId();
+        var childTool = store.createToolCall(childRunId, "call-exec", "execute_command", "{}",
+                "exec-" + childRunId);
+        store.appendEvent(childRunId, "tool.requested", "{\"name\":\"execute_command\"}");
+        store.createApproval(childRunId, childTool.id(), "Tool 'execute_command' requires explicit approval before execution");
+        store.markRunStatus(childRunId, RunStatus.WAITING_APPROVAL);
+        store.completeRun(parent.id());
+        var continuation = store.createRun(session.id(), "continue");
+
+        mvc.perform(get("/v1/runs/{runId}/collaboration", continuation.id())
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.runId").value(parent.id()))
+                .andExpect(jsonPath("$.tasks[0].childRunId").value(childRunId))
+                .andExpect(jsonPath("$.tasks[0].status").value("WAITING_APPROVAL"))
+                .andExpect(jsonPath("$.tasks[0].pendingApprovals[0].reason").value(
+                        "Tool 'execute_command' requires explicit approval before execution"))
+                .andExpect(jsonPath("$.tasks[0].toolCalls[0].name").value("execute_command"))
+                .andExpect(jsonPath("$.tasks[0].events[0].type").value("run.queued"));
+    }
+
+    @Test
+    void agentResultReturnedToParentUsesBoundedSummary() throws Exception {
+        var session = store.createSession("delegation summary", "delegation-summary-" + System.nanoTime());
+        var parent = store.createRun(session.id(), "parent");
+        var spawn = store.createToolCall(parent.id(), "call-spawn-summary", "spawn_agent", "{}",
+                "spawn-summary-" + parent.id());
+        var delegation = store.createOrGetDelegation(parent.id(), spawn.id(), "writer", "write long result",
+                null, null);
+        String longAnswer = "child-result-".repeat(500);
+        store.appendMessage(delegation.childSessionId(), delegation.childRunId(), "assistant", longAnswer);
+        store.completeRun(delegation.childRunId());
+
+        var result = delegationTools.execute(new ToolRequest("tool-get-result", parent.id(), "get_agent_result",
+                Map.of("child_run_id", delegation.childRunId()), "get-result-" + parent.id()));
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result.content());
+
+        org.assertj.core.api.Assertions.assertThat(result.success()).isTrue();
+        org.assertj.core.api.Assertions.assertThat(json.path("child_session_id").asText())
+                .isEqualTo(delegation.childSessionId());
+        org.assertj.core.api.Assertions.assertThat(json.path("result_truncated").asBoolean()).isTrue();
+        org.assertj.core.api.Assertions.assertThat(json.path("result").asText()).hasSizeLessThan(longAnswer.length());
+        org.assertj.core.api.Assertions.assertThat(json.path("agent_result").path("summary").asText())
+                .contains("child agent result truncated");
     }
 }

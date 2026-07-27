@@ -102,12 +102,12 @@ public class RunProcessor {
                 handleTool(run, resumableTool.get());
                 return;
             }
-            if (modelProperties != null && (run.currentStep() >= modelProperties.maxRunSteps()
-                    || store.modelTokensForRun(run.id()) >= modelProperties.maxRunTokens()
-                    || store.countToolCallsForRun(run.id()) >= modelProperties.maxToolCallsPerRun()
-                    || Duration.between(run.createdAt(), Instant.now()).getSeconds()
-                    >= modelProperties.maxRunDurationSeconds())) {
-                throw new IllegalStateException("run execution budget exceeded");
+            if (modelProperties != null) {
+                RunBudgetSnapshot budget = budgetSnapshot(run);
+                if (budget.exceeded()) {
+                    if (completeBudgetStoppedRun(run, budget)) return;
+                    throw new IllegalStateException(budget.message());
+                }
             }
             store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
             if (metrics != null) metrics.modelCall(modelClient.name(), run.modelProfileId());
@@ -245,9 +245,58 @@ public class RunProcessor {
         executeTool(run, call);
     }
 
+    private RunBudgetSnapshot budgetSnapshot(RunRecord run) {
+        int usedTokens = store.modelTokensForRun(run.id());
+        long toolCalls = store.countToolCallsForRun(run.id());
+        long elapsedSeconds = Duration.between(run.createdAt(), Instant.now()).getSeconds();
+        return new RunBudgetSnapshot(run.currentStep(), modelProperties.maxRunSteps(),
+                usedTokens, modelProperties.maxRunTokens(),
+                toolCalls, modelProperties.maxToolCallsPerRun(),
+                elapsedSeconds, modelProperties.maxRunDurationSeconds());
+    }
+
+    private boolean completeBudgetStoppedRun(RunRecord run, RunBudgetSnapshot budget) {
+        store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
+        String content = "Execution stopped because this run reached its configured budget.\n\n"
+                + "Budget snapshot: " + budget.message().replace("run execution budget exceeded: ", "") + "\n\n"
+                + "No further model calls were made. Use the completed child run, artifacts, and previous tool "
+                + "results as the available partial result, or retry with a larger run budget.";
+        boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(), content, "",
+                json(Map.of("status", "BUDGET_STOPPED",
+                        "step", budget.step(), "maxSteps", budget.maxSteps(),
+                        "tokens", budget.tokens(), "maxTokens", budget.maxTokens(),
+                        "toolCalls", budget.toolCalls(), "maxToolCalls", budget.maxToolCalls(),
+                        "elapsedSeconds", budget.elapsedSeconds(), "maxElapsedSeconds", budget.maxElapsedSeconds())));
+        if (!completed) return false;
+        store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
+                "message", budget.message(),
+                "tokens", budget.tokens(),
+                "maxTokens", budget.maxTokens())));
+        store.requeueWaitingParentRuns(run.id());
+        toolRouter.release(run.id());
+        notify(run, "COMPLETED", "任务已达到运行预算并停止，已保留可用的部分结果");
+        return true;
+    }
+
     private void notify(RunRecord run,String event,String message){
         if(notifications==null)return;
         store.findSession(run.sessionId()).ifPresent(session->notifications.publish(session.projectKey(),event,run.id(),message));
+    }
+
+    private record RunBudgetSnapshot(int step, int maxSteps, int tokens, int maxTokens,
+                                     long toolCalls, int maxToolCalls,
+                                     long elapsedSeconds, long maxElapsedSeconds) {
+        boolean exceeded() {
+            return step >= maxSteps || (maxTokens > 0 && tokens >= maxTokens)
+                    || toolCalls >= maxToolCalls || elapsedSeconds >= maxElapsedSeconds;
+        }
+
+        String message() {
+            return "run execution budget exceeded: step=" + step + "/" + maxSteps
+                    + ", tokens=" + tokens + "/" + (maxTokens <= 0 ? "unlimited" : maxTokens)
+                    + ", toolCalls=" + toolCalls + "/" + maxToolCalls
+                    + ", elapsedSeconds=" + elapsedSeconds + "/" + maxElapsedSeconds;
+        }
     }
 
     private void executeTool(RunRecord run, ToolCallRecord call) throws Exception {

@@ -34,7 +34,10 @@ public class ConversationCompactor {
         int currentTokens = fixedPromptTokens + active.stream()
                 .mapToInt(message -> TokenEstimator.estimateText(message.content()) + 8)
                 .sum();
-        int trigger = (int) (maxContextTokens * properties.summaryTriggerRatio());
+        int contextTrigger = (int) (maxContextTokens * properties.summaryTriggerRatio());
+        int runBudgetTrigger = properties.maxRunTokens() <= 0 ? Integer.MAX_VALUE
+                : Math.max(12_000, (int) Math.min(Integer.MAX_VALUE, properties.maxRunTokens() * 0.08d));
+        int trigger = Math.min(contextTrigger, runBudgetTrigger);
         if (currentTokens < trigger || active.size() <= properties.retainedMessages() + 1) {
             return new CompactionResult(false, currentTokens, currentTokens, 0);
         }
@@ -54,7 +57,10 @@ public class ConversationCompactor {
         store.appendEvent(runId, "context.compacted", json(Map.of(
                 "beforeTokens", currentTokens,
                 "afterTokens", afterTokens,
-                "archivedMessages", archived.size())));
+                "archivedMessages", archived.size(),
+                "triggerTokens", trigger,
+                "contextTriggerTokens", contextTrigger,
+                "runBudgetTriggerTokens", runBudgetTrigger)));
         return new CompactionResult(true, currentTokens, afterTokens, archived.size());
     }
 

@@ -57,7 +57,9 @@ public class ProductivityController {
     }
 
     @DeleteMapping("/templates/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteTemplate(@PathVariable String id) { if (!productivity.deleteTemplate(id)) notFound("template"); }
+    public void deleteTemplate(@PathVariable String id) {
+        if (!productivity.deleteTemplate(id)) throw notFound("template");
+    }
 
     @PostMapping("/templates/{idOrShortcut}/resolve")
     public Map<String, Object> resolveTemplate(@PathVariable String idOrShortcut,
@@ -89,7 +91,9 @@ public class ProductivityController {
     }
 
     @DeleteMapping("/model-profiles/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteProfile(@PathVariable String id) { if (!productivity.deleteModelProfile(id)) notFound("profile"); }
+    public void deleteProfile(@PathVariable String id) {
+        if (!productivity.deleteModelProfile(id)) throw notFound("profile");
+    }
 
     @GetMapping("/agent-profiles")
     public List<ProductivityStore.AgentProfile> agentProfiles(@RequestParam(defaultValue="default") String projectKey) {
@@ -117,7 +121,30 @@ public class ProductivityController {
 
     @DeleteMapping("/agent-profiles/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteAgentProfile(@PathVariable String id) {
-        if (!productivity.deleteAgentProfile(id)) notFound("agent profile");
+        if (!productivity.deleteAgentProfile(id)) throw notFound("agent profile");
+    }
+
+    @GetMapping("/agent-teams")
+    public List<ProductivityStore.AgentTeam> agentTeams(
+            @RequestParam(defaultValue="default") String projectKey) {
+        return productivity.agentTeams(projectKey);
+    }
+
+    @PostMapping("/agent-teams") @ResponseStatus(HttpStatus.CREATED)
+    public ProductivityStore.AgentTeam createAgentTeam(
+            @Valid @RequestBody ApiDtos.AgentTeamRequest request) {
+        return saveAgentTeam(null, request);
+    }
+
+    @PutMapping("/agent-teams/{id}")
+    public ProductivityStore.AgentTeam updateAgentTeam(
+            @PathVariable String id, @Valid @RequestBody ApiDtos.AgentTeamRequest request) {
+        return saveAgentTeam(id, request);
+    }
+
+    @DeleteMapping("/agent-teams/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteAgentTeam(@PathVariable String id) {
+        if (!productivity.deleteAgentTeam(id)) throw notFound("agent team");
     }
 
     @GetMapping("/agent-profiles/templates")
@@ -138,7 +165,8 @@ public class ProductivityController {
             return productivity.saveAgentProfile(existing.id(), existing.projectKey(), seed.name(), seed.description(),
                     seed.prompt(), existing.modelProfileId(), mapper.writeValueAsString(seed.tools()),
                     mapper.writeValueAsString(List.of()), seed.outputSchema(), seed.role(), seed.handoff(),
-                    "PROJECT", seed.approval(), existing.enabled(), seed.key(), seed.version());
+                    "PROJECT", seed.approval(), existing.thinkingMode(), existing.reasoningEffort(),
+                    existing.enabled(), seed.key(), seed.version());
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
                     : new IllegalArgumentException("restore agent template failed", e);
@@ -157,7 +185,8 @@ public class ProductivityController {
         return productivity.saveAgentProfile(null, project, name, source.description(), source.systemPrompt(),
                 source.modelProfileId(), source.toolNamesJson(), source.skillNamesJson(), source.outputSchema(),
                 source.collaborationRole(), source.handoffPolicy(), source.workspaceScope(), source.approvalPolicy(),
-                source.enabled(), source.templateKey(), source.templateVersion());
+                source.thinkingMode(), source.reasoningEffort(), source.enabled(),
+                source.templateKey(), source.templateVersion());
     }
 
     @GetMapping("/estimate")
@@ -230,7 +259,9 @@ public class ProductivityController {
     @PutMapping("/schedules/{id}")
     public ProductivityStore.ScheduledTask updateSchedule(@PathVariable String id,@Valid @RequestBody ApiDtos.ScheduledTaskRequest r){return saveSchedule(id,r);}
     @DeleteMapping("/schedules/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteSchedule(@PathVariable String id){if(!productivity.deleteSchedule(id))notFound("schedule");}
+    public void deleteSchedule(@PathVariable String id){
+        if(!productivity.deleteSchedule(id)) throw notFound("schedule");
+    }
 
     @GetMapping("/notifications")
     public List<ProductivityStore.NotificationChannel> notifications(@RequestParam(defaultValue="default")String projectKey){return productivity.notificationChannels(projectKey);}
@@ -239,7 +270,9 @@ public class ProductivityController {
     @PutMapping("/notifications/{id}")
     public ProductivityStore.NotificationChannel updateNotification(@PathVariable String id,@Valid @RequestBody ApiDtos.NotificationChannelRequest r){return saveNotification(id,r);}
     @DeleteMapping("/notifications/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteNotification(@PathVariable String id){if(!productivity.deleteNotification(id))notFound("notification");}
+    public void deleteNotification(@PathVariable String id){
+        if(!productivity.deleteNotification(id)) throw notFound("notification");
+    }
 
     private ProductivityStore.TaskTemplate saveTemplate(String id,ApiDtos.TaskTemplateRequest r){
         try{return productivity.saveTemplate(id,r.projectKey(),r.name(),r.shortcut(),r.prompt(),mapper.writeValueAsString(r.variables()==null?Map.of():r.variables()),r.attachmentRequirements(),String.join(",",r.allowedTools()==null?List.of():r.allowedTools()),r.modelProfileId());}
@@ -262,10 +295,41 @@ public class ProductivityController {
                     r.modelProfileId(), mapper.writeValueAsString(tools),
                     mapper.writeValueAsString(r.skillNames() == null ? List.of() : r.skillNames()),
                     r.outputSchema(), r.collaborationRole(), r.handoffPolicy(), r.workspaceScope(),
-                    approval, r.enabled() == null || r.enabled());
+                    approval, r.thinkingMode(), r.reasoningEffort(), r.enabled() == null || r.enabled(), "", 0);
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
                     : new IllegalArgumentException("invalid agent profile", e);
+        }
+    }
+
+    private ProductivityStore.AgentTeam saveAgentTeam(String id, ApiDtos.AgentTeamRequest request) {
+        var leader = productivity.resolveAgentProfile(request.projectKey(), request.leaderAgentProfileId())
+                .orElseThrow(() -> notFound("leader agent profile"));
+        if (!"LEADER".equalsIgnoreCase(leader.collaborationRole())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "agent team leader must use the LEADER collaboration role");
+        }
+        List<String> members = request.memberAgentProfileIds() == null ? List.of()
+                : request.memberAgentProfileIds().stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(String::trim)
+                .filter(value -> !value.equals(leader.id()))
+                .distinct().limit(20).toList();
+        for (String memberId : members) {
+            productivity.resolveAgentProfile(request.projectKey(), memberId)
+                    .orElseThrow(() -> notFound("agent team member"));
+        }
+        try {
+            return productivity.saveAgentTeam(id, request.projectKey(), request.name(),
+                    request.description(), leader.id(), mapper.writeValueAsString(members),
+                    request.maxExperts() == null ? Math.max(1, members.size()) : request.maxExperts(),
+                    request.maxDepth() == null ? 1 : request.maxDepth(),
+                    Boolean.TRUE.equals(request.requireReviewer()),
+                    Boolean.TRUE.equals(request.requireRunner()),
+                    request.enabled() == null || request.enabled());
+        } catch (Exception e) {
+            throw e instanceof RuntimeException runtime ? runtime
+                    : new IllegalArgumentException("invalid agent team", e);
         }
     }
     private ProductivityStore.ScheduledTask saveSchedule(String id,ApiDtos.ScheduledTaskRequest r){
@@ -289,7 +353,8 @@ public class ProductivityController {
                             existing.description(), existing.systemPrompt(), existing.modelProfileId(),
                             existing.toolNamesJson(), existing.skillNamesJson(), existing.outputSchema(),
                             existing.collaborationRole(), existing.handoffPolicy(), existing.workspaceScope(),
-                            existing.approvalPolicy(), existing.enabled(), seed.key(), seed.version());
+                            existing.approvalPolicy(), existing.thinkingMode(), existing.reasoningEffort(),
+                            existing.enabled(), seed.key(), seed.version());
                 }
                 continue;
             }

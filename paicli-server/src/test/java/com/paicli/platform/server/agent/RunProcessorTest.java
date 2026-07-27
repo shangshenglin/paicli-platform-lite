@@ -206,6 +206,55 @@ class RunProcessorTest {
         assertThat(store.toolCallsForRun(run.id())).hasSize(3);
     }
 
+    @Test
+    void doesNotStopRunWhenTokenBudgetIsUnlimited() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "",
+                3, 500, 60, "", 30, 0);
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        AtomicInteger calls = new AtomicInteger();
+        ModelClient costlyToolModel = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                calls.incrementAndGet();
+                return new ModelResponse("", "", List.of(
+                        new ModelResponse.ToolPlan("costly", "list_dir", Map.of("path", "."))),
+                        new ModelResponse.Usage(201_000, 1, 0));
+            }
+
+            @Override public String name() { return "budget-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, costlyToolModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), null, modelProperties,
+                null, null, null);
+        var session = store.createSession("budget stop");
+        var run = store.createRun(session.id(), "inspect within a hard budget");
+
+        processor.process(store.claimNextRun().orElseThrow());
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(calls).hasValue(2);
+        assertThat(store.messages(session.id()).stream()
+                .filter(message -> "assistant".equals(message.role()))
+                .map(message -> message.content()).toList())
+                .noneMatch(content -> content.contains("Execution stopped because this run reached its configured budget"));
+        assertThat(store.events(run.id(), 0)).extracting("type").doesNotContain("run.budget_stopped");
+    }
+
     private static ModelProperties modelProperties() {
         return new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
                 0.75, 6, 16_000, 60, "auto", "");

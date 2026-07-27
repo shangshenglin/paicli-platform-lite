@@ -28,8 +28,10 @@ public class ApprovalController {
     }
 
     @GetMapping
-    public List<ApprovalRecord> pending() {
-        return approvalService.pending();
+    public List<ApprovalRecord> pending(@RequestParam(required = false) String runId) {
+        return runId == null || runId.isBlank()
+                ? approvalService.pending()
+                : approvalService.pendingForRunTree(runId);
     }
 
     @PostMapping("/{approvalId}")

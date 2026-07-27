@@ -48,7 +48,7 @@ class ContextManagerTest {
         assertThat(request.thinkingMode()).isEqualTo("enabled");
         assertThat(request.reasoningEffort()).isEqualTo("max");
         assertThat(request.messages().stream().map(message -> message.content()).toList())
-                .anyMatch(value -> value.contains("never pass the host absolute path"));
+                .anyMatch(value -> value.contains("不得传入宿主机绝对路径"));
         assertThat(messages.stream().map(message -> message.content()).toList())
                 .anyMatch(value -> value.contains("[language] Always answer in Chinese"))
                 .anyMatch(value -> value.contains("Use Java 17 and keep changes small."))
@@ -75,7 +75,7 @@ class ContextManagerTest {
         var run = store.createRun(session.id(), "review this code");
         var agent = new ProductivityStore.AgentProfile("agent_1", "alpha", "Code Reviewer",
                 "Reviews code", "Only review correctness and risk.", null,
-                "[\"read_file\"]", "[]", "summary, risks", "REVIEWER", "MANUAL",
+                "", "", "[\"read_file\"]", "[]", "summary, risks", "REVIEWER", "MANUAL",
                 "PROJECT", "INHERIT", "reviewer", 1, true, Instant.now(), Instant.now());
 
         var request = manager.prepare(session.id(), run.id(), 128_000, 4_096, agent).request();
@@ -85,5 +85,32 @@ class ContextManagerTest {
                 .anyMatch(value -> value.contains("Only review correctness and risk."))
                 .anyMatch(value -> value.contains("summary, risks"));
         assertThat(request.tools()).extracting("name").containsExactly("read_file");
+    }
+
+    @Test
+    void compactsBeforeContextWindowWhenRunBudgetWouldBeBurnedByRepeatedTurns() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "",
+                3, 500, 60, "", 30, 60_000);
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("budget-aware", "alpha");
+        var run = store.createRun(session.id(), "continue");
+        String bulkyObservation = "tool observation ".repeat(300);
+        for (int index = 0; index < 10; index++) {
+            store.appendMessage(session.id(), run.id(), "assistant", "step " + index + " " + bulkyObservation);
+        }
+
+        var prepared = manager.prepare(session.id(), run.id());
+
+        assertThat(prepared.compaction().compacted()).isTrue();
+        assertThat(prepared.compaction().beforeTokens()).isLessThan(128_000);
+        assertThat(store.activeMessages(session.id()))
+                .anyMatch(message -> "summary".equals(message.role()))
+                .anyMatch(message -> message.content().contains("Conversation summary"));
     }
 }

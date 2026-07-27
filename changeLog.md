@@ -22,7 +22,180 @@
 - 验证：运行了哪些测试、构建或人工检查。
 ```
 
+## 2026-07-27
+
+### 协作预算生效、审批聚合、父子导航与执行小队
+- 变更：修复本地启动时 `.env` 不覆盖父进程同名环境变量的问题；`run-server.ps1` 和 `start-local.ps1` 现在显式以项目 `.env` 为准，避免残留的 `PAICLI_MODEL_MAX_RUN_TOKENS=200000` 让已配置的 `0` 未实际生效。
+- 变更：审批接口支持按 `runId` 返回整棵委派树的待审批项；Console 在父 Run 终止后仍持续轮询协作审批，审批卡标明所属专家和 Run，并保留浏览器通知。协作接口新增父委派导航信息，子专家会话可直接返回父专家。
+- 变更：Schema 迁移推进到 24，新增 `agent_teams` 表及 `/v1/productivity/agent-teams` CRUD；“专家创建”新增执行小队管理，可组合 Leader、Expert、Reviewer、Runner 及并发/深度要求，专家协作首页可直接选择小队启动。
+- 思路：单 Run token 上限关闭必须以运行进程实际读取到 `0` 为准；审批属于整棵协作树的人工门禁，不能依赖用户主动进入子会话；专家组合属于可复用项目配置，不应每次临时勾选。
+- 验证：`node --check paicli-server/src/main/resources/static/app.js` 和 Maven 编译/打包通过；定向运行 `SqliteRuntimeStoreTest`、`ApprovalFlowTest`、`RunProcessorTest`、`WebSecurityIntegrationTest` 共 41 项测试通过，覆盖迁移 24、小队持久化、父子关系、委派树审批、预算执行和静态资源入口。重启 8080 后服务实际上报 `maxRunTokens=0`；浏览器检查协作首页和小队表单在桌面与 390px 移动宽度均无横向溢出，页面控制台无错误。
+
+### Memory 分层展示静态资源刷新
+- 变更：将 Console 首页引用的 `app.css` / `app.js` 资源版本号更新为 `20260727-memory-layers`，确保效率工作台 Memory 分层渲染逻辑不会继续命中浏览器旧缓存。
+- 思路：上一轮已在 `app.js` / `app.css` 实现 `L1`、`L2`、`L3` 分组和组内按置信度降序，但页面入口仍使用旧 query version，浏览器可能复用旧资源导致界面看起来未变化。
+- 验证：运行目录与源码入口将通过资源处理同步，前端脚本继续使用 `node --check` 校验。
+
+## 2026-07-26
+
+### Memory 管理按层级与置信度展示
+- 变更：效率工作台的 Memory 管理从平铺列表改为按 `L1`、`L2`、`L3` 三层分组展示，每层标题显示条数和平均置信度，组内按 `confidence` 从高到低排序。
+- 变更：Memory 条目继续保留置顶、确认、启用/停用、合并和修订操作；层级为空时显示该层暂无 Memory，避免隐藏层级状态。
+- 思路：Layered Memory 的治理视图应直接体现层级边界和可信程度，方便用户先审高置信度事实，再处理过程经验和长期偏好，而不是在一条混合列表里人工筛选。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过。
+
+### IDE 静态检查与删除接口收口
+- 变更：新增显式 `JacksonConfiguration`，在缺少自定义 `ObjectMapper` Bean 时通过 Spring 的 Jackson builder 创建默认 Bean，帮助 IDE 和运行时都能识别构造器注入依赖。
+- 变更：修复 `ProductivityController` 中删除模板、模型方案、专家、计划任务和通知渠道时未 `throw notFound(...)` 的问题，避免删除不存在资源仍返回 204。
+- 变更：将面试讲解文档中的 `SandboxDriver` 接口签名代码块从 `java` 改为 `text`，避免 IDE 对说明性片段做 Java 语法检查。
+- 思路：Maven 能通过不代表 IDE 检查没有噪声；显式基础设施 Bean 和文档围栏类型能减少误报，同时把被检查暴露出的真实删除语义问题一并修正。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PaiCliServerApplicationTest,WebSecurityIntegrationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过，9 项测试验证 Spring 上下文、显式 Jackson Bean、MockMvc 测试上下文和 Web API；检查文档中已无 `java` 代码围栏触发 IDE Java 语法分析。
+
+### 子 Agent 预算触顶收尾
+- 变更：`RunProcessor` 在单 Run 执行预算达到上限时，不再把 Run 直接标记为 FAILED；改为停止继续调用模型，写入一条预算停止的最终 assistant 摘要、`run.budget_stopped` 事件，并唤醒等待中的父 Run。
+- 思路：子 Agent 触发显式预算保护时，父 Agent 需要拿到可汇总的终态结果和预算快照，而不是被一个硬失败中断整条协作链；预算保护仍然生效，只是把“继续消耗资源”替换为“保留已有证据并让父任务降级汇总”。
+- 验证：与后续“单 Run 累计 Token 上限默认关闭”一起，通过 `RunProcessorTest` 覆盖累计 token 超过旧阈值时不再触发默认硬停止。
+
+### 单 Run 累计 Token 上限默认关闭
+- 变更：`PAICLI_MODEL_MAX_RUN_TOKENS` 默认值改为 `0`，表示不启用单 Run 累计 Token 硬上限；`RunProcessor` 只有在该值为正数时才按累计 token 停止 Run，步数、工具调用次数和运行时长保护继续生效。
+- 变更：上下文压缩器在累计 Token 上限关闭时只按模型上下文窗口触发压缩，不再用单 Run 预算提前压缩；本地 `.env` 和 `.env.example` 同步改为 `PAICLI_MODEL_MAX_RUN_TOKENS=0`。
+- 思路：Codex 类任务不应默认暴露或执行“单任务累计 token 上限”，否则长链路子 Agent 会因为历史累计用量而非真实错误中断；保留正数配置作为显式保护阀，方便压测或低成本部署时主动启用。
+- 验证：更新应用启动测试断言默认 `maxRunTokens=0`，并调整 `RunProcessorTest` 覆盖累计 token 超过旧阈值时仍继续执行。
+
+### 技术架构与面试指南按功能重构
+
+- 变更：新增《PaiCLI Platform Lite 技术架构与面试指南.md》，保留原《技术架构与面试讲解》作为专题素材，新的主阅读入口按“总体介绍、逐功能技术架构、简历写法、40 个面试问答”重新组织。
+- 变更：逐项结合当前代码说明 Session/Run、可恢复 ReAct、ToolCall/Approval、Docker Sandbox、模型网关、Context、Memory、混合 RAG、Skill/MCP、Multi-Agent、Plan Graph、租约恢复、资源冲突、隔离 Workspace、Validation Gate、评测和长期治理；每项统一回答核心思想、当前设计、Lite 简化、企业差距、升级路线和面试表达。
+- 变更：补充关键执行、恢复、RAG 融合、Plan 调度和评测伪代码，以及后端岗位版、AI 平台岗位版、三条精简版简历表达；新文档不再使用优先级或开发批次作为讲解主线。
+- 变更：根据原《技术架构与面试讲解》和当前代码继续扩写主功能部分，迁回 Session/Run 数据关系、六条恢复契约、崩溃窗口、完整工具目录、写文件时序、Docker 协议、模型重试/取消、Token 预算区别、Memory 生命周期、RAG 分块与融合、Skill/MCP 治理、Multi-Agent 委派、Plan JSON/路由、Validation Evidence、评测对象和 Baseline 等细节。
+- 变更：不再强制每章只停留在统一六段式摘要；在共同主线下按功能特点增加 SQL、状态机、时序图、数据表、伪代码、真实边界和代码阅读路线，同时保留原文档作为历史专题素材。
+- 变更：补充治理工作台、REST/SSE/Console、SQLite/文件一致性、安全与可观测性、企业组件映射和关键权衡，并校正 Plan JSON 示例为代码实际支持的 Step type 与 execution mode。
+- 变更：README 文档索引区分“按功能重构版”和“原始专题版”，Plan 说明及架构文档改为链接新的指南章节。
+- 思路：原文档技术内容完整，但同一能力分散在架构、演进、演示、问答和简历章节中；新文档以任务从接收、执行、验证到评测回归的顺序重排，保留原有技术深度并明确已实现能力与不可过度宣传的边界。
+- 验证：扩写后新文档共 2558 行、约 7.7 万字符，其中主功能部分约 2052 行；40 个问答编号连续，74 个代码围栏成对，正文不使用 P0/P1 或开发阶段编号叙事。Plan JSON 示例通过代码实际支持的 Step type、execution mode、依赖和 Edge 重复校验；README/架构文档链接目标存在，`git diff --check` 通过（仅有 Windows 行尾转换提示）。本次只调整文档，不改变运行行为，未运行 Maven 测试。
+
+## 2026-07-25
+
+### 面试文档第 16 节演进路线详解
+
+- 变更：扩展《PaiCLI Platform Lite 技术架构与面试讲解.md》第 16 节，从原来的阶段清单改为“演进主线、阶段细节、能力边界、P2/P3 路线和面试话术”结构。
+- 变更：补充 P0 正确性、长期效率、评测中心、Plan Runtime、Async Job、Validation Gate、协作可视化、受控并行、资源读写冲突、隔离 workspace、类型化 Graph Runtime、Human Node 和失败回流的面试讲解角度。
+- 思路：第 16 节面向面试收束，应回答“项目如何从 Demo 演进为 Runtime”以及“已完成、未完成、企业化如何替换”的问题，而不是只列阶段标题。
+- 验证：人工检查第 16 节标题层级、表格和面试话术；本次仅修改文档，未改变运行行为，未运行 Maven 测试。
+
+### 类型化 Graph Runtime 与 Human Node
+
+- 变更：`plan_edges` 从单一 DAG 依赖升级为 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类持久化边，增加确定性条件、优先级、最大回流次数和回流计数；Schema 迁移推进到 23，旧边自动兼容为 `DEPENDENCY + ON_SUCCESS`。
+- 变更：Plan JSON 支持顶层 `edges`，Server 校验边引用、类型、条件、重复边和 DAG；条件只允许 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE`、`ON_SKIPPED`，不执行模型生成的任意表达式。
+- 变更：条件命中与未命中都会写入 `plan_events`；未选分支及其 Validation Check 同步标记 `SKIPPED`。失败命中 `REWORK` 时只重置目标节点及其下游，保留无关分支，并按持久化次数上限阻止无限回流。
+- 变更：新增 `PlanState` 和 `/v1/plans/{id}/state`，统一返回状态计数、READY/活跃/等待人工节点、阻塞原因、累计 Token、最后事件序号和更新时间；Plan 详情直接内嵌同一快照。
+- 变更：`USER_APPROVAL` 升级为持久化 Human Node，新增 `/v1/plan-steps/{id}/decision`，只允许等待中的人工节点提交 `APPROVED` 或 `REJECTED`；Console Plan 详情展示类型化边、回流计数、状态与阻塞原因，并可处理人工节点。
+- 思路：在已有租约恢复、资源锁、隔离 workspace、Validation Gate 和 Agent Feedback 上补齐图语义；确定性决策留在代码状态机，模型只负责生成候选计划，避免引入 LangGraph、Temporal 或分布式中间件。
+- 验证：`PlanServiceTest` 与 `SqliteRuntimeStoreTest` 共 45 项通过，覆盖迁移 23、条件路由、分支级联跳过与汇合、人工决策、回流上限、事件审计和 PlanState；`.\mvnw.cmd test` 全量 113 项通过；跳过 Spring Boot 重打包锁点的模块 `package` 成功；`node --check paicli-server/src/main/resources/static/app.js` 与 `git diff --check` 通过。`clean test` 因正在运行的本地服务锁住旧 runtime JAR 而停在 clean 阶段，未停止用户服务。
+
+### Plan 自依赖生成错误修复
+
+- 变更：修正计划生成提示词中的错误示例，将首步 `dependencies` 从 `["step_1"]` 改为 `[]`，并明确首步不得依赖任何步骤、后续步骤不得依赖自身。
+- 变更：模型计划第一次未通过 `PlanParser` 结构校验时，Server 会携带校验错误和有界的无效 JSON 自动重新生成一次；第二次仍不合法才返回错误，手工计划和 replan 继续严格拒绝循环依赖。
+- 思路：原提示词一边禁止循环依赖，一边在 Schema 示例里让 `step_1` 依赖自己，模型照抄后必然被正确的 DAG 校验拦截。修正示例解决主因，一次受控重生成兜住模型偶发的未知依赖、自依赖和非法 JSON。
+- 验证：运行 `PlanServiceTest` 定向测试，15 个测试通过；运行 `.\mvnw.cmd -pl paicli-server -am test` 完整回归，108 个测试通过；待重新打包并完成本地启动探活。
+
+### 面试文档最终能力说明更新
+
+- 变更：更新《PaiCLI Platform Lite 技术架构与面试讲解.md》，新增推理流合并、Run 累计预算与上下文压缩的区别说明，并补充协作可视化、最终产物交付、Plan 可恢复调度和 Windows 本地启动稳定性的最终能力表达。
+- 思路：面试文档面向讲解系统设计，不展开 bug 修改过程，只说明现在系统具备的能力、边界和架构取舍。
+- 验证：人工检查新增内容位于模型接口、上下文工程、已完成能力和 10-15 分钟讲解顺序中，正文未保留具体 bug 触发和修复流水。
+
+### Plan 创建后启动 0 步与伪人工步骤卡死修复
+
+- 变更：计划提示词明确要求读取错误、分析、改代码和测试等可自动完成的步骤使用 `REACT`；模型生成的非 `USER_APPROVAL` 手工步骤在持久化前自动规范为 `REACT`。
+- 变更：Plan Worker 会把历史上已经卡在 `WAITING_APPROVAL`、没有关联 Run 且并非真正用户审批的 `MANUAL` 步骤恢复成 `READY + REACT`，随后在原 Session 创建并执行 Run；真正的 `USER_APPROVAL` 仍保持等待确认。
+- 变更：Console 创建 Plan 后不再紧接着重复调用第二次 dispatch；启动提示改为使用 `/start` 返回的真实步骤状态，避免首轮已被领取后错误显示“启动 0 步”，并继续同步当前 Session 的最新 Run。
+- 思路：现场 SQLite 数据显示最新三个 Plan 的首步均为“收集错误信息 / MANUAL / WAITING_APPROVAL / run_id=NULL”，调度器没有创建 Run，前端也没有对应审批单，因此 DAG 永久停住；同时 `/start` 已内置首轮 dispatch，前端再次 dispatch 只能得到 0。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；运行 `PlanServiceTest` 定向测试，17 个测试通过；运行 `.\mvnw.cmd -pl paicli-server -am test` 完整回归，110 个测试通过；跳过测试重新打包成功。服务重启后最新卡死 Plan 的首步自动恢复为 `REACT`、创建 Run 并完成，第二步也已创建 Run；重复点击产生的两个旧 Plan 已取消。
+
+### Windows 启动环境变量大小写冲突修复
+
+- 变更：`scripts/load-env.ps1` 在加载 `.env` 前合并进程环境中仅大小写不同的重复变量；`PATH/Path` 统一为 `Path`，其他变量统一为大写名称并保留优先值。
+- 思路：Windows 环境变量名不区分大小写，但 Codex、IDE、Git 或代理工具可能同时注入 `NO_PROXY` 与 `no_proxy` 等两个条目；PowerShell `Start-Process` 建立大小写不敏感的子进程环境字典时会因重复键抛出 `Item has already been added`。
+- 验证：在真实含 5 组大小写重复环境变量的进程中加载 `load-env.ps1`，重复组降为 0；随后通过 `Start-Process` 创建测试子进程，退出码为 0。使用同一脚本启动本地服务后，8080 正常监听，`/v1/system/info` 返回 `paicli-platform-lite`，能力接口返回 `maxRunTokens=1000000`。
+
+### 单 Run 累计 Token 上限提升到 1,000,000
+
+- 变更：将 `PAICLI_MODEL_MAX_RUN_TOKENS` 的本地配置、应用默认值和 Java 缺省兜底从 500,000 提升到 1,000,000，并同步更新启动配置测试。
+- 思路：失败截图显示旧服务实际仍使用 200,000 上限，Run 在第 8/30 步累计消耗 204,376 Token；按当前约 25k Token/步估算，完整 30 步可能接近 750k，因此 100,000 会降低现有上限，1,000,000 才能覆盖这类长链路，同时继续保留步骤、工具次数和 30 分钟运行上限。
+- 验证：运行 `PaiCliServerApplicationTest` 通过；重新打包并启动本地服务后，`GET /v1/capabilities/status?projectKey=default` 实际返回 `maxRunTokens=1000000`，8080 由新进程正常监听。
+
+## 2026-07-24
+
+### 专家模型思考配置、工作空间恢复与多模态稳定性
+
+- 变更：专家 Profile 新增可选 `thinking_mode` 和 `reasoning_effort`，专家创建页可分别设置模型方案、思考开关和高/最高思考深度；普通专家 Run、Leader Run 和 delegated child Run 都优先使用专家绑定配置，空值继续继承对话设置。
+- 变更：Run 新增 `workspace_owner_run_id` 兼容列，同一 Session 后续普通续聊和 Plan Run 继承已有工作空间；协作接口在当前 Run 不是协作根 Run 时回溯 Session 最近一次协作，避免续聊或启用计划模式后协作面板和工作空间消失。
+- 变更：Console 按 Session 在 `sessionStorage` 保存消息滚动位置；切换会话、刷新页面和后台消息/Plan/协作刷新时恢复用户历史阅读位置，不再无条件跳到最后。
+- 变更：OpenAI-compatible 模型拒绝 `image_url` 多模态内容时自动降级为纯文本请求，并注入中文提示要求明确告知用户切换视觉模型；支持视觉的模型仍直接分析原图。
+- 变更：内置基础 Agent、安全规则、Agent 循环、运行环境、专家上下文标签、计划生成、计划步骤执行与 PDF OCR 提示改为中文；协议字段、工具名和 JSON Schema 保持不变。
+- 变更：SQLite schema 版本增加到 22，旧库启动时自动补齐专家思考字段和 Run 工作空间归属字段；增加 Store、模型 Client、Web API 和静态 Console 回归覆盖。
+- 思路：专家配置必须在父子 Run 全链路生效；工作空间和协作展示属于 Session 连续任务状态，不能被“最新 Run”替换；长对话滚动位置属于用户阅读状态；图片能力不匹配应可解释降级，而不是破坏整次对话。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；先运行定向 Maven 回归 42 项通过，再运行 `.\mvnw.cmd -pl paicli-server -am test` 完整回归，107 个测试通过；跳过测试的模块打包通过。
+
+### Session 删除依赖清理与 Console 通知弹窗
+
+- 变更：`deleteSession` 在拒绝活跃 Run 后，同一事务额外清理 `model_attempts`、`run_collaboration_policies` 和按 Run 绑定的 `async_jobs`，避免终态 Run 仍因这些外键记录导致 Session 删除返回 SQLite 409。
+- 变更：Console 底部 notice 不再承载运行日志和错误详情，改为保留输入快捷键提示；所有 `showNotice` 输出改到独立非阻塞弹窗，长错误和 Skill 安装失败信息可完整查看。
+- 变更：按用户反馈将通知弹窗从页面内自定义 `<dialog>` 调整为浏览器原生 `window.alert`，并移除自定义通知对话框节点和样式。
+- 变更：Skill Git 导入在处理 GitHub `tree`/`blob` 链接时，会优先从链接路径推断 Skill 目录名；例如 `.../tree/main/skills/skill-creator` 不再误按仓库名 `skills` 查找。
+- 变更：扩展 Store 删除测试，覆盖模型尝试记录、协作策略和异步任务挂在同一个 Run 上时仍可删除 Session；扩展 Web 静态资源测试，确保通知不再渲染页面内弹窗并改用浏览器原生 `window.alert`。
+- 思路：Session 删除要按数据库依赖边界兜住所有 Run 派生记录，而不是只清理早期核心表；前端通知从输入区移开，避免首页底部堆积日志影响长对话阅读；Skill 导入语义要和 Console 对 GitHub 目录链接的承诺一致。
+- 验证：运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=SqliteRuntimeStoreTest,WebSecurityIntegrationTest,SkillServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过，36 个测试通过；运行 `.\mvnw.cmd -pl paicli-server -am package -DskipTests "-Dspring-boot.repackage.skip=true"` 通过；运行 `git diff --check` 通过，仅有 Windows 换行提示。
+
+### 对话页最终交付物与富文本展示
+
+- 变更：`/v1/sessions/{sessionId}/messages` 改为返回 Console 消息视图，在保留原 Message 字段的同时为每条消息附带 `runArtifacts`，让最终 assistant 回答能直接展示关联 Artifact。
+- 变更：Console 消息区新增受控 Markdown 渲染，支持标题、列表、引用、表格、代码块、行内代码、网页链接、Artifact 引用和 Windows 本地路径链接，避免把 Markdown 原文直接显示成一整段文本。
+- 变更：assistant 消息下方新增“交付成果”卡片区，自动聚合 run Artifact、`http(s)` 链接、`artifact_*` 引用和本地文件路径；Artifact 支持打开/下载和文本预览，本地路径支持 `file:///` 跳转与复制路径。
+- 变更：修复切换会话时先渲染消息、后同步最新 Run 导致协作看板拿不到 `runId` 而不可见的问题；现在先同步最新 Run，再渲染消息、Plan 和协作看板。
+- 变更：对话页 Artifact 打开/下载不再使用普通 `<a>` 直连，改为前端 `fetch` 携带 `X-API-Key` 后用 Blob 打开或保存，避免新标签页请求 `/v1/artifacts/{id}/download` 时因缺少 API Key 返回 401。
+- 变更：成果“打开”按钮改为点击时先创建预览窗口，再把认证读取到的 Blob 填入窗口；如果浏览器拦截弹窗只提示用户，不再自动降级为下载。
+- 变更：新增 `GET /v1/runs/{runId}/workspace-file?path={relativePath}`，只允许读取该 Run 所属受控 workspace 内的相对文件；对话页会识别最终回答中的 `tetris.html` 等工作区文件并提供打开/下载按钮。
+- 变更：成果区默认过滤 `tool_result` 以及 `read_file`、`read_artifact` 等中间工具结果，只在每个 Run 的最后一条 assistant 回答上展示交付物，避免把验证过程误当作最终产物。
+- 变更：消息刷新时在用户上滑查看长会话历史的场景下保持精确 `scrollTop`，不再按新旧内容高度差补偿，避免后台刷新或新消息追加把历史阅读位置推向底部。
+- 思路：Agent 最终交付应该落到可操作的页面元素，而不是依赖用户在 Markdown 文本里找 URL、文件路径或 Artifact id；后端只返回轻量元数据，完整内容仍通过既有 Artifact content/download API 按需读取。
+- 验证：新增 Web 集成测试覆盖消息接口返回 `runArtifacts`、受控 workspace HTML 文件读取和越界路径拒绝；运行 `node --check paicli-server/src/main/resources/static/app.js` 验证前端脚本语法。
+
+### 父 Run 挂载子 Agent 执行链路
+
+- 变更：`/v1/runs/{runId}/collaboration` 的子任务数据增加 `delegationStatus`、子 Run 当前步数、结束时间、待审批、最近工具调用和最近运行事件摘要，让父 Run 页面能看到子 Agent 的阻塞点与执行轨迹。
+- 变更：Console 协作任务看板在父 Run 下直接渲染子 Agent 执行链路，支持展开查看子工具/事件、在父页面处理子审批，并可按需打开子会话或把子链路挂载到右侧执行详情。
+- 变更：`get_agent_result` 返回给父 Agent 的 `result` 改为有界摘要，补充 `child_session_id`、`result_truncated` 和完整结果来源说明；结构化 `agent_result.summary` 同步收敛到同一摘要上限，避免子 Agent 长输出直接膨胀父 Run 上下文。
+- 思路：父 Run 失败或终止时，用户仍需要看到协作树里是否存在 `WAITING_APPROVAL` 等活跃子 Run；否则删除 Session 只返回 409 会让真实阻塞点不可见。看板只返回轻量摘要，避免把大段工具参数和结果重新带回页面；父/子 Run 的 token 计数保持独立，但跨 Agent 汇总必须通过摘要、artifact 和子会话引用传递，不能把完整子上下文灌回父上下文。
+- 验证：新增 Web 集成测试覆盖父协作接口返回 child run、pending approval、tool call 与 event trace，并覆盖 `get_agent_result` 对长子结果只返回截断摘要；运行 `node --check paicli-server/src/main/resources/static/app.js` 和定向 Maven 测试验证。
+
+### 单 Run 执行 Token 预算默认值调优
+
+- 变更：将 `PAICLI_MODEL_MAX_RUN_TOKENS` 的默认值从 200000 提升到 500000，并同步更新 `ModelProperties` 的缺省兜底值。
+- 变更：应用启动测试增加默认 `maxRunTokens=500000` 断言，防止配置文件和 Java 默认值再次漂移。
+- 变更：ConversationCompactor 增加单 Run 预算感知触发条件，不再只等单次上下文接近 `maxContextTokens * summaryTriggerRatio` 才压缩；当多轮 ReAct/Agent 对话可能快速烧掉累计预算时，会提前归档旧消息并写入 `context.compacted` 事件的触发阈值。
+- 变更：`run execution budget exceeded` 错误增加 step、tokens、toolCalls 和 elapsedSeconds 的当前值/上限，避免排障时只能看到笼统预算失败。
+- 思路：`run_51cde474058f4624` 在坦克大战多 Agent 编排中累计模型 token 达到 200092，超过原 200000 单 Run 上限；`run_5546378e77b74ba1` 暴露出更深问题：界面只有简短对话和输出，但每次模型调用都会重复携带系统提示、工具 schema、历史消息、工具结果 preview、运行上下文和可用能力，5 次调用累计到 217014 token，而旧压缩器只看单次上下文窗口是否接近 128000，不看累计 Run 预算。调高默认值保留预算保护，同时把压缩触发改成同时考虑单次窗口和累计预算风险。
+- 验证：通过本地 SQLite 快照确认相关 Run 失败原因是单 Run token 累计超过 200000，而非步数、工具次数或项目预算；运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=ContextManagerTest,PaiCliServerApplicationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过，其中新增测试覆盖“单次上下文未接近 128000 但累计预算风险已高时提前压缩”；运行 `node --check paicli-server/src/main/resources/static/app.js` 通过。
+
+### 本地启动 Web 工具默认配置修复
+
+- 变更：将 `paicli.web.enabled` 的默认值改为 `false`，保持 README 中“联网默认关闭”的语义；未配置 `PAICLI_WEB_SEARCH_URL` 时本地服务可以正常启动，只有显式设置 `PAICLI_WEB_ENABLED=true` 时才要求提供搜索端点。
+- 变更：应用启动测试不再显式关闭 `paicli.web.enabled`，让默认配置参与 Spring Boot 上下文启动验证，防止再次出现默认开启但缺少搜索 URL 导致启动失败。
+- 思路：Web 搜索是可选能力，不能让缺省本地开发环境因为未接 SearXNG-compatible 搜索端点而无法启动；配置校验仍保留在显式启用路径上。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=PaiCliServerApplicationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过；运行 `.\mvnw.cmd -pl paicli-server -am package -DskipTests` 通过；使用同一可运行 JAR 以 local sandbox 启动本地服务后，`/actuator/health` 返回 `UP`，带本地 API Key 访问 `/v1/system/info` 返回 `paicli-platform-lite`。
+
 ## 2026-07-23
+
+### Console Plan 轮询、审批刷新与分支语义修复
+
+- 变更：Console 消息刷新增加滚动位置保护；只有用户主动发送、启动 Plan 或切换会话时强制滚到底，后台 Plan 轮询、流式输出和终态刷新会在用户上滑查看历史时保持当前位置。
+- 变更：关联 Plan 面板只在 Plan 自身仍为 `ACTIVE` 或 `WAITING_APPROVAL` 时轮询，避免 Plan 已完成或失败后继续刷新消息区；审批栏增加独立轻量轮询，Plan 调度后会同步当前会话最新 Run 并开始监听，避免审批已持久化但前端未刷新导致看不到审批单。
+- 变更：新增 `POST /v1/runs/{runId}/branch`，只复制源 Run 之前的历史生成分支会话，不创建新 Run；Console 的“分支”操作改为切到新分支并等待用户下一条消息，“重新执行”仍使用 retry 语义。
+- 思路：把“后台状态刷新”“审批可见性”“重新执行”和“迁出分支”拆成不同交互边界，避免刷新循环抢滚动、审批依赖整页刷新，以及用户未发送消息却自动开始新一轮思考。
+- 验证：补充 Web 集成测试覆盖分支 API 只创建会话且不创建 retry Run；运行 `node --check paicli-server/src/main/resources/static/app.js` 通过；运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=WebSecurityIntegrationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过。
 
 ### Plan / Multi-Agent / Agent Harness 深度说明合并去重
 

@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -97,6 +98,14 @@ public class ApprovalService {
 
     public List<ApprovalRecord> pending() {
         return store.pendingApprovals();
+    }
+
+    public List<ApprovalRecord> pendingForRunTree(String runId) {
+        String rootRunId = store.delegationRootRunId(runId);
+        Set<String> visibleRuns = Set.copyOf(store.delegatedRunTree(rootRunId));
+        return store.pendingApprovals().stream()
+                .filter(approval -> visibleRuns.contains(approval.runId()))
+                .toList();
     }
 
     public List<SqliteRuntimeStore.ApprovalPolicy> policies(String projectKey) {
