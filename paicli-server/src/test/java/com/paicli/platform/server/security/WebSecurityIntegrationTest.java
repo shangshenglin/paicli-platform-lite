@@ -88,7 +88,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"agentReasoningEffort\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260727-collaboration-teams")))
+                        "20260728-plan-run-audit")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -113,6 +113,20 @@ class WebSecurityIntegrationTest {
                         "renderDeliverables")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "renderCollaborationBoard")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "conciseTaskName")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "primeRunEventCursor")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "replaceTopPanel")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "effectiveConversationStatus")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "openPlanStepRun")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "runAuditDialog")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "events?after=${cursor || 0}")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "savedMessageScroll")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -170,6 +184,31 @@ class WebSecurityIntegrationTest {
                         .param("path", "../secret.txt")
                         .header("X-API-Key", "test-secret"))
                 .andExpect(status().is4xxClientError());
+    }
+
+    @Test
+    void runAuditConsolidatesSessionModelToolsApprovalsAndEvents() throws Exception {
+        var session = store.createSession("run audit", "run-audit-" + System.nanoTime());
+        var run = store.createRun(session.id(), "inspect the execution");
+        store.appendMessage(session.id(), run.id(), "assistant", "model output");
+        var tool = store.createToolCall(run.id(), "call-audit", "execute_command",
+                "{\"command\":\"mvn test\"}", "audit-" + run.id());
+        store.createApproval(run.id(), tool.id(), "verification command requires approval");
+        store.appendEvent(run.id(), "verification.recorded", "{\"evidence\":\"tests pending\"}");
+        store.completeRun(run.id());
+
+        mvc.perform(get("/v1/runs/{runId}/audit", run.id())
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.run.id").value(run.id()))
+                .andExpect(jsonPath("$.session.id").value(session.id()))
+                .andExpect(jsonPath("$.messages[0].content").value("inspect the execution"))
+                .andExpect(jsonPath("$.messages[1].content").value("model output"))
+                .andExpect(jsonPath("$.toolCalls[0].toolName").value("execute_command"))
+                .andExpect(jsonPath("$.approvals[0].toolCallId").value(tool.id()))
+                .andExpect(jsonPath("$.events[?(@.type == 'verification.recorded')]").isNotEmpty())
+                .andExpect(jsonPath("$.planStep").isMap())
+                .andExpect(jsonPath("$.validationChecks").isArray());
     }
 
     @Test
@@ -258,6 +297,33 @@ class WebSecurityIntegrationTest {
                         "Tool 'execute_command' requires explicit approval before execution"))
                 .andExpect(jsonPath("$.tasks[0].toolCalls[0].name").value("execute_command"))
                 .andExpect(jsonPath("$.tasks[0].events[0].type").value("run.queued"));
+    }
+
+    @Test
+    void humanCanApproveADelegationBlockedByFailedDependency() throws Exception {
+        var session = store.createSession("collaboration human", "collab-human-" + System.nanoTime());
+        var parent = store.createRun(session.id(), "parent");
+        var sourceTool = store.createToolCall(parent.id(), "call-source", "spawn_agent", "{}",
+                "source-" + parent.id());
+        var source = store.createOrGetDelegation(parent.id(), sourceTool.id(), "source", "produce input",
+                null, null);
+        var humanTool = store.createToolCall(parent.id(), "call-human", "spawn_agent", "{}",
+                "human-" + parent.id());
+        var human = store.createOrGetDelegation(parent.id(), humanTool.id(), "reviewer", "review partial input",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(java.util.List.of(source.id()), java.util.List.of(),
+                        java.util.List.of(), "REQUIRE_HUMAN", "workspace/root"));
+        store.completeRun(parent.id());
+        store.claimNextRun().orElseThrow();
+        store.failRun(source.childRunId(), "upstream failed");
+
+        mvc.perform(post("/v1/runs/{runId}/delegations/{delegationId}/decision", parent.id(), human.id())
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\",\"reason\":\"continue with partial result\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.delegationStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.failurePolicy").value("REQUIRE_HUMAN"));
     }
 
     @Test

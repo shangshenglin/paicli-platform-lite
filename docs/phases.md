@@ -175,11 +175,21 @@
 - [x] `USER_APPROVAL` 升级为持久化 Human Node，新增 `/v1/plan-steps/{id}/decision` 批准/拒绝接口；Console Plan 详情可查看边、状态与处理人工节点。
 - [x] 补充迁移、条件分支、人工决策、回流上限、事件审计和状态快照回归测试。
 
+## 阶段 19：Plan 与 Multi-Agent Graph 协作执行
+
+- [x] 默认 Run Worker 并行度提升到 4，单次轮询填满空闲执行槽；项目 `max_concurrent_runs` 继续作为第二层并发预算。
+- [x] Schema 迁移 25 新增 `run_delegation_dependencies` 与 `run_delegation_resources`，委派持久化失败策略、阻塞原因和 workspace 引用。
+- [x] `spawn_agent.dependencies` 升级为服务端强制调度边；依赖未终态的子 Run 保持 `BLOCKED`，不能依靠 Leader 提示词绕过。
+- [x] 同 workspace 的读写/写写冲突串行，读读并行；不同 workspace 引用映射到隔离 workspace owner。
+- [x] 子 Run 终态事务自动写 Result Envelope v2、向下游 Session 注入有界上游结果、推进节点并唤醒父 Run；信封从 ToolCall/Artifact/ModelUsage 归集文件、命令、测试和证据。
+- [x] 上游失败支持 `BLOCK_GRAPH`、`DEGRADE`、`REQUIRE_HUMAN`；协作看板和 decision API 可处理等待人工判断的节点。
+- [x] Plan Graph 保留跨步骤条件、REWORK、Validation Gate 和 Human Node，Delegation Graph 承担步骤内/Leader 动态派发；两层统一复用普通 Run。
+
 ### 阶段 16 后续工作
 
 - [ ] Memory conflict 的人工解决 API 与 Console 审计入口。
 - [ ] RAG citation 在 Console 搜索结果中完整展示查询计划、命中原因和反馈闭环。
-- [ ] Agent Result 中的 `files_changed`、`commands_executed`、`tests` 由工具事件自动归集，而不是仅预留结构字段。
+- [x] Agent Result 中的 `files_changed`、`commands_executed`、`tests` 由工具事件自动归集，而不是仅预留结构字段。
 - [ ] PlanStep 委派与 PlanExecutionService 的状态联动继续细化，例如子 Agent 终态自动触发 Step 验证。
 
 ### 阶段 15 后续工作

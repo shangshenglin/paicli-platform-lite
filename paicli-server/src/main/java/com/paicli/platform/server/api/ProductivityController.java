@@ -3,6 +3,7 @@ package com.paicli.platform.server.api;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.model.ModelClient;
+import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
@@ -27,6 +28,7 @@ import java.util.regex.Pattern;
 @RequestMapping("/v1/productivity")
 public class ProductivityController {
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() { };
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{([a-zA-Z][a-zA-Z0-9_.-]{0,79})}");
     private final ProductivityStore productivity;
     private final SqliteRuntimeStore runtime;
@@ -151,7 +153,7 @@ public class ProductivityController {
     public List<Map<String, Object>> agentProfileTemplates() {
         return AGENT_SEEDS.stream().map(seed -> Map.<String, Object>of(
                 "key", seed.key(), "version", seed.version(), "name", seed.name(),
-                "description", seed.description(), "role", seed.role(), "tools", seed.tools(),
+                "description", seed.description(), "role", seed.role(), "tools", withPlanTools(seed.tools()),
                 "approvalPolicy", seed.approval(), "outputSchema", seed.outputSchema())).toList();
     }
 
@@ -163,7 +165,7 @@ public class ProductivityController {
                 "agent profile is not linked to a built-in template");
         try {
             return productivity.saveAgentProfile(existing.id(), existing.projectKey(), seed.name(), seed.description(),
-                    seed.prompt(), existing.modelProfileId(), mapper.writeValueAsString(seed.tools()),
+                    seed.prompt(), existing.modelProfileId(), mapper.writeValueAsString(withPlanTools(seed.tools())),
                     mapper.writeValueAsString(List.of()), seed.outputSchema(), seed.role(), seed.handoff(),
                     "PROJECT", seed.approval(), existing.thinkingMode(), existing.reasoningEffort(),
                     existing.enabled(), seed.key(), seed.version());
@@ -182,11 +184,17 @@ public class ProductivityController {
                 ? source.projectKey() : request.projectKey();
         String name = request == null || request.name() == null || request.name().isBlank()
                 ? source.name() + " 副本" : request.name();
-        return productivity.saveAgentProfile(null, project, name, source.description(), source.systemPrompt(),
-                source.modelProfileId(), source.toolNamesJson(), source.skillNamesJson(), source.outputSchema(),
-                source.collaborationRole(), source.handoffPolicy(), source.workspaceScope(), source.approvalPolicy(),
-                source.thinkingMode(), source.reasoningEffort(), source.enabled(),
-                source.templateKey(), source.templateVersion());
+        try {
+            return productivity.saveAgentProfile(null, project, name, source.description(), source.systemPrompt(),
+                    source.modelProfileId(), withPlanToolsJson(source.toolNamesJson()),
+                    source.skillNamesJson(), source.outputSchema(),
+                    source.collaborationRole(), source.handoffPolicy(), source.workspaceScope(), source.approvalPolicy(),
+                    source.thinkingMode(), source.reasoningEffort(), source.enabled(),
+                    source.templateKey(), source.templateVersion());
+        } catch (Exception e) {
+            throw e instanceof RuntimeException runtime ? runtime
+                    : new IllegalArgumentException("copy agent profile failed", e);
+        }
     }
 
     @GetMapping("/estimate")
@@ -289,6 +297,7 @@ public class ProductivityController {
                     ? "EXPERT" : r.collaborationRole().trim().toUpperCase();
             List<String> tools = r.toolNames() == null || r.toolNames().isEmpty()
                     ? defaultToolsForRole(role) : sanitizeToolsForRole(role, r.toolNames());
+            tools = withPlanTools(tools);
             String approval = r.approvalPolicy() == null || r.approvalPolicy().isBlank()
                     ? defaultApprovalForRole(role) : r.approvalPolicy();
             return productivity.saveAgentProfile(id, r.projectKey(), r.name(), r.description(), r.systemPrompt(),
@@ -351,7 +360,7 @@ public class ProductivityController {
                 if(blank(existing.templateKey())) {
                     productivity.saveAgentProfile(existing.id(), existing.projectKey(), existing.name(),
                             existing.description(), existing.systemPrompt(), existing.modelProfileId(),
-                            existing.toolNamesJson(), existing.skillNamesJson(), existing.outputSchema(),
+                            withPlanToolsJson(existing.toolNamesJson()), existing.skillNamesJson(), existing.outputSchema(),
                             existing.collaborationRole(), existing.handoffPolicy(), existing.workspaceScope(),
                             existing.approvalPolicy(), existing.thinkingMode(), existing.reasoningEffort(),
                             existing.enabled(), seed.key(), seed.version());
@@ -359,7 +368,7 @@ public class ProductivityController {
                 continue;
             }
             productivity.saveAgentProfile(null,project,seed.name(),seed.description(),seed.prompt(),null,
-                    mapper.writeValueAsString(seed.tools()),mapper.writeValueAsString(List.of()),
+                    mapper.writeValueAsString(withPlanTools(seed.tools())),mapper.writeValueAsString(List.of()),
                     seed.outputSchema(),seed.role(),seed.handoff(),"PROJECT",seed.approval(),true,
                     seed.key(),seed.version());
         }
@@ -400,12 +409,21 @@ public class ProductivityController {
         if("LEADER".equals(role))return cleaned;
         return cleaned.stream().filter(v->!Set.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent").contains(v)).toList();
     }
+    private static List<String> withPlanTools(List<String> tools) {
+        var values = new java.util.LinkedHashSet<>(tools);
+        values.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+        return List.copyOf(values);
+    }
+    private String withPlanToolsJson(String json) throws Exception {
+        List<String> values = json == null || json.isBlank() ? List.of() : mapper.readValue(json, STRING_LIST);
+        return mapper.writeValueAsString(withPlanTools(values));
+    }
     private static String defaultApprovalForRole(String role){return "REVIEWER".equals(role)?"READ_ONLY":"INHERIT";}
     private static boolean blank(String value){return value==null||value.isBlank();}
     private static ResponseStatusException notFound(String name){return new ResponseStatusException(HttpStatus.NOT_FOUND,name+" not found");}
     private static final List<AgentSeed> AGENT_SEEDS=List.of(
             new AgentSeed("leader","Leader 任务队长",1,"把一句话目标拆成可验证计划，挑选专家并综合最终交付。",
-                    "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要把同一任务重复派发；对子专家给出清晰边界、输入、交付格式和验收标准。",
+                    "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。独立节点可并行；审查、测试等后置节点必须用 dependencies 引用前置 delegation_id 或 child_run_id，并声明资源读写集与失败策略。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要重复派发任务。",
                     "LEADER","LEADER_ASSIGNED","INHERIT",
                     List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge","web_search","web_fetch","github_repo_fetch","mcp__github__*"),
                     "输出 Markdown：目标拆解、专家分工、关键结果、风险、最终建议或交付物。"),

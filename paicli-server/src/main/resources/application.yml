@@ -25,7 +25,7 @@ management:
 paicli:
   data-dir: data
   workspace-root: data/workspaces
-  worker-count: ${PAICLI_WORKER_COUNT:1}
+  worker-count: ${PAICLI_WORKER_COUNT:4}
   worker-poll-millis: ${PAICLI_WORKER_POLL_MILLIS:300}
   sandbox-mode: local
   infrastructure:
@@ -53,9 +53,9 @@ paicli:
     retry-base-millis: ${PAICLI_MODEL_RETRY_BASE_MILLIS:500}
     requests-per-minute: ${PAICLI_MODEL_REQUESTS_PER_MINUTE:60}
     fallback-model: ${PAICLI_MODEL_FALLBACK_NAME:}
-    max-run-steps: ${PAICLI_MODEL_MAX_RUN_STEPS:30}
+    max-run-steps: ${PAICLI_MODEL_MAX_RUN_STEPS:50}
     max-run-tokens: ${PAICLI_MODEL_MAX_RUN_TOKENS:0}
-    stream-idle-timeout-seconds: ${PAICLI_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:45}
+    stream-idle-timeout-seconds: ${PAICLI_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:120}
     circuit-failure-threshold: ${PAICLI_MODEL_CIRCUIT_FAILURE_THRESHOLD:5}
     circuit-open-seconds: ${PAICLI_MODEL_CIRCUIT_OPEN_SECONDS:30}
     max-run-duration-seconds: ${PAICLI_MODEL_MAX_RUN_DURATION_SECONDS:1800}

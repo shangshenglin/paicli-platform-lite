@@ -1,11 +1,16 @@
 package com.paicli.platform.server.context;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.ToolRequest;
+import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.model.ModelToolDefinition;
+import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.prompt.PromptAssembler;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import com.paicli.platform.server.tool.ServerToolProvider;
 import com.paicli.platform.server.tool.ToolCatalog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -13,6 +18,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -69,7 +76,7 @@ class ContextManagerTest {
         SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
         store.initialize();
         ObjectMapper mapper = new ObjectMapper();
-        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), planToolCatalog(),
                 new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
         var session = store.createSession("agent", "alpha");
         var run = store.createRun(session.id(), "review this code");
@@ -84,7 +91,26 @@ class ContextManagerTest {
                 .anyMatch(value -> value.contains("<agent_profile"))
                 .anyMatch(value -> value.contains("Only review correctness and risk."))
                 .anyMatch(value -> value.contains("summary, risks"));
-        assertThat(request.tools()).extracting("name").containsExactly("read_file");
+        assertThat(request.tools()).extracting("name")
+                .contains("read_file")
+                .containsAll(PlanToolProvider.PROFILE_PLAN_TOOLS)
+                .doesNotContain("write_file", "execute_command");
+    }
+
+    private static ToolCatalog planToolCatalog() {
+        ServerToolProvider planTools = new ServerToolProvider() {
+            @Override public String id() { return "plan-test"; }
+            @Override public List<ModelToolDefinition> definitions() {
+                return PlanToolProvider.PROFILE_PLAN_TOOLS.stream()
+                        .map(name -> new ModelToolDefinition(name, name, Map.of("type", "object")))
+                        .toList();
+            }
+            @Override public boolean supports(String toolName) {
+                return PlanToolProvider.PROFILE_PLAN_TOOLS.contains(toolName);
+            }
+            @Override public ToolResult execute(ToolRequest request) { return null; }
+        };
+        return new ToolCatalog(List.of(planTools));
     }
 
     @Test

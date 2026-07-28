@@ -5,6 +5,7 @@ const state = {
   sessionId: localStorage.getItem('paicli_session') || '',
   runId: '',
   runStatus: '',
+  planStatus: '',
   stream: null,
   live: null,
   pendingText: '',
@@ -28,7 +29,9 @@ const state = {
   notifiedRunId: '',
   notifiedApprovalIds: new Set(),
   planRefreshTimer: 0,
+  planRefreshPending: false,
   approvalRefreshTimer: 0,
+  eventCursors: new Map(),
   detailOpen: innerWidth > 1000,
   messageScroll: new Map()
 };
@@ -40,11 +43,19 @@ const statusNames = {
   WAITING_TOOL: '执行工具',
   WAITING_APPROVAL: '等待确认',
   WAITING_AGENT: '等待专家',
+  PLAN_ACTIVE: '计划执行中',
+  PLAN_WAITING_APPROVAL: '计划等待确认',
   COMPLETED: '已完成',
   FAILED: '失败',
   CANCELED: '已取消'
 };
 const agentToolOptions = [
+  ['list_plans', '查看项目计划'],
+  ['get_plan', '查看计划图和状态'],
+  ['create_plan', '创建受控计划（需审批）'],
+  ['replan_plan', '调整受控计划（需审批）'],
+  ['start_plan', '启动受控计划（需审批）'],
+  ['cancel_plan', '取消受控计划（需审批）'],
   ['list_agent_profiles', '列出专家 Profile'],
   ['spawn_agent', '创建子智能体任务'],
   ['list_agents', '查看子任务状态'],
@@ -62,6 +73,7 @@ const agentToolOptions = [
   ['github_repo_fetch', 'GitHub 仓库读取'],
   ['mcp__github__*', 'GitHub MCP 全部工具']
 ];
+const expertPlanTools = ['list_plans','get_plan','create_plan','replan_plan','start_plan','cancel_plan'];
 const agentRoleHelp = {
   LEADER: 'Leader：协作入口会优先选择；通常允许 list_agent_profiles / spawn_agent 来拆分和汇总任务。',
   EXPERT: 'Expert：领域执行者；按专家提示和工具白名单完成被分派的子任务。',
@@ -114,21 +126,32 @@ function showNotice(text, error = false) {
 
 function setStatus(value = '') {
   state.runStatus = value;
-  $('status').textContent = statusNames[value] || '空闲';
-  $('status').className = `status${value && !terminal.has(value) ? ' active' : ''}`
-    + `${value === 'FAILED' ? ' error' : ''}`;
-  $('composer').classList.toggle('running', Boolean(value && !terminal.has(value)));
-  $('input').disabled = value === 'WAITING_APPROVAL' || value === 'WAITING_AGENT';
-  const retryable = Boolean(state.runId && terminal.has(value));
+  const effective = effectiveConversationStatus(value);
+  $('status').textContent = statusNames[effective] || '空闲';
+  $('status').className = `status${effective && !terminal.has(effective) ? ' active' : ''}`
+    + `${effective === 'FAILED' ? ' error' : ''}`;
+  $('composer').classList.toggle('running', Boolean(effective && !terminal.has(effective)));
+  $('input').disabled = ['WAITING_APPROVAL', 'WAITING_AGENT', 'PLAN_ACTIVE', 'PLAN_WAITING_APPROVAL'].includes(effective);
+  const retryable = Boolean(state.runId && terminal.has(value) && !planInProgress());
   $('retryRun').hidden = !retryable;
   $('branchRun').hidden = !retryable;
   configureApprovalPolling(Boolean(state.runId));
-  if ((terminal.has(value) || value === 'WAITING_APPROVAL' || value === 'WAITING_AGENT') && state.runId && state.notifiedRunId !== `${state.runId}:${value}`) {
-    state.notifiedRunId = `${state.runId}:${value}`;
+  if ((terminal.has(effective) || ['WAITING_APPROVAL', 'WAITING_AGENT', 'PLAN_WAITING_APPROVAL'].includes(effective))
+      && state.runId && state.notifiedRunId !== `${state.runId}:${effective}`) {
+    state.notifiedRunId = `${state.runId}:${effective}`;
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification(`PaiCLI · ${statusNames[value] || value}`, {body: $('chatTitle').textContent || state.runId});
+      new Notification(`PaiCLI · ${statusNames[effective] || effective}`, {body: $('chatTitle').textContent || state.runId});
     }
   }
+}
+
+function planInProgress() {
+  return ['ACTIVE', 'WAITING_APPROVAL'].includes(state.planStatus);
+}
+
+function effectiveConversationStatus(runStatus = state.runStatus) {
+  if (!planInProgress() || (runStatus && !terminal.has(runStatus))) return runStatus;
+  return state.planStatus === 'WAITING_APPROVAL' ? 'PLAN_WAITING_APPROVAL' : 'PLAN_ACTIVE';
 }
 
 function scrollBottom() {
@@ -760,10 +783,19 @@ function markFinalAssistantMessages(messages) {
   });
 }
 
-async function renderSessionPlanPanel() {
+async function renderSessionPlanPanel(options = {}) {
+  const sessionId = options.sessionId || state.sessionId;
+  const existing = options.replace ? $('stack').querySelector('.session-plan-panel') : null;
   try {
-    const values = await api(`/v1/sessions/${state.sessionId}/plans?limit=3`);
-    if (!values.length) return false;
+    const values = await api(`/v1/sessions/${sessionId}/plans?limit=3`);
+    if (state.sessionId !== sessionId) return false;
+    const activePlan = values.find(view => ['ACTIVE', 'WAITING_APPROVAL'].includes(view.plan.status));
+    state.planStatus = activePlan?.plan.status || '';
+    setStatus(state.runStatus);
+    if (!values.length) {
+      if (existing) replaceTopPanel(existing, null);
+      return false;
+    }
     const panel = element('section', 'session-plan-panel');
     const title = element('div', 'section-title');
     title.append(
@@ -773,14 +805,34 @@ async function renderSessionPlanPanel() {
     const list = element('div', 'session-plan-list');
     values.forEach(view => list.append(renderSessionPlanItem(view)));
     panel.append(title, list);
-    $('stack').append(panel);
+    if (existing) replaceTopPanel(existing, panel);
+    else if (options.replace) $('stack').prepend(panel);
+    else $('stack').append(panel);
     return values.some(view => ['ACTIVE', 'WAITING_APPROVAL'].includes(view.plan.status));
   } catch (error) {
+    if (state.sessionId !== sessionId) return false;
     const panel = element('section', 'session-plan-panel');
     panel.append(element('div', 'form-error', `Plan 面板加载失败：${error.message}`));
-    $('stack').append(panel);
+    if (existing) replaceTopPanel(existing, panel);
+    else if (options.replace) $('stack').prepend(panel);
+    else $('stack').append(panel);
     return false;
   }
+}
+
+function replaceTopPanel(existing, replacement) {
+  if (!existing) return;
+  const container = $('messages');
+  const previousTop = container.scrollTop;
+  const panelTop = existing.offsetTop;
+  const previousHeight = existing.offsetHeight;
+  if (replacement) existing.replaceWith(replacement);
+  else existing.remove();
+  requestAnimationFrame(() => {
+    if (previousTop <= panelTop) return;
+    const nextHeight = replacement?.offsetHeight || 0;
+    container.scrollTop = Math.max(0, previousTop + nextHeight - previousHeight);
+  });
 }
 
 function renderSessionPlanItem(view) {
@@ -794,18 +846,27 @@ function renderSessionPlanItem(view) {
   const running = steps.find(step => ['RUNNING', 'READY'].includes(step.status));
   const failed = steps.find(step => step.status === 'FAILED');
   const current = failed || running || steps.find(step => !['COMPLETED', 'SKIPPED', 'CANCELED'].includes(step.status)) || steps[steps.length - 1];
+  const taskName = conciseTaskName(plan.summary || plan.objective, '未命名计划');
   const item = workbenchItem(
-    `${plan.status} · ${plan.objective}`,
+    `${plan.status} · ${taskName}`,
     `v${plan.version} · ${completed}/${steps.length} 步 · ${current ? `${current.status}：${current.title}` : '暂无步骤'}`
   );
   item.classList.add('session-plan-item');
+  item.querySelector('.managed-main').append(element('p', 'task-description', plan.objective || plan.summary || ''));
   const progress = element('div', 'plan-progress');
   const bar = element('span', '');
   bar.style.width = `${steps.length ? Math.round(completed / steps.length * 100) : 0}%`;
   progress.append(bar);
   const stepList = element('div', 'plan-step-strip');
-  steps.slice(0, 8).forEach(step => stepList.append(element('span', `plan-step ${step.status.toLowerCase()}`,
-    `${step.status} · ${step.title}`)));
+  steps.slice(0, 8).forEach(step => {
+    const button = element('button', `plan-step run-link ${step.status.toLowerCase()}`,
+      `${step.status} · ${step.title} · ${step.runId ? '打开 Run' : 'Run 未生成'}`);
+    button.type = 'button';
+    button.disabled = !step.runId;
+    button.title = step.runId ? `打开 ${step.runId}` : '该步骤尚未绑定 Run';
+    button.onclick = () => openPlanStepRun(plan, step);
+    stepList.append(button);
+  });
   if (steps.length > 8) stepList.append(element('span', 'plan-step', `+${steps.length - 8}`));
   item.querySelector('.managed-main').append(progress, stepList);
   if (plan.status === 'ACTIVE') actionButton(item, '调度', () => dispatchPlan(plan.id), true);
@@ -819,10 +880,16 @@ function configurePlanPolling(enabled) {
   state.planRefreshTimer = 0;
   if (!enabled || !state.sessionId) return;
   state.planRefreshTimer = setInterval(async () => {
-    if (!state.sessionId) return;
-    const panel = $('stack').querySelector('.session-plan-panel');
-    if (!panel) return;
-    await loadMessages();
+    if (state.planRefreshPending) return;
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    state.planRefreshPending = true;
+    try {
+      const active = await renderSessionPlanPanel({replace: true, sessionId});
+      if (state.sessionId === sessionId && !active) configurePlanPolling(false);
+    } finally {
+      state.planRefreshPending = false;
+    }
   }, 6000);
 }
 
@@ -862,13 +929,19 @@ function renderCollaborationTask(task) {
   const item = element('article', 'collaboration-task');
   const head = element('div', 'collaboration-task-head');
   const profile = task.profile || {};
+  const taskName = conciseTaskName(task.task, '协作任务');
   head.append(
-    element('strong', '', task.agentName || profile.name || '子专家'),
+    element('strong', '', taskName),
     element('span', `status ${terminal.has(task.status) ? '' : 'active'}`, task.status || 'UNKNOWN')
   );
   item.append(head);
   item.append(element('div', 'hint',
-    `${profile.role || 'EXPERT'} · ${task.childRunId} · step ${task.currentStep || 0} · session ${task.childSessionId}`));
+    `${task.agentName || profile.name || '子专家'} · ${profile.role || 'EXPERT'} · step ${task.currentStep || 0}`));
+  if (task.blockedReason) item.append(element('div', 'hint', `阻塞：${task.blockedReason}`));
+  if ((task.dependencies || []).length) {
+    item.append(element('div', 'hint',
+      `依赖 ${task.dependencies.length} 个节点 · 失败策略 ${task.failurePolicy || 'BLOCK_GRAPH'}`));
+  }
   item.append(element('p', '', task.task || ''));
   const actions = element('div', 'collaboration-actions');
   const openChild = element('button', 'secondary', '打开子会话');
@@ -876,6 +949,12 @@ function renderCollaborationTask(task) {
   const mountTrace = element('button', 'secondary', '挂载到执行详情');
   mountTrace.onclick = () => mountChildTrace(task);
   actions.append(openChild, mountTrace);
+  if (task.delegationStatus === 'WAITING_HUMAN') {
+    actions.append(
+      actionButtonElement('批准继续', () => decideDelegationNode(task, 'APPROVE')),
+      actionButtonElement('拒绝执行', () => decideDelegationNode(task, 'REJECT'))
+    );
+  }
   item.append(actions);
   (task.pendingApprovals || []).forEach(approval => item.append(renderChildApproval(approval)));
   if (task.error) item.append(element('div', 'form-error', task.error));
@@ -895,6 +974,18 @@ function renderCollaborationTask(task) {
     item.append(details);
   }
   return item;
+}
+
+async function decideDelegationNode(task, decision) {
+  try {
+    await api(`/v1/runs/${task.parentRunId || state.runId}/delegations/${task.delegationId}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({decision, reason: 'Console human graph decision'})
+    });
+    await loadMessages();
+  } catch (error) {
+    alert(`协作节点决策失败：${error.message}`);
+  }
 }
 
 function actionButtonElement(label, action) {
@@ -1041,6 +1132,10 @@ async function refreshSessions() {
 
 async function selectSession(id, rerender = true) {
   state.stream?.abort();
+  configurePlanPolling(false);
+  configureApprovalPolling(false);
+  state.runId = '';
+  state.planStatus = '';
   const previousSession = state.sessionId;
   if (previousSession) rememberMessageScroll(previousSession);
   if (previousSession && previousSession !== id && state.pendingAttachments.length) {
@@ -1048,7 +1143,6 @@ async function selectSession(id, rerender = true) {
       api(`/v1/sessions/${previousSession}/attachments/${attachment.id}`, {method: 'DELETE'})));
   }
   state.sessionId = id;
-  state.runId = '';
   state.live = null;
   clearPendingAttachments();
   localStorage.setItem('paicli_session', id);
@@ -1068,7 +1162,10 @@ async function selectSession(id, rerender = true) {
   clearEvents();
   await syncLatestRun({watch: false});
   await loadMessages({restoreSaved: true, forceScroll: !savedMessageScroll(id)});
-  if (state.runId && state.runStatus && !terminal.has(state.runStatus)) watch(state.runId);
+  if (state.runId && state.runStatus && !terminal.has(state.runStatus)) {
+    state.eventCursors.delete(state.runId);
+    watch(state.runId);
+  }
   $('sidebar').classList.remove('open');
 }
 
@@ -1092,12 +1189,12 @@ async function syncLatestRun(options = {}) {
   return run;
 }
 
-async function createSession() {
+async function createSession(initialTitle = '新对话') {
   try {
     const currentGroup = state.sessions.find(item => item.id === state.sessionId)?.groupId || null;
     const session = await api('/v1/sessions', {
       method: 'POST',
-      body: JSON.stringify({title: '新对话', projectKey: 'default', groupId: currentGroup})
+      body: JSON.stringify({title: initialTitle, projectKey: 'default', groupId: currentGroup})
     });
     state.sessions.unshift(session);
     await selectSession(session.id);
@@ -1110,9 +1207,12 @@ async function createSession() {
 
 function showHome() {
   state.stream?.abort();
+  configurePlanPolling(false);
+  configureApprovalPolling(false);
   state.sessionId = '';
   state.runId = '';
   state.runStatus = '';
+  state.planStatus = '';
   localStorage.removeItem('paicli_session');
   $('chatTitle').textContent = '新对话';
   $('runMeta').textContent = '尚未开始任务';
@@ -1192,12 +1292,13 @@ function resizeInput() {
 async function sendMessage() {
   const text = $('input').value.trim() || (state.pendingAttachments.length ? '请分析这些附件。' : '');
   if (!text) return;
+  if (planInProgress()) return showNotice('当前计划仍在执行，请等待计划结束后再发起新任务', true);
   if (state.runStatus && !terminal.has(state.runStatus)) {
     return showNotice('当前任务仍在运行', true);
   }
   if (shouldUsePlan(text)) return createPlanFromComposer(text, true);
   try {
-    if (!state.sessionId) await createSession();
+    if (!state.sessionId) await createSession(conciseTaskName(text, '新对话'));
     const run = await api(`/v1/sessions/${state.sessionId}/runs`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1209,6 +1310,7 @@ async function sendMessage() {
         agentProfileId: state.agentProfileId || null
       })
     });
+    applySessionTaskTitle(text);
     $('input').value = '';
     localStorage.removeItem(`paicli_draft_${state.sessionId}`);
     clearPendingAttachments();
@@ -1229,17 +1331,45 @@ function shouldUsePlan(text) {
   return false;
 }
 
+function conciseTaskName(value, fallback = '未命名任务', maxLength = 36) {
+  const source = String(value || '').replaceAll('\r', '\n');
+  let title = source.split('\n').map(line => line.trim())
+    .find(line => line.length) || '';
+  title = title
+    .replace(/^(?:#{1,6}\s*|[-*+]\s+|\d+[.)、]\s*)+/, '')
+    .replace(/^(?:(?:用户|协作|计划)?(?:任务|目标|请求|需求)|用户目标|任务目标)\s*[:：]\s*/i, '')
+    .replace(/^(?:请帮我|麻烦帮我|帮我|请)\s*/i, '')
+    .replace(/[`*_~]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentence = title.match(/^(.{8,}?)[。！？!?；;]/u);
+  if (sentence) title = sentence[1].trim();
+  if (!title) title = fallback;
+  const characters = Array.from(title);
+  return characters.length <= maxLength ? title : `${characters.slice(0, maxLength - 1).join('').trim()}…`;
+}
+
+function applySessionTaskTitle(task) {
+  const session = state.sessions.find(item => item.id === state.sessionId);
+  if (!session || !/^(?:新对话|未命名对话|new session|new conversation|untitled)$/i.test((session.title || '').trim())) return;
+  session.title = conciseTaskName(task, session.title);
+  $('chatTitle').textContent = session.title;
+  renderSessions();
+}
+
 async function createPlanFromComposer(text = null, autoStart = true) {
   const objective = (text || $('input').value).trim();
   if (!objective) return showNotice('请输入要执行的计划目标', true);
+  if (planInProgress()) return showNotice('当前计划仍在执行', true);
   if (state.runStatus && !terminal.has(state.runStatus)) return showNotice('当前任务仍在运行', true);
   try {
-    if (!state.sessionId) await createSession();
+    if (!state.sessionId) await createSession(conciseTaskName(objective, '新计划'));
     showNotice('正在创建持久化 Plan');
     const view = await api('/v1/plans/generate', {
       method: 'POST',
       body: JSON.stringify({sessionId: state.sessionId, projectKey: currentProjectKey(), objective})
     });
+    applySessionTaskTitle(objective);
     $('input').value = '';
     localStorage.removeItem(`paicli_draft_${state.sessionId}`);
     clearPendingAttachments();
@@ -1637,7 +1767,8 @@ function updateReasoningActivity(event, data) {
   state.reasoningActivity.eventId.textContent = `#${event.id || ''}`;
 }
 
-async function handleEvent(event) {
+async function handleEvent(event, runId) {
+  if (state.runId !== runId) return true;
   const data = parseData(event.data);
   if (event.type === 'model.delta') {
     queueLiveText(data.content);
@@ -1661,21 +1792,21 @@ async function handleEvent(event) {
     finishLive();
     await loadMessages();
     await loadApprovals();
-    showNotice('回答完成');
+    if (!planInProgress()) showNotice('回答完成');
     return true;
   } else if (event.type === 'run.failed') {
     addEvent(event, data);
     setStatus('FAILED');
     finishLive();
     await loadMessages();
-    showNotice(data.error || '任务失败', true);
+    if (!planInProgress()) showNotice(data.error || '任务失败', true);
     return true;
   } else if (event.type === 'run.canceled') {
     addEvent(event, data);
     setStatus('CANCELED');
     finishLive();
     await loadMessages();
-    showNotice('任务已取消');
+    if (!planInProgress()) showNotice('任务已取消');
     return true;
   } else {
     addEvent(event, data);
@@ -1689,6 +1820,17 @@ async function watch(runId) {
   state.stream = controller;
   let terminalSeen = false;
   let streamError = null;
+  let cursor = state.eventCursors.get(runId);
+  if (cursor === undefined) {
+    try {
+      cursor = await primeRunEventCursor(runId, controller);
+    } catch (error) {
+      if (error.name === 'AbortError' || controller.signal.aborted || state.runId !== runId) return;
+      streamError = error;
+      cursor = 0;
+    }
+  }
+  if (controller.signal.aborted || state.runId !== runId) return;
   const dispatchFrame = async frame => {
     const event = {type: 'message', data: '', id: 0};
     for (const line of frame.split(/\r?\n/)) {
@@ -1696,10 +1838,14 @@ async function watch(runId) {
       else if (line.startsWith('event:')) event.type = line.slice(6).trim();
       else if (line.startsWith('data:')) event.data += line.slice(5).trim();
     }
-    if (event.data && await handleEvent(event)) terminalSeen = true;
+    if (event.id) {
+      cursor = Math.max(cursor || 0, event.id);
+      state.eventCursors.set(runId, cursor);
+    }
+    if (event.data && await handleEvent(event, runId)) terminalSeen = true;
   };
   try {
-    const response = await fetch(`/v1/runs/${runId}/events?after=0`, {
+    const response = await fetch(`/v1/runs/${runId}/events?after=${cursor || 0}`, {
       headers: headers(false), signal: controller.signal
     });
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
@@ -1748,6 +1894,28 @@ async function watch(runId) {
       showNotice(`事件流断开，正在重连：${streamError.message}`, true);
     }
   }
+}
+
+async function primeRunEventCursor(runId, controller) {
+  let cursor = 0;
+  let page = [];
+  const recent = [];
+  do {
+    page = await api(`/v1/runs/${runId}/timeline?after=${cursor}&limit=500`);
+    if (controller.signal.aborted || state.runId !== runId) {
+      throw new DOMException('Run view changed', 'AbortError');
+    }
+    for (const event of page) {
+      cursor = Math.max(cursor, Number(event.id || 0));
+      if (!['model.delta', 'model.reasoning.delta'].includes(event.type)) {
+        recent.push(event);
+        if (recent.length > 160) recent.shift();
+      }
+    }
+  } while (page.length === 500);
+  for (const event of recent) addEvent(event, parseData(event.data));
+  state.eventCursors.set(runId, cursor);
+  return cursor;
 }
 
 async function retryRun(branch) {
@@ -2285,7 +2453,7 @@ async function startCollaboration() {
   const complexity = $('homeCollaborationComplexity').value;
   const risk = $('homeCollaborationRisk').value;
   const maxExperts = Math.max(1, Math.min(Number($('homeCollaborationMaxExperts').value || 3), 20));
-  const title = `协作：${objective.slice(0, 42)}`;
+  const title = `协作：${conciseTaskName(objective, '协作任务', 32)}`;
   const prompt = [
     `协作目标：${objective}`,
     selectedTeam ? `执行小队：${selectedTeam.name}。` : '执行小队：本次临时组合。',
@@ -2398,10 +2566,12 @@ function fillTagPicker(select, picker, values, selected = []) {
 }
 
 function defaultToolsForRole(role) {
-  if (role === 'LEADER') return ['list_agent_profiles','spawn_agent','list_agents','get_agent_result','cancel_agent','read_file','list_dir','search_knowledge'];
-  if (role === 'REVIEWER') return ['list_dir','read_file','search_knowledge','session_search'];
-  if (role === 'RUNNER') return ['list_dir','read_file','execute_command','search_knowledge'];
-  return ['list_dir','read_file','write_file','search_knowledge'];
+  let values;
+  if (role === 'LEADER') values = ['list_agent_profiles','spawn_agent','list_agents','get_agent_result','cancel_agent','read_file','list_dir','search_knowledge'];
+  else if (role === 'REVIEWER') values = ['list_dir','read_file','search_knowledge','session_search'];
+  else if (role === 'RUNNER') values = ['list_dir','read_file','execute_command','search_knowledge'];
+  else values = ['list_dir','read_file','write_file','search_knowledge'];
+  return [...new Set([...values, ...expertPlanTools])];
 }
 
 function updateAgentRoleHelp() {
@@ -2489,7 +2659,8 @@ function openAgentProfileDialog(profile = null) {
   $('agentReasoningEffort').value = editing ? profile.reasoningEffort || '' : '';
   $('agentReasoningEffort').disabled = $('agentThinkingMode').value === 'disabled';
   fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
-      editing ? parseStringListJson(profile.toolNamesJson) : defaultToolsForRole($('agentRole').value));
+      editing ? [...new Set([...parseStringListJson(profile.toolNamesJson), ...expertPlanTools])]
+        : defaultToolsForRole($('agentRole').value));
   fillTagPicker($('agentSkills'), $('agentSkillsPicker'), state.availableSkills.map(value => ({id: value.name, label: `${value.name} · ${value.description || value.source || ''}`})),
       editing ? parseStringListJson(profile.skillNamesJson) : []);
   updateAgentRoleHelp();
@@ -3191,7 +3362,10 @@ async function loadPlans() {
   try {
     const values = await api(`/v1/plans?projectKey=${encodeURIComponent(currentProjectKey())}&limit=50`);
     list.replaceChildren(...values.map(plan => {
-      const item = workbenchItem(`${plan.status} · ${plan.objective}`, `v${plan.version} · ${plan.id} · ${new Date(plan.updatedAt).toLocaleString()}`);
+      const item = workbenchItem(
+        `${plan.status} · ${conciseTaskName(plan.summary || plan.objective, '未命名计划')}`,
+        `${plan.objective} · v${plan.version} · ${new Date(plan.updatedAt).toLocaleString()}`
+      );
       if (['WAITING_APPROVAL', 'DRAFT'].includes(plan.status)) actionButton(item, '启动', () => startPlan(plan.id), true);
       if (plan.status === 'ACTIVE') actionButton(item, '调度', () => dispatchPlan(plan.id), true);
       actionButton(item, '详情', () => inspectPlan(plan.id));
@@ -3222,26 +3396,171 @@ async function inspectPlan(id) {
       api(`/v1/plans/${id}/validation-checks`),
       api(`/v1/plans/${id}/dag/batches`)
     ]);
-    const steps = view.steps.map(step => `${step.status} · ${step.clientId} · ${step.title}${step.runId ? ` · run ${step.runId}` : ''}`).join('\n');
-    const edges = view.edges.map(edge => `${edge.type} · ${edge.fromStepId} → ${edge.toStepId} · ${edge.conditionExpression}${edge.type === 'REWORK' ? ` · ${edge.traversalCount}/${edge.maxTraversals}` : ''}`).join('\n') || '无';
     const stateText = Object.entries(view.state.stepCounts || {}).map(([status, count]) => `${status}=${count}`).join(' · ') || '无步骤';
-    const blockerText = (view.state.blockers || []).map(blocker => `${blocker.kind} · ${blocker.stepId} · ${blocker.detail}`).join('\n') || '无';
-    const jobText = jobs.map(job => `${job.status} · ${job.kind} · ${job.id}${job.runId ? ` · run ${job.runId}` : ''}`).join('\n') || '无';
-    const checkText = checks.map(check => `${check.status} · ${check.name} · ${check.evidence || check.expected}`).join('\n') || '无';
-    const batchText = batches.map(batch => `#${batch.ordinal} ${batch.readOnlyEligible ? 'read-only' : 'serial'} · ${batch.stepIds.join(', ')}`).join('\n') || '无';
-    alert(`Plan: ${view.plan.objective}\nStatus: ${view.plan.status}\nState: ${stateText}\nTokens: ${view.state.totalTokens} · Event #${view.state.lastEventSequence}\n\nSteps:\n${steps}\n\nEdges:\n${edges}\n\nBlockers:\n${blockerText}\n\nDAG Batches:\n${batchText}\n\nAsync Jobs:\n${jobText}\n\nValidation Checks:\n${checkText}`);
-    const waitingStep = view.steps.find(step => step.status === 'WAITING_APPROVAL' && step.type === 'USER_APPROVAL');
-    if (waitingStep && confirm(`处理人工节点“${waitingStep.title}”？`)) {
-      const decision = (prompt('输入 APPROVED 批准，或 REJECTED 拒绝') || '').trim().toUpperCase();
-      if (!['APPROVED', 'REJECTED'].includes(decision)) return showNotice('未提交人工节点决策');
-      const reason = prompt('填写决策原因（可留空）') || '';
-      await api(`/v1/plan-steps/${waitingStep.id}/decision`, {
-        method: 'POST', body: JSON.stringify({decision, reason})
-      });
-      showNotice(`人工节点已${decision === 'APPROVED' ? '批准' : '拒绝'}`);
-      await loadPlans();
-    }
+    $('planDetailTitle').textContent = `${view.plan.status} · ${conciseTaskName(view.plan.summary || view.plan.objective, 'Plan')}`;
+    const content = $('planDetailContent');
+    content.replaceChildren();
+    content.append(auditSummary([
+      ['Plan', view.plan.id],
+      ['步骤状态', stateText],
+      ['模型 Token', String(view.state.totalTokens || 0)]
+    ]));
+    content.append(auditTextSection('完整目标', view.plan.objective));
+    content.append(auditListSection('步骤与 Run', view.steps.map(step => {
+      const card = auditCard(`${step.status} · ${step.ordinal}. ${step.title}`,
+        `${step.clientId} · ${step.type} · ${step.executionMode}`, step.description);
+      const actions = element('div', 'managed-actions');
+      const openRun = actionButtonElement(step.runId ? `打开 Run · ${step.runId}` : '打开 Run · 尚未生成',
+        () => openPlanStepRun(view.plan, step));
+      openRun.disabled = !step.runId;
+      actions.append(openRun);
+      if (step.status === 'WAITING_APPROVAL' && step.type === 'USER_APPROVAL') {
+        actions.append(
+          actionButtonElement('批准', () => decidePlanStep(step, 'APPROVED')),
+          actionButtonElement('拒绝', () => decidePlanStep(step, 'REJECTED'))
+        );
+      }
+      card.append(actions);
+      const stepChecks = checks.filter(check => check.stepId === step.id);
+      if (stepChecks.length) card.append(auditDetails('验证证据',
+        stepChecks.map(check => `${check.status} · ${check.name}\n${check.evidence || check.actual || check.expected || check.error || ''}`).join('\n\n')));
+      return card;
+    })));
+    content.append(auditTextSection('Graph 边', view.edges.map(edge =>
+      `${edge.type} · ${edge.fromStepId} → ${edge.toStepId} · ${edge.conditionExpression}`
+      + `${edge.type === 'REWORK' ? ` · ${edge.traversalCount}/${edge.maxTraversals}` : ''}`).join('\n') || '无'));
+    content.append(auditTextSection('阻塞原因', (view.state.blockers || []).map(blocker =>
+      `${blocker.kind} · ${blocker.stepId} · ${blocker.detail}`).join('\n') || '无'));
+    content.append(auditTextSection('调度批次', batches.map(batch =>
+      `#${batch.ordinal} ${batch.readOnlyEligible ? 'read-only' : 'serial'} · ${batch.stepIds.join(', ')}`).join('\n') || '无'));
+    content.append(auditTextSection('异步任务', jobs.map(job =>
+      `${job.status} · ${job.kind} · ${job.id}${job.runId ? ` · run ${job.runId}` : ''}`).join('\n') || '无'));
+    if (!$('planDetailDialog').open) $('planDetailDialog').showModal();
   } catch (error) { showNotice(`Plan 详情加载失败：${error.message}`, true); }
+}
+
+async function decidePlanStep(step, decision) {
+  const reason = prompt(`填写${decision === 'APPROVED' ? '批准' : '拒绝'}原因（可留空）`) || '';
+  try {
+    await api(`/v1/plan-steps/${step.id}/decision`, {
+      method: 'POST', body: JSON.stringify({decision, reason})
+    });
+    showNotice(`人工节点已${decision === 'APPROVED' ? '批准' : '拒绝'}`);
+    await inspectPlan(step.planId);
+    await loadPlans();
+  } catch (error) {
+    showNotice(`人工节点处理失败：${error.message}`, true);
+  }
+}
+
+async function openPlanStepRun(plan, step) {
+  if (!step?.runId) return showNotice('该步骤尚未绑定 Run', true);
+  try {
+    const audit = await api(`/v1/runs/${encodeURIComponent(step.runId)}/audit`);
+    $('runAuditTitle').textContent = `${audit.run.status} · ${step.title}`;
+    const content = $('runAuditContent');
+    content.replaceChildren();
+    content.append(auditSummary([
+      ['Run', audit.run.id],
+      ['Session', `${audit.session.title} · ${audit.session.id}`],
+      ['Plan Step', `${step.ordinal}. ${step.title}`]
+    ]));
+    const sessionActions = element('div', 'managed-actions');
+    sessionActions.append(actionButtonElement('打开所属 Session', async () => {
+      $('runAuditDialog').close();
+      if ($('planDetailDialog').open) $('planDetailDialog').close();
+      await openChildSession(audit.session.id);
+    }));
+    content.append(sessionActions);
+    content.append(auditTextSection('Run 输入', audit.run.input || ''));
+    content.append(auditListSection('模型输出', (audit.messages || [])
+      .filter(message => message.role === 'assistant').map(message => {
+      const card = auditCard(`${message.role} · #${message.sequence}`, message.createdAt || '',
+        message.content || '');
+      if (message.reasoningContent) card.append(auditDetails('模型推理', message.reasoningContent));
+      return card;
+    })));
+    content.append(auditListSection('工具调用', (audit.toolCalls || []).map(call => {
+      const card = auditCard(`${call.status} · ${call.toolName}`, call.id,
+        call.error || call.result || '尚无结果');
+      card.append(auditDetails('持久化参数', formatAuditValue(call.arguments)));
+      if (call.result) card.append(auditDetails('完整结果', formatAuditValue(call.result)));
+      return card;
+    })));
+    content.append(auditListSection('审批', (audit.approvals || []).map(approval => {
+      const card = auditCard(`${approval.status} · ${approval.id}`, approval.createdAt || '', approval.reason || '');
+      if (approval.status === 'PENDING') {
+        const actions = element('div', 'managed-actions');
+        actions.append(
+          actionButtonElement('允许', async () => {
+            await resolveApproval(approval.id, 'APPROVED');
+            await openPlanStepRun(plan, step);
+          }),
+          actionButtonElement('拒绝', async () => {
+            await resolveApproval(approval.id, 'DENIED');
+            await openPlanStepRun(plan, step);
+          })
+        );
+        card.append(actions);
+      }
+      return card;
+    })));
+    content.append(auditListSection('验证证据', (audit.validationChecks || []).map(check =>
+      auditCard(`${check.status} · ${check.name}`, check.kind,
+        check.evidence || check.actual || check.expected || check.error || ''))));
+    content.append(auditListSection('Run 事件', (audit.events || []).map(event =>
+      auditCard(`${event.type} · #${event.id}`, event.createdAt || '', formatAuditValue(event.data)))));
+    if (!$('runAuditDialog').open) $('runAuditDialog').showModal();
+  } catch (error) {
+    showNotice(`Run 审计详情加载失败：${error.message}`, true);
+  }
+}
+
+function auditSummary(values) {
+  const summary = element('div', 'audit-summary');
+  values.forEach(([label, value]) => {
+    const item = element('div', 'capability-status-item');
+    item.append(element('strong', '', label), element('small', '', value || '—'));
+    summary.append(item);
+  });
+  return summary;
+}
+
+function auditTextSection(title, text) {
+  const section = element('section', 'audit-section');
+  section.append(element('h3', '', title), element('pre', 'raw', text || '无'));
+  return section;
+}
+
+function auditListSection(title, cards) {
+  const section = element('section', 'audit-section');
+  section.append(element('h3', '', title));
+  const list = element('div', 'audit-list');
+  if (cards.length) list.append(...cards);
+  else list.append(element('div', 'hint', '无'));
+  section.append(list);
+  return section;
+}
+
+function auditCard(title, meta = '', body = '') {
+  const card = element('article', 'audit-card');
+  const head = element('div', 'audit-card-head');
+  head.append(element('strong', '', title), element('small', 'hint', meta));
+  card.append(head);
+  if (body) card.append(element('p', '', body));
+  return card;
+}
+
+function auditDetails(title, value) {
+  const details = element('details', '');
+  details.append(element('summary', '', title), element('pre', '', value || ''));
+  return details;
+}
+
+function formatAuditValue(value) {
+  if (typeof value !== 'string') return JSON.stringify(value, null, 2);
+  try { return JSON.stringify(JSON.parse(value), null, 2); }
+  catch { return value; }
 }
 
 async function loadApprovalPolicies() {
@@ -3303,9 +3622,10 @@ async function loadApprovals() {
     }
   }
   $('approvals').replaceChildren(...cards);
-  $('status').textContent = values.length ? `待审批 ${values.length}` : statusNames[state.runStatus] || '空闲';
-  $('status').className = `status${values.length || (state.runStatus && !terminal.has(state.runStatus)) ? ' active' : ''}`
-    + `${state.runStatus === 'FAILED' ? ' error' : ''}`;
+  const effective = effectiveConversationStatus();
+  $('status').textContent = values.length ? `待审批 ${values.length}` : statusNames[effective] || '空闲';
+  $('status').className = `status${values.length || (effective && !terminal.has(effective)) ? ' active' : ''}`
+    + `${effective === 'FAILED' ? ' error' : ''}`;
 }
 
 async function resolveApproval(id, decision, rememberScope = null) {
@@ -3388,6 +3708,8 @@ $('workbench').onclick = openWorkbench;
 $('agentStudio').onclick = openAgentStudio;
 $('evaluationCenter').onclick = openEvaluationCenter;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
+$('closePlanDetail').onclick = () => $('planDetailDialog').close();
+$('closeRunAudit').onclick = () => $('runAuditDialog').close();
 $('closeAgentStudio').onclick = () => $('agentStudioDialog').close();
 $('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;

@@ -80,9 +80,11 @@ public class PlanService {
                                  String rawPlanJson, String source) {
         String resolvedProject = resolveProject(sessionId, projectKey);
         PlanParser.ParsedPlan parsed = parser.parse(objective, rawPlanJson);
-        return plans.savePlan(sessionId, runId, resolvedProject, parsed.objective(), parsed.summary(),
+        PlanStore.Plan plan = plans.savePlan(sessionId, runId, resolvedProject, parsed.objective(), parsed.summary(),
                 source == null || source.isBlank() ? "MANUAL" : source, parsed.rawJson(), "[]",
                 parsed.steps(), parsed.edges());
+        if (sessionId != null && !sessionId.isBlank()) runtime.renameSessionIfGeneric(sessionId, parsed.objective());
+        return plan;
     }
 
     public PlanStore.Plan generate(String sessionId, String projectKey, String objective) {

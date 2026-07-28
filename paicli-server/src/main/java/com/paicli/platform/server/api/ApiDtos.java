@@ -96,6 +96,8 @@ final class ApiDtos {
 
     record PlanStepDecisionRequest(@NotBlank String decision, String reason) { }
 
+    record DelegationDecisionRequest(@NotBlank String decision, String reason) { }
+
     record CreateAsyncJobRequest(String planId, String stepId, String runId,
                                  @NotBlank String projectKey, @NotBlank String kind,
                                  String payloadJson, @NotBlank String idempotencyKey) { }

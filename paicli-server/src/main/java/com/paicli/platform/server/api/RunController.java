@@ -12,10 +12,12 @@ import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.sse.SseEventService;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
 import com.paicli.platform.server.plan.PlanService;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpHeaders;
@@ -52,12 +54,13 @@ public class RunController {
     private final CompletionNotificationService notifications;
     private final ObjectMapper mapper;
     private final PlanService plans;
+    private final PlanStore planStore;
     private final Path workspaceRoot;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
                          CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans,
-                         PlatformProperties properties) {
+                         PlanStore planStore, PlatformProperties properties) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -66,6 +69,7 @@ public class RunController {
         this.notifications = notifications;
         this.mapper = mapper;
         this.plans = plans;
+        this.planStore = planStore;
         this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
     }
 
@@ -109,6 +113,7 @@ public class RunController {
         String reasoningEffort = agent != null && !blank(agent.reasoningEffort())
                 ? agent.reasoningEffort() : request.reasoningEffort();
         if (!"enabled".equalsIgnoreCase(thinkingMode)) reasoningEffort = "";
+        store.renameSessionIfGeneric(sessionId, request.input());
         RunRecord run = store.createRun(sessionId, runInput, thinkingMode, reasoningEffort,
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),
                 request.priority() == null ? 0 : request.priority(), 0);
@@ -136,9 +141,10 @@ public class RunController {
                 这是一次由普通对话自动触发的协作任务。请作为 Leader 自主完成以下流程：
                 1. 先在内部形成清晰的执行计划和验收标准，判断任务是否需要拆分。
                 2. 调用 list_agent_profiles 查看当前策略允许的专家，依据任务能力匹配选择专家。
-                3. 对相互独立的工作并行调用 spawn_agent；每个子任务必须包含边界、输入、交付格式和验收标准。
-                4. 使用 list_agents 和 get_agent_result 跟踪子任务；必要时补充验证或审查。
-                5. 最终汇总计划、执行进度、专家结果、风险和未完成项，用中文交付。
+                3. 对相互独立的工作并行调用 spawn_agent；每个子任务必须包含边界、输入、交付格式、验收标准、资源读写集和失败策略。
+                4. 后置任务（例如代码审查、测试）必须在 dependencies 中引用前置委派返回的 delegation_id 或 child_run_id，不能提前运行。
+                5. 使用 list_agents 和 get_agent_result 跟踪子任务；必要时补充验证或审查。
+                6. 最终汇总计划、执行进度、专家结果、风险和未完成项，用中文交付。
 
                 用户目标：
                 %s
@@ -178,6 +184,29 @@ public class RunController {
     @GetMapping("/runs/{runId}")
     public RunRecord getRun(@PathVariable String runId) {
         return requireRun(runId);
+    }
+
+    @GetMapping("/runs/{runId}/audit")
+    @Operation(summary = "Read consolidated Run audit details",
+            description = "Returns the Run and Session, model messages, tool calls, approvals, events, "
+                    + "bound Plan Step, and validation evidence in one read-only response.")
+    public Map<String, Object> runAudit(@PathVariable String runId) {
+        RunRecord run = requireRun(runId);
+        SessionRecord session = store.findSession(run.sessionId()).orElseThrow();
+        var step = planStore.findStepByRun(runId).orElse(null);
+        List<?> checks = step == null ? List.of() : planStore.validationChecks(step.planId(), 500).stream()
+                .filter(check -> step.id().equals(check.stepId())).toList();
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("run", run);
+        value.put("session", session);
+        value.put("messages", store.messages(run.sessionId()).stream()
+                .filter(message -> runId.equals(message.runId())).toList());
+        value.put("toolCalls", store.toolCallsForRun(runId));
+        value.put("approvals", store.approvalsForRun(runId));
+        value.put("events", store.events(runId, 0, 1_000));
+        value.put("planStep", step == null ? Map.of() : step);
+        value.put("validationChecks", checks);
+        return value;
     }
 
     @GetMapping("/runs/{runId}/workspace-file")
@@ -286,6 +315,16 @@ public class RunController {
                         .map(this::collaborationTask).toList());
     }
 
+    @PostMapping("/runs/{runId}/delegations/{delegationId}/decision")
+    public Map<String, Object> decideDelegation(@PathVariable String runId,
+                                                @PathVariable String delegationId,
+                                                @Valid @RequestBody ApiDtos.DelegationDecisionRequest request) {
+        requireRun(runId);
+        RunDelegationRecord delegation = store.decideDelegation(
+                runId, delegationId, request.decision(), request.reason());
+        return collaborationTask(delegation);
+    }
+
     private Map<String, Object> parentNavigation(String runId) {
         return store.parentDelegationForRun(runId).map(delegation -> {
             RunRecord parent = store.findRun(delegation.parentRunId()).orElse(null);
@@ -363,6 +402,7 @@ public class RunController {
                 .orElse(Map.of());
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("delegationId", delegation.id());
+        value.put("parentRunId", delegation.parentRunId());
         value.put("childSessionId", delegation.childSessionId());
         value.put("childRunId", delegation.childRunId());
         value.put("agentProfileId", delegation.agentProfileId() == null ? "" : delegation.agentProfileId());
@@ -370,12 +410,20 @@ public class RunController {
         value.put("task", delegation.task());
         value.put("createdAt", delegation.createdAt());
         value.put("delegationStatus", delegation.status());
+        value.put("failurePolicy", delegation.failurePolicy());
+        value.put("blockedReason", delegation.blockedReason() == null ? "" : delegation.blockedReason());
+        value.put("workspaceRef", delegation.workspaceRef() == null ? "" : delegation.workspaceRef());
+        value.put("dependencies", store.delegationDependencyIds(delegation.id()));
+        value.put("resources", store.delegationResources(delegation.id()));
         value.put("delegationCompletedAt", delegation.completedAt());
-        value.put("status", child == null ? "UNKNOWN" : child.status().name());
+        value.put("runStatus", child == null ? "UNKNOWN" : child.status().name());
+        value.put("status", List.of("BLOCKED", "WAITING_HUMAN").contains(delegation.status())
+                ? delegation.status() : child == null ? "UNKNOWN" : child.status().name());
         value.put("currentStep", child == null ? 0 : child.currentStep());
         value.put("finishedAt", child == null ? null : child.finishedAt());
         value.put("error", child == null || child.error() == null ? "" : child.error());
         value.put("result", child == null || !child.status().terminal() ? "" : latestAssistant(delegation.childSessionId()));
+        value.put("resultEnvelope", delegation.resultJson());
         value.put("pendingApprovals", child == null ? List.of() : store.approvalsForRun(child.id()).stream()
                 .filter(approval -> "PENDING".equals(approval.status().name()))
                 .map(this::approvalSummary).toList());

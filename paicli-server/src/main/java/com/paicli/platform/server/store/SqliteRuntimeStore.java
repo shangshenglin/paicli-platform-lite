@@ -1,5 +1,7 @@
 package com.paicli.platform.server.store;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.common.ToolEffect;
@@ -14,6 +16,7 @@ import com.paicli.platform.server.domain.RunEventRecord;
 import com.paicli.platform.server.domain.RunDelegationRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.domain.TaskTitle;
 import com.paicli.platform.server.domain.SessionGroupRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import jakarta.annotation.PostConstruct;
@@ -29,7 +32,9 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -41,6 +46,7 @@ public class SqliteRuntimeStore {
     private final Path artifactRoot;
     private final Path attachmentRoot;
     private final SqliteConnectionFactory connections;
+    private final ObjectMapper mapper = new ObjectMapper();
 
     public SqliteRuntimeStore(PlatformProperties properties) {
         this.databasePath = properties.dataDir().resolve("paicli.db").toAbsolutePath().normalize();
@@ -236,9 +242,26 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "result_json", "TEXT NOT NULL DEFAULT '{}'");
             SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "status", "TEXT NOT NULL DEFAULT 'QUEUED'");
             SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "failure_class", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "failure_policy",
+                    "TEXT NOT NULL DEFAULT 'BLOCK_GRAPH'");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "blocked_reason", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "workspace_ref", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "run_delegations", "completed_at", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_parent ON run_delegations(parent_run_id, created_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_delegations_plan_step ON run_delegations(plan_step_id, status)");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_delegation_dependencies (" +
+                    "delegation_id TEXT NOT NULL, depends_on_delegation_id TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "PRIMARY KEY(delegation_id,depends_on_delegation_id), " +
+                    "FOREIGN KEY(delegation_id) REFERENCES run_delegations(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(depends_on_delegation_id) REFERENCES run_delegations(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_delegation_dependencies_upstream " +
+                    "ON run_delegation_dependencies(depends_on_delegation_id,delegation_id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_delegation_resources (" +
+                    "delegation_id TEXT NOT NULL, resource_key TEXT NOT NULL, access_mode TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, PRIMARY KEY(delegation_id,resource_key,access_mode), " +
+                    "FOREIGN KEY(delegation_id) REFERENCES run_delegations(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_delegation_resources_key " +
+                    "ON run_delegation_resources(resource_key,access_mode,delegation_id)");
             statement.execute("CREATE TABLE IF NOT EXISTS run_collaboration_policies (" +
                     "run_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, complexity TEXT NOT NULL DEFAULT 'MEDIUM', " +
                     "risk TEXT NOT NULL DEFAULT 'MEDIUM', allowed_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]', " +
@@ -641,6 +664,25 @@ public class SqliteRuntimeStore {
         }
     }
 
+    public SessionRecord renameSessionIfGeneric(String sessionId, String task) {
+        SessionRecord current = findSession(sessionId)
+                .orElseThrow(() -> new IllegalArgumentException("session not found: " + sessionId));
+        if (!TaskTitle.isGenericSessionTitle(current.title())) return current;
+        String title = TaskTitle.summarize(task, current.title());
+        Instant now = Instant.now();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE sessions SET title=?, updated_at=? WHERE id=? AND title=?")) {
+            ps.setString(1, title);
+            ps.setString(2, now.toString());
+            ps.setString(3, sessionId);
+            ps.setString(4, current.title());
+            ps.executeUpdate();
+            return findSession(sessionId).orElseThrow();
+        } catch (SQLException e) {
+            throw failure("rename session", e);
+        }
+    }
+
     public boolean deleteSession(String sessionId) {
         List<String> runIds = new ArrayList<>();
         try (Connection connection = open()) {
@@ -896,6 +938,22 @@ public class SqliteRuntimeStore {
                 RunRecord selected = null;
                 try (PreparedStatement ps = connection.prepareStatement(
                         "SELECT r.* FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.status=? " +
+                                "AND NOT EXISTS (SELECT 1 FROM run_delegations gate " +
+                                "WHERE gate.child_run_id=r.id AND gate.status IN ('BLOCKED','WAITING_HUMAN','CANCELED')) " +
+                                "AND NOT EXISTS (SELECT 1 FROM run_delegations current_delegation " +
+                                "JOIN run_delegation_resources current_resource " +
+                                "ON current_resource.delegation_id=current_delegation.id " +
+                                "JOIN run_delegation_resources active_resource " +
+                                "ON active_resource.resource_key=current_resource.resource_key " +
+                                "AND (active_resource.access_mode='WRITE' OR current_resource.access_mode='WRITE') " +
+                                "JOIN run_delegations active_delegation " +
+                                "ON active_delegation.id=active_resource.delegation_id " +
+                                "JOIN runs active_run ON active_run.id=active_delegation.child_run_id " +
+                                "WHERE current_delegation.child_run_id=r.id " +
+                                "AND active_delegation.id<>current_delegation.id " +
+                                "AND active_delegation.status='RUNNING' " +
+                                "AND COALESCE(active_run.workspace_owner_run_id,active_run.id)=" +
+                                "COALESCE(r.workspace_owner_run_id,r.id)) " +
                                 "AND (SELECT COUNT(*) FROM runs active JOIN sessions owner ON owner.id=active.session_id " +
                                 "WHERE owner.project_key=s.project_key AND active.status NOT IN ('QUEUED','COMPLETED','FAILED','CANCELED')) " +
                                 "< COALESCE((SELECT max_concurrent_runs FROM budget_policies b " +
@@ -925,6 +983,12 @@ public class SqliteRuntimeStore {
                 }
                 insertEvent(connection, selected.id(), "run.started",
                         "{\"step\":" + selected.currentStep() + "}");
+                try (PreparedStatement delegation = connection.prepareStatement(
+                        "UPDATE run_delegations SET status='RUNNING',blocked_reason=NULL " +
+                                "WHERE child_run_id=? AND status='QUEUED'")) {
+                    delegation.setString(1, selected.id());
+                    delegation.executeUpdate();
+                }
                 connection.commit();
                 return findRun(selected.id());
             } catch (Exception e) {
@@ -1081,12 +1145,24 @@ public class SqliteRuntimeStore {
                                                         String modelProfileId, String thinkingMode,
                                                         String reasoningEffort, String planId,
                                                         String planStepId, String envelopeJson) {
+        return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, agentProfileId,
+                modelProfileId, thinkingMode, reasoningEffort, planId, planStepId, envelopeJson,
+                DelegationOptions.defaults());
+    }
+
+    public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
+                                                        String agentName, String task, String agentProfileId,
+                                                        String modelProfileId, String thinkingMode,
+                                                        String reasoningEffort, String planId,
+                                                        String planStepId, String envelopeJson,
+                                                        DelegationOptions options) {
         String name = requireText(agentName, "agentName", 80);
         String input = requireText(task, "task", 32_000);
         String childAgentProfileId = nullableText(agentProfileId);
         String childModelProfileId = nullableText(modelProfileId);
-        String delegatedWorkspaceOwner = workspaceOwnerRunId(parentRunId);
+        String parentWorkspaceOwner = workspaceOwnerRunId(parentRunId);
         String normalizedEnvelope = envelopeJson == null || envelopeJson.isBlank() ? "{}" : envelopeJson.trim();
+        DelegationOptions graph = options == null ? DelegationOptions.defaults() : options.normalized();
         if (normalizedEnvelope.length() > 64_000) throw new IllegalArgumentException("delegation envelope is too large");
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
@@ -1126,14 +1202,18 @@ public class SqliteRuntimeStore {
                 String resolvedReasoningEffort = nullableText(reasoningEffort) == null
                         ? parent.reasoningEffort() : normalizeReasoningEffort(reasoningEffort);
                 if (!"enabled".equals(resolvedThinkingMode)) resolvedReasoningEffort = "";
+                List<String> dependencyIds = resolveDelegationDependencies(
+                        connection, parentRunId, graph.dependencies());
                 Instant now = Instant.now();
                 String childSessionId = id("session");
                 String childRunId = id("run");
+                String delegatedWorkspaceOwner = resolveDelegatedWorkspaceOwner(
+                        connection, parentRunId, graph.workspaceRef(), parentWorkspaceOwner, childRunId);
                 try (PreparedStatement session = connection.prepareStatement(
                         "INSERT INTO sessions(id,title,project_key,group_id,status,is_internal,created_at,updated_at) " +
                                 "VALUES(?,?,?,?,?,?,?,?)")) {
                     session.setString(1, childSessionId);
-                    session.setString(2, "Agent: " + name);
+                    session.setString(2, TaskTitle.delegated(name, input));
                     session.setString(3, parentSession.projectKey());
                     session.setString(4, null);
                     session.setString(5, "ACTIVE");
@@ -1163,10 +1243,14 @@ public class SqliteRuntimeStore {
                         null, null, null, false);
                 insertEvent(connection, childRunId, "run.queued", "{\"delegatedBy\":\"" + parentRunId + "\"}");
                 String delegationId = id("delegation");
+                String initialStatus = dependencyIds.isEmpty() ? RunStatus.QUEUED.name() : "BLOCKED";
+                String blockedReason = dependencyIds.isEmpty() ? null
+                        : "waiting for " + dependencyIds.size() + " upstream delegation(s)";
                 try (PreparedStatement delegation = connection.prepareStatement(
                         "INSERT INTO run_delegations(id,parent_run_id,parent_tool_call_id,child_session_id," +
                                 "child_run_id,agent_profile_id,agent_name,task,plan_id,plan_step_id,envelope_json," +
-                                "status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                                "status,failure_policy,blocked_reason,workspace_ref,created_at) " +
+                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
                     delegation.setString(1, delegationId);
                     delegation.setString(2, parentRunId);
                     delegation.setString(3, parentToolCallId);
@@ -1178,17 +1262,29 @@ public class SqliteRuntimeStore {
                     delegation.setString(9, nullableText(planId));
                     delegation.setString(10, nullableText(planStepId));
                     delegation.setString(11, normalizedEnvelope);
-                    delegation.setString(12, RunStatus.QUEUED.name());
-                    delegation.setString(13, now.toString());
+                    delegation.setString(12, initialStatus);
+                    delegation.setString(13, graph.failurePolicy());
+                    delegation.setString(14, blockedReason);
+                    delegation.setString(15, nullableText(graph.workspaceRef()));
+                    delegation.setString(16, now.toString());
                     delegation.executeUpdate();
                 }
+                insertDelegationDependencies(connection, delegationId, dependencyIds, now);
+                insertDelegationResources(connection, delegationId, graph.readSet(), "READ", now);
+                insertDelegationResources(connection, delegationId, graph.writeSet(), "WRITE", now);
                 insertEvent(connection, parentRunId, "agent.delegated", "{\"childRunId\":\""
-                        + childRunId + "\",\"agentName\":\"" + escape(name) + "\"}");
+                        + childRunId + "\",\"agentName\":\"" + escape(name)
+                        + "\",\"status\":\"" + initialStatus + "\"}");
+                if (!dependencyIds.isEmpty()) {
+                    insertEvent(connection, childRunId, "agent.blocked",
+                            "{\"reason\":\"dependencies\",\"count\":" + dependencyIds.size() + "}");
+                    for (String dependencyId : dependencyIds) {
+                        advanceDependentDelegations(connection, dependencyId);
+                    }
+                }
+                RunDelegationRecord created = findDelegation(connection, delegationId).orElseThrow();
                 connection.commit();
-                return new RunDelegationRecord(delegationId, parentRunId, parentToolCallId,
-                        childSessionId, childRunId, resolvedAgentProfileId, name, input,
-                        nullableText(planId), nullableText(planStepId), normalizedEnvelope, "{}",
-                        RunStatus.QUEUED.name(), null, null, now);
+                return created;
             } catch (Exception e) {
                 rollback(connection);
                 throw e;
@@ -1269,6 +1365,76 @@ public class SqliteRuntimeStore {
             throw new IllegalStateException("delegation result was not persisted");
         } catch (SQLException e) {
             throw failure("complete delegated run result", e);
+        }
+    }
+
+    public List<String> delegationDependencyIds(String delegationId) {
+        List<String> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT depends_on_delegation_id FROM run_delegation_dependencies " +
+                        "WHERE delegation_id=? ORDER BY created_at")) {
+            ps.setString(1, delegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(rs.getString(1));
+            }
+            return List.copyOf(values);
+        } catch (SQLException e) {
+            throw failure("list delegation dependencies", e);
+        }
+    }
+
+    public Map<String, List<String>> delegationResources(String delegationId) {
+        List<String> reads = new ArrayList<>();
+        List<String> writes = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT resource_key,access_mode FROM run_delegation_resources " +
+                        "WHERE delegation_id=? ORDER BY resource_key,access_mode")) {
+            ps.setString(1, delegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if ("WRITE".equals(rs.getString("access_mode"))) writes.add(rs.getString("resource_key"));
+                    else reads.add(rs.getString("resource_key"));
+                }
+            }
+            return Map.of("read", List.copyOf(reads), "write", List.copyOf(writes));
+        } catch (SQLException e) {
+            throw failure("list delegation resources", e);
+        }
+    }
+
+    public RunDelegationRecord decideDelegation(String parentRunId, String delegationId,
+                                                String decision, String reason) {
+        String normalized = normalizeEnum(decision, Set.of("APPROVE", "REJECT"), "");
+        if (normalized.isBlank()) throw new IllegalArgumentException("decision must be APPROVE or REJECT");
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                RunDelegationRecord delegation = findDelegation(connection, delegationId)
+                        .filter(value -> value.parentRunId().equals(parentRunId))
+                        .orElseThrow(() -> new IllegalArgumentException("delegation not found for this parent"));
+                if (!"WAITING_HUMAN".equals(delegation.status())) {
+                    throw new IllegalStateException("delegation is not waiting for a human decision");
+                }
+                String explanation = reason == null || reason.isBlank() ? "human graph decision" : reason.trim();
+                if ("APPROVE".equals(normalized)) {
+                    try (PreparedStatement ps = connection.prepareStatement(
+                            "UPDATE run_delegations SET status='QUEUED',blocked_reason=NULL WHERE id=?")) {
+                        ps.setString(1, delegationId);
+                        ps.executeUpdate();
+                    }
+                    insertEvent(connection, delegation.childRunId(), "agent.human_approved",
+                            "{\"reason\":\"" + escape(explanation) + "\"}");
+                } else {
+                    cancelDependentDelegation(connection, delegation, "human rejected: " + explanation);
+                }
+                connection.commit();
+                return findDelegation(parentRunId, delegation.childRunId()).orElseThrow();
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("decide delegation", e);
         }
     }
 
@@ -2054,6 +2220,7 @@ public class SqliteRuntimeStore {
                 insertEvent(connection, runId, "model.completed",
                         completedEventJson == null ? "{}" : completedEventJson);
                 insertEvent(connection, runId, "run.completed", "{\"status\":\"COMPLETED\"}");
+                finalizeDelegationGraph(connection, runId, RunStatus.COMPLETED, null);
                 connection.commit();
                 return true;
             } catch (Exception e) {
@@ -2434,7 +2601,10 @@ public class SqliteRuntimeStore {
             ps.setString(5, RunStatus.FAILED.name());
             ps.setString(6, RunStatus.CANCELED.name());
             boolean changed = ps.executeUpdate() > 0;
-            if (changed) insertEvent(connection, runId, "run.canceled", "{}");
+            if (changed) {
+                insertEvent(connection, runId, "run.canceled", "{}");
+                finalizeDelegationGraph(connection, runId, RunStatus.CANCELED, "run canceled");
+            }
             connection.commit();
             return changed;
         } catch (SQLException e) {
@@ -3168,6 +3338,407 @@ public class SqliteRuntimeStore {
         }
     }
 
+    private List<String> resolveDelegationDependencies(Connection connection, String parentRunId,
+                                                       List<String> dependencyRefs) throws SQLException {
+        if (dependencyRefs == null || dependencyRefs.isEmpty()) return List.of();
+        List<String> resolved = new ArrayList<>();
+        for (String raw : dependencyRefs.stream().distinct().limit(50).toList()) {
+            String reference = raw == null ? "" : raw.trim();
+            if (reference.isBlank()) continue;
+            List<String> matches = new ArrayList<>();
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "SELECT id FROM run_delegations WHERE parent_run_id=? " +
+                            "AND (id=? OR child_run_id=? OR plan_step_id=? OR agent_name=?) ORDER BY created_at")) {
+                ps.setString(1, parentRunId);
+                ps.setString(2, reference);
+                ps.setString(3, reference);
+                ps.setString(4, reference);
+                ps.setString(5, reference);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) matches.add(rs.getString(1));
+                }
+            }
+            if (matches.isEmpty()) {
+                throw new IllegalArgumentException("delegation dependency not found for this parent: " + reference);
+            }
+            if (matches.size() > 1) {
+                throw new IllegalArgumentException("delegation dependency is ambiguous; use delegation_id or child_run_id: "
+                        + reference);
+            }
+            if (!resolved.contains(matches.get(0))) resolved.add(matches.get(0));
+        }
+        return List.copyOf(resolved);
+    }
+
+    private static String resolveDelegatedWorkspaceOwner(Connection connection, String parentRunId,
+                                                         String workspaceRef, String parentWorkspaceOwner,
+                                                         String childRunId) throws SQLException {
+        if (workspaceRef == null || workspaceRef.isBlank()) return parentWorkspaceOwner;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT COALESCE(r.workspace_owner_run_id,r.id) FROM run_delegations d " +
+                        "JOIN runs r ON r.id=d.child_run_id WHERE d.parent_run_id=? AND d.workspace_ref=? " +
+                        "ORDER BY d.created_at LIMIT 1")) {
+            ps.setString(1, parentRunId);
+            ps.setString(2, workspaceRef);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : childRunId;
+            }
+        }
+    }
+
+    private static void insertDelegationDependencies(Connection connection, String delegationId,
+                                                     List<String> dependencyIds, Instant now) throws SQLException {
+        if (dependencyIds.isEmpty()) return;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO run_delegation_dependencies(delegation_id,depends_on_delegation_id,created_at) " +
+                        "VALUES(?,?,?)")) {
+            for (String dependencyId : dependencyIds) {
+                ps.setString(1, delegationId);
+                ps.setString(2, dependencyId);
+                ps.setString(3, now.toString());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private static void insertDelegationResources(Connection connection, String delegationId,
+                                                  List<String> resources, String mode, Instant now)
+            throws SQLException {
+        if (resources.isEmpty()) return;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR IGNORE INTO run_delegation_resources(delegation_id,resource_key,access_mode,created_at) " +
+                        "VALUES(?,?,?,?)")) {
+            for (String resource : resources) {
+                ps.setString(1, delegationId);
+                ps.setString(2, resource);
+                ps.setString(3, mode);
+                ps.setString(4, now.toString());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    private void finalizeDelegationGraph(Connection connection, String childRunId, RunStatus status, String error)
+            throws SQLException {
+        RunDelegationRecord delegation = findDelegationByChild(connection, childRunId).orElse(null);
+        if (delegation == null) return;
+        String now = Instant.now().toString();
+        String failureClass = delegationFailureClass(status, error);
+        String resultJson = terminalDelegationResult(connection, delegation, status, error, failureClass);
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE run_delegations SET status=?,result_json=?,failure_class=?,blocked_reason=NULL," +
+                        "completed_at=? WHERE id=?")) {
+            ps.setString(1, status.name());
+            ps.setString(2, resultJson);
+            ps.setString(3, failureClass);
+            ps.setString(4, now);
+            ps.setString(5, delegation.id());
+            ps.executeUpdate();
+        }
+        requeueWaitingParent(connection, delegation.parentRunId(), childRunId);
+        advanceDependentDelegations(connection, delegation.id());
+    }
+
+    private void advanceDependentDelegations(Connection connection, String completedDelegationId)
+            throws SQLException {
+        List<String> downstream = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT d.id FROM run_delegations d JOIN run_delegation_dependencies dep " +
+                        "ON dep.delegation_id=d.id WHERE dep.depends_on_delegation_id=? AND d.status='BLOCKED'")) {
+            ps.setString(1, completedDelegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) downstream.add(rs.getString(1));
+            }
+        }
+        for (String downstreamId : downstream) {
+            RunDelegationRecord dependent = findDelegation(connection, downstreamId).orElse(null);
+            if (dependent == null || !dependenciesTerminal(connection, downstreamId)) continue;
+            boolean failedUpstream = hasFailedDependency(connection, downstreamId);
+            if (!failedUpstream || "DEGRADE".equals(dependent.failurePolicy())) {
+                appendDependencyContext(connection, dependent);
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE run_delegations SET status='QUEUED',blocked_reason=NULL WHERE id=? AND status='BLOCKED'")) {
+                    ps.setString(1, downstreamId);
+                    if (ps.executeUpdate() == 1) {
+                        insertEvent(connection, dependent.childRunId(),
+                                failedUpstream ? "agent.dependency_degraded" : "agent.dependencies_satisfied",
+                                failedUpstream
+                                        ? "{\"policy\":\"DEGRADE\"}"
+                                        : "{\"status\":\"QUEUED\"}");
+                    }
+                }
+            } else if ("REQUIRE_HUMAN".equals(dependent.failurePolicy())) {
+                appendDependencyContext(connection, dependent);
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE run_delegations SET status='WAITING_HUMAN'," +
+                                "blocked_reason='upstream delegation failed; human decision required' " +
+                                "WHERE id=? AND status='BLOCKED'")) {
+                    ps.setString(1, downstreamId);
+                    if (ps.executeUpdate() == 1) {
+                        insertEvent(connection, dependent.childRunId(), "agent.waiting_human",
+                                "{\"reason\":\"upstream_failed\"}");
+                    }
+                }
+            } else {
+                cancelDependentDelegation(connection, dependent, "blocked by failed upstream delegation");
+            }
+        }
+    }
+
+    private void appendDependencyContext(Connection connection, RunDelegationRecord dependent)
+            throws SQLException {
+        List<Map<String, Object>> results = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT upstream.id,upstream.agent_name,upstream.status,upstream.result_json " +
+                        "FROM run_delegation_dependencies dep JOIN run_delegations upstream " +
+                        "ON upstream.id=dep.depends_on_delegation_id WHERE dep.delegation_id=? " +
+                        "ORDER BY dep.created_at")) {
+            ps.setString(1, dependent.id());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("delegation_id", rs.getString("id"));
+                    item.put("agent_name", rs.getString("agent_name"));
+                    item.put("status", rs.getString("status"));
+                    item.put("result_envelope", readJson(rs.getString("result_json")));
+                    results.add(item);
+                }
+            }
+        }
+        String json;
+        try {
+            json = mapper.writeValueAsString(results);
+        } catch (Exception e) {
+            json = "[]";
+        }
+        String bounded = boundedText(json, 16_000);
+        insertMessage(connection, dependent.childSessionId(), dependent.childRunId(), "user",
+                "Upstream dependency results are now available. Use these persisted result envelopes as input; "
+                        + "do not repeat completed upstream work.\n\n" + bounded,
+                null, null, null, false);
+        insertEvent(connection, dependent.childRunId(), "agent.dependencies_attached",
+                "{\"count\":" + results.size() + "}");
+    }
+
+    private void cancelDependentDelegation(Connection connection, RunDelegationRecord delegation, String reason)
+            throws SQLException {
+        try (PreparedStatement run = connection.prepareStatement(
+                "UPDATE runs SET status='CANCELED',error=?,finished_at=?,version=version+1 " +
+                        "WHERE id=? AND status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+            run.setString(1, reason);
+            run.setString(2, Instant.now().toString());
+            run.setString(3, delegation.childRunId());
+            if (run.executeUpdate() == 1) {
+                insertEvent(connection, delegation.childRunId(), "run.canceled",
+                        "{\"reason\":\"" + escape(reason) + "\"}");
+                finalizeDelegationGraph(connection, delegation.childRunId(), RunStatus.CANCELED, reason);
+            }
+        }
+    }
+
+    private static boolean dependenciesTerminal(Connection connection, String delegationId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM run_delegation_dependencies dep " +
+                        "JOIN run_delegations upstream ON upstream.id=dep.depends_on_delegation_id " +
+                        "WHERE dep.delegation_id=? AND upstream.status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+            ps.setString(1, delegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) == 0;
+            }
+        }
+    }
+
+    private static boolean hasFailedDependency(Connection connection, String delegationId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT 1 FROM run_delegation_dependencies dep " +
+                        "JOIN run_delegations upstream ON upstream.id=dep.depends_on_delegation_id " +
+                        "WHERE dep.delegation_id=? AND upstream.status IN ('FAILED','CANCELED') LIMIT 1")) {
+            ps.setString(1, delegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private void requeueWaitingParent(Connection connection, String parentRunId, String childRunId)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE runs SET status=?,queued_at=?,version=version+1 WHERE id=? AND status=?")) {
+            ps.setString(1, RunStatus.QUEUED.name());
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, parentRunId);
+            ps.setString(4, RunStatus.WAITING_AGENT.name());
+            if (ps.executeUpdate() == 1) {
+                insertEvent(connection, parentRunId, "run.queued",
+                        "{\"reason\":\"delegated_agent_terminal\",\"childRunId\":\""
+                                + escape(childRunId) + "\"}");
+            }
+        }
+    }
+
+    private String terminalDelegationResult(Connection connection, RunDelegationRecord delegation,
+                                            RunStatus status, String error, String failureClass)
+            throws SQLException {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("version", 2);
+        value.put("delegation_id", delegation.id());
+        value.put("child_run_id", delegation.childRunId());
+        value.put("status", status.name());
+        value.put("failure_class", failureClass);
+        value.put("summary", latestAssistantAnswer(connection, delegation.childSessionId()));
+        value.put("artifacts", delegationArtifacts(connection, delegation.childRunId()));
+        ModelTokenUsage usage = modelTokenUsageForRun(connection, delegation.childRunId());
+        value.put("usage", Map.of("input_tokens", usage.inputTokens(),
+                "output_tokens", usage.outputTokens(), "total_tokens", usage.totalTokens()));
+        ToolEvidence evidence = delegationToolEvidence(connection, delegation.childRunId());
+        value.put("files_changed", evidence.filesChanged());
+        value.put("commands_executed", evidence.commandsExecuted());
+        value.put("tests", evidence.tests());
+        value.put("findings", List.of());
+        value.put("risks", status == RunStatus.COMPLETED ? List.of()
+                : List.of(error == null || error.isBlank() ? status.name() : error));
+        value.put("unresolved_items", status == RunStatus.COMPLETED ? List.of()
+                : List.of(error == null || error.isBlank() ? status.name() : error));
+        value.put("evidence", List.of("run_status:" + status.name(), "terminal_event"));
+        value.put("confidence", status == RunStatus.COMPLETED ? 0.9 : 0.35);
+        try {
+            return mapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return "{\"version\":2,\"status\":\"" + status.name()
+                    + "\",\"failure_class\":\"" + escape(failureClass) + "\"}";
+        }
+    }
+
+    private static String latestAssistantAnswer(Connection connection, String sessionId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT content FROM messages WHERE session_id=? AND role='assistant' " +
+                        "AND content<>'' ORDER BY sequence DESC LIMIT 1")) {
+            ps.setString(1, sessionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return "";
+                String value = rs.getString(1);
+                return value.length() <= 4_000 ? value : value.substring(0, 4_000)
+                        + "\n[child agent result truncated; inspect artifacts or child session]";
+            }
+        }
+    }
+
+    private static List<Map<String, Object>> delegationArtifacts(Connection connection, String runId)
+            throws SQLException {
+        List<Map<String, Object>> values = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT id,type,name,relative_path,sha256 FROM artifacts WHERE run_id=? ORDER BY created_at")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("id", rs.getString("id"));
+                    item.put("type", rs.getString("type"));
+                    item.put("name", rs.getString("name"));
+                    item.put("relative_path", rs.getString("relative_path"));
+                    item.put("sha256", rs.getString("sha256"));
+                    values.add(item);
+                }
+            }
+        }
+        return List.copyOf(values);
+    }
+
+    private ToolEvidence delegationToolEvidence(Connection connection, String runId) throws SQLException {
+        List<String> files = new ArrayList<>();
+        List<String> commands = new ArrayList<>();
+        List<String> tests = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT tool_name,arguments,result,status FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("tool_name");
+                    JsonNode args = readJson(rs.getString("arguments"));
+                    if ("write_file".equals(name)) addDistinct(files, jsonText(args, "path"));
+                    if ("execute_command".equals(name)) {
+                        String command = jsonText(args, "command");
+                        addDistinct(commands, command);
+                        if (command.toLowerCase().matches(".*\\b(test|mvn|gradle|npm|pytest|junit)\\b.*")) {
+                            String result = rs.getString("result");
+                            tests.add((result == null ? command : command + " => " + boundedText(result, 500)));
+                        }
+                    }
+                }
+            }
+        }
+        return new ToolEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests));
+    }
+
+    private JsonNode readJson(String value) {
+        try {
+            return mapper.readTree(value == null || value.isBlank() ? "{}" : value);
+        } catch (Exception ignored) {
+            return mapper.createObjectNode();
+        }
+    }
+
+    private static String jsonText(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isTextual() ? value.asText().trim() : "";
+    }
+
+    private static void addDistinct(List<String> values, String value) {
+        if (value != null && !value.isBlank() && !values.contains(value)) values.add(value);
+    }
+
+    private static String boundedText(String value, int limit) {
+        return value.length() <= limit ? value : value.substring(0, limit) + "...";
+    }
+
+    private static String delegationFailureClass(RunStatus status, String error) {
+        if (status == RunStatus.COMPLETED) return "";
+        if (status == RunStatus.CANCELED) return "CANCELED";
+        String lower = error == null ? "" : error.toLowerCase();
+        if (lower.contains("timeout")) return "RETRYABLE_INFRA";
+        if (lower.contains("budget")) return "BUDGET_EXHAUSTED";
+        if (lower.contains("approval")) return "APPROVAL_DENIED";
+        if (lower.contains("model")) return "MODEL";
+        if (lower.contains("tool")) return "TOOL";
+        return "FAILED";
+    }
+
+    private Optional<RunDelegationRecord> findDelegation(Connection connection, String delegationId)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_delegations WHERE id=?")) {
+            ps.setString(1, delegationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapDelegation(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private Optional<RunDelegationRecord> findDelegationByChild(Connection connection, String childRunId)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_delegations WHERE child_run_id=?")) {
+            ps.setString(1, childRunId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapDelegation(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    private ModelTokenUsage modelTokenUsageForRun(Connection connection, String runId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT COALESCE(SUM(CASE WHEN input_tokens>0 THEN input_tokens " +
+                        "ELSE estimated_input_tokens END),0),COALESCE(SUM(output_tokens),0) " +
+                        "FROM model_usage WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new ModelTokenUsage(rs.getInt(1), rs.getInt(2)) : new ModelTokenUsage(0, 0);
+            }
+        }
+    }
+
     private boolean updateRun(String runId, RunStatus status, Integer currentStep, String error, boolean terminal) {
         String sql = "UPDATE runs SET status=?, current_step=COALESCE(?,current_step), error=?, " +
                 "queued_at=" + (status == RunStatus.QUEUED ? "?" : "queued_at") + ", " +
@@ -3194,6 +3765,7 @@ public class SqliteRuntimeStore {
                     ? "{\"status\":\"" + status.name() + "\"}"
                     : "{\"status\":\"" + status.name() + "\",\"error\":\"" + escape(error) + "\"}";
             insertEvent(connection, runId, eventType, eventData);
+            if (terminal) finalizeDelegationGraph(connection, runId, status, error);
             connection.commit();
             return true;
         } catch (SQLException e) {
@@ -3363,8 +3935,9 @@ public class SqliteRuntimeStore {
                 rs.getString("child_run_id"), rs.getString("agent_profile_id"),
                 rs.getString("agent_name"), rs.getString("task"), rs.getString("plan_id"),
                 rs.getString("plan_step_id"), rs.getString("envelope_json"), rs.getString("result_json"),
-                rs.getString("status"), rs.getString("failure_class"), instant(rs.getString("completed_at")),
-                instant(rs.getString("created_at")));
+                rs.getString("status"), rs.getString("failure_class"), rs.getString("failure_policy"),
+                rs.getString("blocked_reason"), rs.getString("workspace_ref"),
+                instant(rs.getString("completed_at")), instant(rs.getString("created_at")));
     }
 
     private static CollaborationPolicy mapCollaborationPolicy(ResultSet rs) throws SQLException {
@@ -3386,6 +3959,39 @@ public class SqliteRuntimeStore {
 
     public record ToolCallDraft(String providerCallId, String toolName,
                                 String arguments, String idempotencyKey, ToolEffect effect) { }
+
+    public record DelegationOptions(List<String> dependencies, List<String> readSet, List<String> writeSet,
+                                    String failurePolicy, String workspaceRef) {
+        public static DelegationOptions defaults() {
+            return new DelegationOptions(List.of(), List.of(), List.of(), "BLOCK_GRAPH", null);
+        }
+
+        DelegationOptions normalized() {
+            List<String> normalizedDependencies = dependencies == null ? List.of() : dependencies.stream()
+                    .filter(value -> value != null && !value.isBlank()).map(String::trim).distinct().limit(50).toList();
+            String policy = failurePolicy == null || failurePolicy.isBlank()
+                    ? "BLOCK_GRAPH" : failurePolicy.trim().toUpperCase();
+            if (!Set.of("BLOCK_GRAPH", "DEGRADE", "REQUIRE_HUMAN").contains(policy)) {
+                throw new IllegalArgumentException(
+                        "failure_policy must be BLOCK_GRAPH, DEGRADE, or REQUIRE_HUMAN");
+            }
+            String workspace = nullableText(workspaceRef);
+            if (workspace != null && workspace.length() > 500) {
+                throw new IllegalArgumentException("workspace_ref is too long");
+            }
+            return new DelegationOptions(normalizedDependencies, normalizeResourceList(readSet),
+                    normalizeResourceList(writeSet), policy, workspace);
+        }
+    }
+
+    private static List<String> normalizeResourceList(List<String> values) {
+        if (values == null) return List.of();
+        return values.stream().filter(value -> value != null && !value.isBlank())
+                .map(value -> value.trim().replace('\\', '/').toLowerCase())
+                .distinct().limit(100).toList();
+    }
+
+    private record ToolEvidence(List<String> filesChanged, List<String> commandsExecuted, List<String> tests) { }
 
     public record ModelTokenUsage(int inputTokens, int outputTokens) {
         public int totalTokens() { return inputTokens + outputTokens; }
