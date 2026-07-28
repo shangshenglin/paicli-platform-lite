@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260728-plan-run-audit">
+  <link rel="stylesheet" href="/app.css?v=20260728-kimi-k3">
 </head>
 <body>
 <div class="app">
@@ -48,10 +48,11 @@
           <select id="quickTemplate" title="任务模板"><option value="">快捷指令</option></select>
           <select id="agentProfile" title="智能体专家"><option value="">默认专家</option></select>
           <select id="modelProfile" title="模型配置方案"><option value="">默认模型</option></select>
-          <span>深度思考</span>
+          <span id="thinkingLabel">深度思考</span>
           <button class="mode-button" data-thinking="disabled">关闭</button>
           <button class="mode-button" data-thinking="enabled">开启</button>
-          <span class="effort-label">推理等级</span>
+          <span class="effort-label" id="effortLabel">推理等级</span>
+          <button class="mode-button" data-effort="low">低</button>
           <button class="mode-button" data-effort="high">高</button>
           <button class="mode-button" data-effort="max">最高</button>
           <button class="secondary" id="planSend" title="把当前输入创建为持久化 Plan，并立即调度执行">按计划执行</button>
@@ -299,7 +300,7 @@
       <label class="form-field full"><span>专家指令 *</span><textarea id="agentPrompt" rows="6" required placeholder="定义这个专家的目标、边界、工作方式和质量标准"></textarea></label>
       <label class="form-field full"><span>模型配置方案</span><select id="agentModelProfile"><option value="">使用项目默认模型</option></select></label>
       <label class="form-field"><span>思考模式</span><select id="agentThinkingMode"><option value="">跟随对话设置</option><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
-      <label class="form-field"><span>思考深度</span><select id="agentReasoningEffort"><option value="">跟随对话设置</option><option value="high">高</option><option value="max">最高</option></select><small>仅在思考模式开启时生效。</small></label>
+      <label class="form-field"><span>思考深度</span><select id="agentReasoningEffort"><option value="">跟随对话设置</option><option value="low">低</option><option value="high">高</option><option value="max">最高</option></select><small id="agentReasoningHint">仅在思考模式开启时生效。</small></label>
       <label class="form-field"><span>允许工具</span><select id="agentTools" multiple hidden></select><div id="agentToolsPicker" class="tag-picker"></div><small>按角色提供默认工具；所有专家固定获得受控 Plan 工具，其中创建、调整、启动和取消仍需持久化审批。</small></label>
       <label class="form-field"><span>允许 Skill</span><select id="agentSkills" multiple hidden></select><div id="agentSkillsPicker" class="tag-picker"></div><small>不添加表示不限定 Skill；可搜索后点选添加。</small></label>
       <label class="form-field"><span>交接策略</span><select id="agentHandoff"><option value="MANUAL">Manual</option><option value="LEADER_ASSIGNED">Leader Assigned</option><option value="AUTO">Auto</option></select></label>
@@ -449,6 +450,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260728-agent-graph"></script>
+<script src="/app.js?v=20260728-kimi-k3"></script>
 </body>
 </html>

@@ -208,6 +208,97 @@ function updateComposerVisibility() {
   $('compose').hidden = hidden;
 }
 
+function modelProvider(profile) {
+  const value = `${profile?.model || ''} ${profile?.baseUrl || ''}`.toLowerCase();
+  if (value.includes('kimi-') || value.includes('moonshot.cn')) return 'Kimi';
+  if (value.includes('deepseek')) return 'DeepSeek';
+  return profile?.localModel ? '本地' : '兼容模型';
+}
+
+function modelProfileLabel(profile) {
+  return `${modelProvider(profile)} · ${profile.name} · ${profile.model}`;
+}
+
+function selectedModelProfile() {
+  return state.modelProfiles.find(value => value.id === state.modelProfileId)
+    || state.modelProfiles.find(value => value.defaultProfile)
+    || null;
+}
+
+function selectedModelIsKimiK3() {
+  return (selectedModelProfile()?.model || '').toLowerCase().startsWith('kimi-k3');
+}
+
+function reasoningEffortForRequest() {
+  return selectedModelIsKimiK3() || state.thinkingMode === 'enabled' ? state.reasoningEffort : '';
+}
+
+function selectModelProfile(profileId, rerenderHome = true) {
+  state.modelProfileId = profileId || '';
+  if (state.modelProfileId) localStorage.setItem('paicli_model_profile', state.modelProfileId);
+  else localStorage.removeItem('paicli_model_profile');
+  if ($('modelProfile')) $('modelProfile').value = state.modelProfileId;
+  renderModelControls();
+  scheduleEstimate();
+  if (rerenderHome && !state.sessionId) syncHomeModelPicker();
+}
+
+function syncHomeModelPicker() {
+  const selected = selectedModelProfile();
+  document.querySelectorAll('[data-home-model-summary]').forEach(node => {
+    node.textContent = selected ? modelProfileLabel(selected) : '使用项目或服务端默认模型';
+  });
+  document.querySelectorAll('[data-home-model-reset]').forEach(button => {
+    button.hidden = !state.modelProfileId;
+  });
+  document.querySelectorAll('[data-home-model-profile]').forEach(button => {
+    const active = Boolean(selected && button.dataset.homeModelProfile === selected.id);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function renderHomeModelPicker() {
+  const picker = element('section', 'home-model-picker');
+  const heading = element('div', 'home-model-picker-head');
+  const copy = element('div');
+  const summary = element('small', '',
+    selectedModelProfile() ? modelProfileLabel(selectedModelProfile()) : '使用项目或服务端默认模型');
+  summary.dataset.homeModelSummary = 'true';
+  copy.append(element('strong', '', '本轮模型'), summary);
+  const reset = element('button', 'text-button', '恢复默认');
+  reset.type = 'button';
+  reset.dataset.homeModelReset = 'true';
+  reset.hidden = !state.modelProfileId;
+  reset.onclick = () => selectModelProfile('');
+  heading.append(copy, reset);
+  const rail = element('div', 'home-model-rail');
+  ['DeepSeek', 'Kimi'].forEach(provider => {
+    const profile = state.modelProfiles.find(value => modelProvider(value) === provider);
+    const active = Boolean(profile && selectedModelProfile()?.id === profile.id);
+    const button = element('button', `home-model-card${active ? ' active' : ''}`);
+    button.type = 'button';
+    button.disabled = !profile;
+    button.dataset.homeModelProfile = profile?.id || '';
+    button.setAttribute('aria-pressed', String(active));
+    const mark = element('span', `model-mark ${provider.toLowerCase()}`, provider === 'Kimi' ? 'K' : 'D');
+    const text = element('span', 'home-model-copy');
+    text.append(
+      element('strong', '', provider),
+      element('small', '', profile
+        ? `${profile.model} · ${profile.maxContextTokens.toLocaleString()} ctx`
+        : '模型方案尚未加载')
+    );
+    const trait = element('span', 'model-trait',
+      provider === 'Kimi' ? '1M · 始终思考' : '1M · 思考可切换');
+    button.append(mark, text, trait);
+    if (profile) button.onclick = () => selectModelProfile(profile.id);
+    rail.append(button);
+  });
+  picker.append(heading, rail);
+  return picker;
+}
+
 function renderEmpty() {
   updateComposerVisibility();
   const empty = element('div', 'empty');
@@ -233,6 +324,7 @@ function renderEmpty() {
       element('div', 'logo', 'π'),
       element('h1', '', '今天想完成什么？'),
       element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。'),
+      renderHomeModelPicker(),
       actions
     );
   }
@@ -328,7 +420,8 @@ function renderHomeCollaboration() {
   start.id = 'homeStartCollaboration';
   start.onclick = startCollaboration;
   actions.append(manage, start);
-  panel.append(head, teamField, leaderField, objectiveField, policy, checks, allowed, error, actions);
+  panel.append(head, renderHomeModelPicker(), teamField, leaderField, objectiveField,
+    policy, checks, allowed, error, actions);
   requestAnimationFrame(applySelectedAgentTeam);
   return panel;
 }
@@ -1304,7 +1397,7 @@ async function sendMessage() {
       body: JSON.stringify({
         input: text,
         thinkingMode: state.thinkingMode,
-        reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
+        reasoningEffort: reasoningEffortForRequest(),
         attachmentIds: state.pendingAttachments.map(item => item.id),
         modelProfileId: state.modelProfileId || null,
         agentProfileId: state.agentProfileId || null
@@ -2172,11 +2265,15 @@ async function refreshComposerOptions() {
     profile.replaceChildren(element('option', '', '默认模型'));
     profile.firstElementChild.value = '';
     state.modelProfiles.forEach(value => {
-      const option = element('option', '', `${value.defaultProfile ? '★ ' : ''}${value.name}`);
+      const option = element('option', '',
+        `${value.defaultProfile ? '★ ' : ''}${modelProvider(value)} · ${value.name}`);
       option.value = value.id; profile.append(option);
     });
     if (state.modelProfiles.some(value => value.id === state.modelProfileId)) profile.value = state.modelProfileId;
-    else state.modelProfileId = '';
+    else {
+      state.modelProfileId = '';
+      localStorage.removeItem('paicli_model_profile');
+    }
     const agent = $('agentProfile');
     agent.replaceChildren(element('option', '', '默认专家'));
     agent.firstElementChild.value = '';
@@ -2186,8 +2283,9 @@ async function refreshComposerOptions() {
     });
     if (state.agentProfiles.some(value => value.id === state.agentProfileId && value.enabled)) agent.value = state.agentProfileId;
     else state.agentProfileId = '';
+    renderModelControls();
     scheduleEstimate();
-    if (!state.sessionId && state.homeMode === 'collaboration') renderEmpty();
+    if (!state.sessionId) renderEmpty();
   } catch (error) { showNotice(`效率配置加载失败：${error.message}`, true); }
 }
 
@@ -2478,7 +2576,7 @@ async function startCollaboration() {
       body: JSON.stringify({
         input: prompt,
         thinkingMode: state.thinkingMode,
-        reasoningEffort: state.thinkingMode === 'enabled' ? state.reasoningEffort : '',
+        reasoningEffort: reasoningEffortForRequest(),
         modelProfileId: state.modelProfileId || null,
         agentProfileId: leader.id,
         collaboration: {
@@ -2652,12 +2750,14 @@ function openAgentProfileDialog(profile = null) {
   $('agentHandoff').value = editing ? profile.handoffPolicy || 'MANUAL' : 'MANUAL';
   $('agentScope').value = editing ? profile.workspaceScope || 'PROJECT' : 'PROJECT';
   $('agentApproval').value = editing ? profile.approvalPolicy || 'INHERIT' : 'INHERIT';
-  fillSelect($('agentModelProfile'), state.modelProfiles.map(value => ({id: value.id, label: `${value.name} · ${value.model}`})), '使用项目默认模型');
+  fillSelect($('agentModelProfile'), state.modelProfiles.map(value => (
+    {id: value.id, label: modelProfileLabel(value)}
+  )), '使用项目默认模型');
   if (editing) $('agentModelProfile').value = profile.modelProfileId || '';
   else if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('agentModelProfile').value = state.modelProfileId;
   $('agentThinkingMode').value = editing ? profile.thinkingMode || '' : '';
   $('agentReasoningEffort').value = editing ? profile.reasoningEffort || '' : '';
-  $('agentReasoningEffort').disabled = $('agentThinkingMode').value === 'disabled';
+  updateAgentModelControls();
   fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
       editing ? [...new Set([...parseStringListJson(profile.toolNamesJson), ...expertPlanTools])]
         : defaultToolsForRole($('agentRole').value));
@@ -2776,8 +2876,10 @@ async function submitAgentTeam(event) {
 
 function renderProfiles(values) {
   $('profileList').replaceChildren(...values.map(value => {
-    const item = workbenchItem(`${value.defaultProfile ? '★ ' : ''}${value.name}`, `${value.localModel ? '本地模型' : '远程模型'} · ${value.model} · ${value.maxContextTokens.toLocaleString()} ctx · fallback ${value.fallbackModel || '无'}`);
-    actionButton(item, '选用', () => { state.modelProfileId = value.id; localStorage.setItem('paicli_model_profile', value.id); $('modelProfile').value = value.id; scheduleEstimate(); });
+    const item = workbenchItem(`${value.defaultProfile ? '★ ' : ''}${modelProvider(value)} · ${value.name}`,
+      `${value.localModel ? '本地模型' : '远程模型'} · ${value.model} · ${value.maxContextTokens.toLocaleString()} ctx · Key ${value.apiKeyEnv || '无'} · fallback ${value.fallbackModel || '无'}`);
+    actionButton(item, state.modelProfileId === value.id ? '已选用' : '选用',
+      () => { selectModelProfile(value.id, false); renderProfiles(values); });
     actionButton(item, '删除', async () => { if (confirm(`删除模型方案“${value.name}”？`)) { await api(`/v1/productivity/model-profiles/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } });
     return item;
   }));
@@ -3649,13 +3751,38 @@ function clearEvents() {
 }
 
 function renderModelControls() {
+  const kimiK3 = selectedModelIsKimiK3();
+  if (kimiK3) {
+    state.thinkingMode = 'enabled';
+    if (!['low', 'high', 'max'].includes(state.reasoningEffort)) state.reasoningEffort = 'max';
+    localStorage.setItem('paicli_thinking_mode', state.thinkingMode);
+    localStorage.setItem('paicli_reasoning_effort', state.reasoningEffort);
+  }
   document.querySelectorAll('[data-thinking]').forEach(button => {
     button.classList.toggle('active', button.dataset.thinking === state.thinkingMode);
+    button.disabled = kimiK3;
   });
   document.querySelectorAll('[data-effort]').forEach(button => {
     button.classList.toggle('active', button.dataset.effort === state.reasoningEffort);
-    button.disabled = state.thinkingMode !== 'enabled';
+    button.disabled = !kimiK3 && state.thinkingMode !== 'enabled';
   });
+  $('thinkingLabel').textContent = kimiK3 ? 'Kimi 始终思考' : '深度思考';
+  $('effortLabel').textContent = kimiK3 ? 'K3 推理强度' : '推理等级';
+}
+
+function updateAgentModelControls() {
+  const profile = state.modelProfiles.find(value => value.id === $('agentModelProfile').value)
+    || state.modelProfiles.find(value => value.defaultProfile);
+  const kimiK3 = (profile?.model || '').toLowerCase().startsWith('kimi-k3');
+  $('agentThinkingMode').disabled = kimiK3;
+  if (kimiK3) {
+    $('agentThinkingMode').value = 'enabled';
+    if (!$('agentReasoningEffort').value) $('agentReasoningEffort').value = 'max';
+  }
+  $('agentReasoningEffort').disabled = !kimiK3 && $('agentThinkingMode').value === 'disabled';
+  $('agentReasoningHint').textContent = kimiK3
+    ? 'Kimi K3 始终思考；可选择低、高或最高推理强度。'
+    : '仅在思考模式开启时生效。';
 }
 
 $('new').onclick = showHome;
@@ -3744,8 +3871,9 @@ $('agentTeamForm').onsubmit = submitAgentTeam;
 $('agentProfileDialog').addEventListener('close', () => { state.editingAgentProfileId = ''; });
 $('agentTeamDialog').addEventListener('close', () => { state.editingAgentTeamId = ''; });
 $('agentThinkingMode').onchange = () => {
-  $('agentReasoningEffort').disabled = $('agentThinkingMode').value === 'disabled';
+  updateAgentModelControls();
 };
+$('agentModelProfile').onchange = updateAgentModelControls;
 $('profileForm').onsubmit = submitProfile;
 $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
@@ -3775,9 +3903,7 @@ $('agentProfile').onchange = () => {
 };
 $('messages').addEventListener('scroll', () => rememberMessageScroll(), {passive: true});
 $('modelProfile').onchange = () => {
-  state.modelProfileId = $('modelProfile').value;
-  localStorage.setItem('paicli_model_profile', state.modelProfileId);
-  scheduleEstimate();
+  selectModelProfile($('modelProfile').value, false);
 };
 document.querySelectorAll('[data-export]').forEach(button => button.onclick = () => exportSession(button.dataset.export).catch(error => showNotice(`导出失败：${error.message}`, true)));
 $('sessionImport').onchange = () => { const file = $('sessionImport').files[0]; if (file) importSession(file).catch(error => showNotice(`导入失败：${error.message}`, true)); };

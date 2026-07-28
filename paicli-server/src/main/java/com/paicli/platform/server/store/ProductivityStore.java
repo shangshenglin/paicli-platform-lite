@@ -603,8 +603,8 @@ public class ProductivityStore {
     }
     private static String expertReasoningEffort(String value) {
         String normalized = value(value, 20).toLowerCase();
-        if (!normalized.isBlank() && !List.of("high", "max").contains(normalized)) {
-            throw new IllegalArgumentException("reasoningEffort must be high, max, or blank");
+        if (!normalized.isBlank() && !List.of("low", "high", "max").contains(normalized)) {
+            throw new IllegalArgumentException("reasoningEffort must be low, high, max, or blank");
         }
         return normalized;
     }

@@ -21,5 +21,6 @@ class PaiCliServerApplicationTest {
     @Test
     void startsWithAllServerToolProvidersWired() {
         org.assertj.core.api.Assertions.assertThat(modelProperties.maxRunTokens()).isZero();
+        org.assertj.core.api.Assertions.assertThat(modelProperties.maxRunDurationSeconds()).isZero();
     }
 }

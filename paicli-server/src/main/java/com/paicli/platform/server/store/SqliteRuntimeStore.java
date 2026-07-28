@@ -4109,8 +4109,9 @@ public class SqliteRuntimeStore {
 
     private static String normalizeReasoningEffort(String value) {
         String normalized = value == null ? "" : value.trim().toLowerCase();
-        if (!normalized.isBlank() && !normalized.equals("high") && !normalized.equals("max")) {
-            throw new IllegalArgumentException("reasoningEffort must be high or max");
+        if (!normalized.isBlank() && !normalized.equals("low")
+                && !normalized.equals("high") && !normalized.equals("max")) {
+            throw new IllegalArgumentException("reasoningEffort must be low, high, or max");
         }
         return normalized;
     }

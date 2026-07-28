@@ -30,6 +30,12 @@ public class ProductivityController {
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() { };
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{([a-zA-Z][a-zA-Z0-9_.-]{0,79})}");
+    private static final List<ModelSeed> MODEL_SEEDS = List.of(
+            new ModelSeed("DeepSeek V4 Flash", "https://api.deepseek.com",
+                    "PAICLI_DEEPSEEK_API_KEY", "deepseek-v4-flash", 1_000_000, 16_384),
+            new ModelSeed("Kimi K3", "https://api.moonshot.cn/v1",
+                    "PAICLI_KIMI_API_KEY", "kimi-k3", 1_000_000, 131_072)
+    );
     private final ProductivityStore productivity;
     private final SqliteRuntimeStore runtime;
     private final ObjectMapper mapper;
@@ -78,6 +84,14 @@ public class ProductivityController {
 
     @GetMapping("/model-profiles")
     public List<ProductivityStore.ModelProfile> modelProfiles(@RequestParam(defaultValue="default") String projectKey) {
+        ensureModelBuiltIns(projectKey);
+        return productivity.modelProfiles(projectKey);
+    }
+
+    @PostMapping("/model-profiles/starter-pack")
+    public List<ProductivityStore.ModelProfile> installModelStarterPack(
+            @RequestParam(defaultValue="default") String projectKey) {
+        ensureModelBuiltIns(projectKey);
         return productivity.modelProfiles(projectKey);
     }
 
@@ -351,6 +365,18 @@ public class ProductivityController {
         catch(Exception e){throw e instanceof RuntimeException runtime?runtime:new IllegalArgumentException("invalid schedule",e);}
     }
     private ProductivityStore.NotificationChannel saveNotification(String id,ApiDtos.NotificationChannelRequest r){return productivity.saveNotification(id,r.projectKey(),r.name(),r.type(),r.endpoint(),r.secretEnv(),String.join(",",r.events()),r.enabled()==null||r.enabled());}
+    private synchronized void ensureModelBuiltIns(String project) {
+        var existingNames = productivity.modelProfiles(project).stream()
+                .map(ProductivityStore.ModelProfile::name)
+                .collect(java.util.stream.Collectors.toSet());
+        for (var seed : MODEL_SEEDS) {
+            if (existingNames.contains(seed.name())) continue;
+            productivity.saveModelProfile(null, project, seed.name(), seed.baseUrl(), seed.apiKeyEnv(),
+                    seed.model(), "", seed.maxContextTokens(), seed.maxOutputTokens(),
+                    0, 0, false, false);
+            existingNames.add(seed.name());
+        }
+    }
     private void ensureAgentBuiltIns(String project){try{
         var existingByName=new java.util.HashMap<String,ProductivityStore.AgentProfile>();
         productivity.agentProfiles(project).forEach(profile->existingByName.put(profile.name(), profile));
@@ -455,4 +481,6 @@ public class ProductivityController {
     );
     private record AgentSeed(String key,String name,int version,String description,String prompt,String role,String handoff,
                              String approval,List<String> tools,String outputSchema){}
+    private record ModelSeed(String name, String baseUrl, String apiKeyEnv, String model,
+                             int maxContextTokens, int maxOutputTokens) { }
 }

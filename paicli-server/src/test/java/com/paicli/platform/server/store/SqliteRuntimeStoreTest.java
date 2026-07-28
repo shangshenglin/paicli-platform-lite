@@ -8,9 +8,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.sql.DriverManager;
-import java.util.concurrent.Executors;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -336,11 +338,11 @@ class SqliteRuntimeStoreTest {
     void persistsPerRunThinkingControls() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("thinking");
-        var run = store.createRun(session.id(), "solve", "enabled", "max");
+        var run = store.createRun(session.id(), "solve", "enabled", "low");
 
         var persisted = store.findRun(run.id()).orElseThrow();
         assertThat(persisted.thinkingMode()).isEqualTo("enabled");
-        assertThat(persisted.reasoningEffort()).isEqualTo("max");
+        assertThat(persisted.reasoningEffort()).isEqualTo("low");
     }
 
     @Test
@@ -816,6 +818,42 @@ class SqliteRuntimeStoreTest {
         assertThat(recovered.findToolCall(call.id()).orElseThrow().status()).isEqualTo(ToolCallStatus.UNKNOWN);
         assertThat(recovered.findResumableToolCall(run.id())).isEmpty();
         assertThat(recovered.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.FAILED);
+    }
+
+    @Test
+    void waitsForConcurrentWriterBeforeCommittingToolOutcome() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("tool-outcome-lock");
+        var run = store.createRun(session.id(), "list files");
+        store.claimNextRun().orElseThrow();
+        var call = store.createToolCall(run.id(), "provider-list", "list_dir", "{}",
+                "list-files-once");
+        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+        store.markToolRunning(call.id());
+
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        var executor = Executors.newSingleThreadExecutor();
+        try (Connection blocker = DriverManager.getConnection(url)) {
+            blocker.setAutoCommit(false);
+            try (var statement = blocker.createStatement()) {
+                statement.executeUpdate("UPDATE sessions SET updated_at=updated_at WHERE id='" + session.id() + "'");
+            }
+
+            var commit = executor.submit(() -> store.commitToolOutcome(
+                    session.id(), run.id(), call, true, "[]", null, "{}", 0));
+            Thread.sleep(200);
+            assertThat(commit.isDone()).isFalse();
+
+            blocker.commit();
+            assertThat(commit.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(store.findToolCall(call.id()).orElseThrow().status())
+                .isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(store.messages(session.id())).extracting("role").containsExactly("user", "tool");
     }
 
     @Test

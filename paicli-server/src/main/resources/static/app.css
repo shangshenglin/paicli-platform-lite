@@ -51,6 +51,10 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .primary { border-color: #39765b; background: #204434; font-weight: 650; }
 .primary:hover { background: #28543f; }
 .secondary:hover { background: #282e38; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid #8fdcba;
+  outline-offset: 2px;
+}
 .new { margin: 0 3px 14px; }
 .label { padding: 3px 10px 7px; color: var(--muted); font-size: 11px; letter-spacing: .08em; }
 .list-title { display: flex; align-items: center; justify-content: space-between; padding-right: 6px; }
@@ -157,11 +161,65 @@ button, input, textarea, select { color: inherit; font: inherit; }
 .home-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 180px)); justify-content: center; gap: 9px; margin-top: 22px; }
 .home-action { display: grid; gap: 2px; padding: 12px 14px; text-align: left; }
 .home-action small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.home-model-picker {
+  width: min(620px, calc(100vw - 80px));
+  margin: 24px auto 0;
+  padding: 11px;
+  border: 1px solid #313947;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #151a22 0%, #11151b 100%);
+  text-align: left;
+}
+.home-model-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 3px 9px;
+}
+.home-model-picker-head div { min-width: 0; }
+.home-model-picker-head strong, .home-model-picker-head small { display: block; }
+.home-model-picker-head small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.home-model-rail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.home-model-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #1b2029;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.home-model-card:hover { border-color: #4a5667; background: #202630; }
+.home-model-card.active { border-color: #4a9c77; background: #192b25; box-shadow: inset 0 0 0 1px #315f4c; }
+.home-model-card:disabled { opacity: .5; cursor: not-allowed; }
+.model-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #416b9a;
+  border-radius: 9px;
+  background: #1c2e43;
+  color: #9ecbff;
+  font: 700 15px/1 ui-monospace, monospace;
+}
+.model-mark.kimi { border-color: #755ca5; background: #2b2340; color: #d5c0ff; }
+.home-model-copy { min-width: 0; }
+.home-model-copy strong, .home-model-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-model-copy small { color: var(--muted); font-size: 10px; }
+.model-trait { color: #aab4c3; font-size: 10px; white-space: nowrap; }
 .home-collaboration { width: min(760px, calc(100vw - 64px)); margin: 0 auto; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: #171b21; text-align: left; }
 .home-collaboration-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
 .home-collaboration-head .logo { flex: 0 0 auto; margin: 0; }
 .home-collaboration h1 { margin: 0 0 4px; }
 .home-collaboration p { margin: 0; color: var(--muted); }
+.home-collaboration .home-model-picker { width: 100%; margin: 0 0 16px; }
 .home-collaboration .dialog-actions { margin-top: 12px; }
 .team-select-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .collaboration-policy { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -453,6 +511,9 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .form-field.full { grid-column: auto; }
   .upload-row { align-items: stretch; flex-direction: column; }
   .home-actions, .usage-metrics { grid-template-columns: 1fr 1fr; }
+  .home-model-picker { width: 100%; }
+  .home-model-rail { grid-template-columns: 1fr; }
+  .model-trait { display: none; }
   .home-mode-switch { width: 100%; }
   .home-mode-switch button { min-width: 0; }
   .home-collaboration { width: 100%; padding: 14px; }

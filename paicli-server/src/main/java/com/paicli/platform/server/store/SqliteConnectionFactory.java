@@ -1,5 +1,8 @@
 package com.paicli.platform.server.store;
 
+import org.sqlite.SQLiteConfig;
+import org.sqlite.SQLiteConnection;
+
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -27,12 +30,21 @@ final class SqliteConnectionFactory {
 
     Connection open() throws SQLException {
         Connection connection = DriverManager.getConnection(jdbcUrl);
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
-            statement.execute("PRAGMA synchronous=NORMAL");
-            statement.execute("PRAGMA wal_autocheckpoint=1000");
-            statement.execute("PRAGMA foreign_keys=ON");
+        try {
+            if (connection instanceof SQLiteConnection sqliteConnection) {
+                sqliteConnection.getConnectionConfig()
+                        .setTransactionMode(SQLiteConfig.TransactionMode.IMMEDIATE);
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
+                statement.execute("PRAGMA synchronous=NORMAL");
+                statement.execute("PRAGMA wal_autocheckpoint=1000");
+                statement.execute("PRAGMA foreign_keys=ON");
+            }
+            return connection;
+        } catch (SQLException | RuntimeException e) {
+            connection.close();
+            throw e;
         }
-        return connection;
     }
 }

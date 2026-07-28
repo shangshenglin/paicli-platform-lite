@@ -288,14 +288,16 @@ public class RunProcessor {
                                      long elapsedSeconds, long maxElapsedSeconds) {
         boolean exceeded() {
             return step >= maxSteps || (maxTokens > 0 && tokens >= maxTokens)
-                    || toolCalls >= maxToolCalls || elapsedSeconds >= maxElapsedSeconds;
+                    || toolCalls >= maxToolCalls
+                    || (maxElapsedSeconds > 0 && elapsedSeconds >= maxElapsedSeconds);
         }
 
         String message() {
             return "run execution budget exceeded: step=" + step + "/" + maxSteps
                     + ", tokens=" + tokens + "/" + (maxTokens <= 0 ? "unlimited" : maxTokens)
                     + ", toolCalls=" + toolCalls + "/" + maxToolCalls
-                    + ", elapsedSeconds=" + elapsedSeconds + "/" + maxElapsedSeconds;
+                    + ", elapsedSeconds=" + elapsedSeconds + "/"
+                    + (maxElapsedSeconds <= 0 ? "unlimited" : maxElapsedSeconds);
         }
     }
 

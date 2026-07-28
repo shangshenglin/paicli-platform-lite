@@ -1,5 +1,6 @@
 package com.paicli.platform.server.model;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -14,6 +15,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
+import java.io.EOFException;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URI;
@@ -88,19 +91,26 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             if (previous != null) throw new IllegalStateException("Model request is already active for run " + runId);
         }
         try {
-            HttpResponse<InputStream> response;
-            try {
-                response = sendWithRetry(active, request);
-            } catch (IllegalStateException error) {
-                if (!containsImages(request) || !imageInputRejected(error.getMessage())) throw error;
-                response = sendWithRetry(active, withoutImages(request));
+            ModelStreamListener streamListener = listener == null ? ModelStreamListener.NO_OP : listener;
+            for (int streamAttempt = 1; ; streamAttempt++) {
+                HttpResponse<InputStream> response = sendRequest(active, request);
+                active.body = response.body();
+                if (active.canceled) throw new CancellationException("Model request canceled");
+                try {
+                    ModelResponse result = readSse(response, streamListener);
+                    finishAttempt(active, "SUCCESS", active.attemptHttpStatus, null);
+                    circuit.succeeded();
+                    return result;
+                } catch (Exception error) {
+                    active.closeBody();
+                    boolean willRetry = streamAttempt < properties.maxAttempts()
+                            && retryableStreamFailure(error) && !active.canceled;
+                    if (!willRetry) throw error;
+                    finishAttempt(active, "RETRY", active.attemptHttpStatus, error.getMessage());
+                    if (metrics != null) metrics.modelRetry();
+                    backoff(streamAttempt, 0, active);
+                }
             }
-            active.body = response.body();
-            if (active.canceled) throw new CancellationException("Model request canceled");
-            ModelResponse result = readSse(response, listener == null ? ModelStreamListener.NO_OP : listener);
-            finishAttempt(active, "SUCCESS", active.attemptHttpStatus, null);
-            circuit.succeeded();
-            return result;
         } catch (CancellationException e) {
             finishAttempt(active, "CANCELED", active.attemptHttpStatus, e.getMessage());
             throw new ModelRequestCanceledException("Model request canceled", e);
@@ -118,6 +128,30 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             if (runId != null && !runId.isBlank()) activeRequests.remove(runId, active);
             active.closeBody();
         }
+    }
+
+    private HttpResponse<InputStream> sendRequest(ActiveRequest active, ModelRequest request) throws Exception {
+        try {
+            return sendWithRetry(active, request);
+        } catch (IllegalStateException error) {
+            if (!containsImages(request) || !imageInputRejected(error.getMessage())) throw error;
+            return sendWithRetry(active, withoutImages(request));
+        }
+    }
+
+    private static boolean retryableStreamFailure(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof JsonProcessingException || current instanceof EOFException
+                    || current instanceof IOException || current instanceof TimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && (message.contains("incomplete tool call")
+                    || message.contains("stream was idle"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean containsImages(ModelRequest request) {
@@ -151,11 +185,9 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         List<String> models = fallbackModel == null || fallbackModel.isBlank() || fallbackModel.equals(primaryModel)
                 ? List.of(primaryModel) : List.of(primaryModel, fallbackModel);
         String lastError = "model request failed";
-        int attemptOrdinal = 0;
         for (int modelIndex = 0; modelIndex < models.size(); modelIndex++) {
             String selectedModel = models.get(modelIndex);
             for (int attempt = 1; attempt <= properties.maxAttempts(); attempt++) {
-                attemptOrdinal++;
                 if (active.canceled) throw new CancellationException("Model request canceled");
                 acquireRatePermit(active);
                 String body = mapper.writeValueAsString(requestBody(request, selectedModel));
@@ -166,7 +198,7 @@ public class OpenAiCompatibleModelClient implements ModelClient {
                         .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
                 if (apiKey != null && !apiKey.isBlank()) requestBuilder.header("Authorization", "Bearer " + apiKey);
                 HttpRequest httpRequest = requestBuilder.build();
-                active.attemptId = startAttempt(active.runId, selectedModel, attemptOrdinal);
+                active.attemptId = startAttempt(active.runId, selectedModel, ++active.attemptOrdinal);
                 active.attemptHttpStatus = null;
                 CompletableFuture<HttpResponse<InputStream>> future = httpClient.sendAsync(
                         httpRequest, HttpResponse.BodyHandlers.ofInputStream());
@@ -287,16 +319,20 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         ObjectNode root = mapper.createObjectNode();
         root.put("model", selectedModel);
         root.put("stream", true);
-        root.put("max_tokens", request.maxOutputTokens());
+        boolean kimiK3 = kimiK3(selectedModel);
+        if (kimiK3) root.put("max_completion_tokens", request.maxOutputTokens());
+        else root.put("max_tokens", request.maxOutputTokens());
         root.set("stream_options", mapper.createObjectNode().put("include_usage", true));
         String thinkingMode = "auto".equals(request.thinkingMode())
                 ? properties.effectiveThinkingMode() : request.thinkingMode();
-        if (!"auto".equals(thinkingMode)) {
+        if (!kimiK3 && !"auto".equals(thinkingMode)) {
             root.set("thinking", mapper.createObjectNode().put("type", thinkingMode));
         }
-        String reasoningEffort = request.reasoningEffort().isBlank()
-                ? ("disabled".equals(thinkingMode) ? "" : properties.effectiveReasoningEffort())
-                : request.reasoningEffort();
+        String reasoningEffort = kimiK3
+                ? (request.reasoningEffort().isBlank() ? "max" : request.reasoningEffort())
+                : request.reasoningEffort().isBlank()
+                    ? ("disabled".equals(thinkingMode) ? "" : properties.effectiveReasoningEffort())
+                    : request.reasoningEffort();
         if (!reasoningEffort.isBlank()) root.put("reasoning_effort", reasoningEffort);
         ArrayNode messages = root.putArray("messages");
         for (ModelMessage message : request.messages()) {
@@ -345,6 +381,10 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             }
         }
         return root;
+    }
+
+    private static boolean kimiK3(String model) {
+        return model != null && model.trim().toLowerCase().startsWith("kimi-k3");
     }
 
     private ModelResponse readSse(HttpResponse<java.io.InputStream> response,
@@ -444,6 +484,7 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         private volatile boolean canceled;
         private volatile String attemptId;
         private volatile Integer attemptHttpStatus;
+        private int attemptOrdinal;
 
         private ActiveRequest(String runId) {
             this.runId = runId == null ? "" : runId;
@@ -460,6 +501,7 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         private void closeBody() {
             InputStream currentBody = body;
             if (currentBody == null) return;
+            body = null;
             try {
                 currentBody.close();
             } catch (Exception ignored) {

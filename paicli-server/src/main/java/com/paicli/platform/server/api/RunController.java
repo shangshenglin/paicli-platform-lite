@@ -112,7 +112,15 @@ public class RunController {
                 ? agent.thinkingMode() : request.thinkingMode();
         String reasoningEffort = agent != null && !blank(agent.reasoningEffort())
                 ? agent.reasoningEffort() : request.reasoningEffort();
-        if (!"enabled".equalsIgnoreCase(thinkingMode)) reasoningEffort = "";
+        boolean kimiK3 = productivity.resolveModelProfile(session.projectKey(), profileId)
+                .map(profile -> profile.model().toLowerCase().startsWith("kimi-k3"))
+                .orElse(false);
+        if (kimiK3) {
+            thinkingMode = "enabled";
+            if (blank(reasoningEffort)) reasoningEffort = "max";
+        } else if (!"enabled".equalsIgnoreCase(thinkingMode)) {
+            reasoningEffort = "";
+        }
         store.renameSessionIfGeneric(sessionId, request.input());
         RunRecord run = store.createRun(sessionId, runInput, thinkingMode, reasoningEffort,
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),

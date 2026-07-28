@@ -39,7 +39,7 @@ public record ModelProperties(
                            String thinkingMode, String reasoningEffort) {
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
-                3, 500, 60, "", 30, 0, 45, 5, 30, 1_800, 16, 100, 3);
+                3, 500, 60, "", 30, 0, 45, 5, 30, 0, 16, 100, 3);
     }
 
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
@@ -51,7 +51,7 @@ public record ModelProperties(
         this(provider, baseUrl, apiKey, model, maxContextTokens, maxOutputTokens, summaryTriggerRatio,
                 retainedMessages, toolResultInlineChars, requestTimeoutSeconds, thinkingMode, reasoningEffort,
                 maxAttempts, retryBaseMillis, requestsPerMinute, fallbackModel, maxRunSteps, maxRunTokens,
-                45, 5, 30, 1_800, 16, 100, 3);
+                45, 5, 30, 0, 16, 100, 3);
     }
 
     public ModelProperties(String provider, String baseUrl, String apiKey, String model,
@@ -89,8 +89,9 @@ public record ModelProperties(
             throw new IllegalArgumentException("thinkingMode must be auto, enabled, or disabled");
         }
         reasoningEffort = reasoningEffort == null ? "" : reasoningEffort.trim().toLowerCase();
-        if (!reasoningEffort.isBlank() && !reasoningEffort.equals("high") && !reasoningEffort.equals("max")) {
-            throw new IllegalArgumentException("reasoningEffort must be high or max");
+        if (!reasoningEffort.isBlank() && !reasoningEffort.equals("low")
+                && !reasoningEffort.equals("high") && !reasoningEffort.equals("max")) {
+            throw new IllegalArgumentException("reasoningEffort must be low, high, or max");
         }
         maxAttempts = maxAttempts <= 0 ? 3 : Math.min(maxAttempts, 5);
         retryBaseMillis = retryBaseMillis <= 0 ? 500 : Math.min(retryBaseMillis, 10_000);
@@ -101,7 +102,7 @@ public record ModelProperties(
         streamIdleTimeoutSeconds = streamIdleTimeoutSeconds <= 0 ? 45 : Math.min(streamIdleTimeoutSeconds, 600);
         circuitFailureThreshold = circuitFailureThreshold <= 0 ? 5 : Math.min(circuitFailureThreshold, 100);
         circuitOpenSeconds = circuitOpenSeconds <= 0 ? 30 : Math.min(circuitOpenSeconds, 3_600);
-        maxRunDurationSeconds = maxRunDurationSeconds <= 0 ? 1_800 : Math.min(maxRunDurationSeconds, 86_400);
+        maxRunDurationSeconds = Math.min(Math.max(0, maxRunDurationSeconds), 86_400);
         maxToolCallsPerTurn = maxToolCallsPerTurn <= 0 ? 16 : Math.min(maxToolCallsPerTurn, 100);
         maxToolCallsPerRun = maxToolCallsPerRun <= 0 ? 100 : Math.min(maxToolCallsPerRun, 10_000);
         maxIdenticalToolCallsPerRun = maxIdenticalToolCallsPerRun <= 0

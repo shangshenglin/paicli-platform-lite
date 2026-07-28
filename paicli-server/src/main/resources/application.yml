@@ -58,7 +58,7 @@ paicli:
     stream-idle-timeout-seconds: ${PAICLI_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:120}
     circuit-failure-threshold: ${PAICLI_MODEL_CIRCUIT_FAILURE_THRESHOLD:5}
     circuit-open-seconds: ${PAICLI_MODEL_CIRCUIT_OPEN_SECONDS:30}
-    max-run-duration-seconds: ${PAICLI_MODEL_MAX_RUN_DURATION_SECONDS:1800}
+    max-run-duration-seconds: ${PAICLI_MODEL_MAX_RUN_DURATION_SECONDS:0}
     max-tool-calls-per-turn: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_TURN:16}
     max-tool-calls-per-run: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_RUN:100}
     max-identical-tool-calls-per-run: ${PAICLI_MODEL_MAX_IDENTICAL_TOOL_CALLS_PER_RUN:3}

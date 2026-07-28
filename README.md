@@ -133,6 +133,18 @@ $env:PAICLI_MODEL_REASONING_EFFORT="high"
 .\scripts\start-local.ps1 -Restart
 ```
 
+如需在同一个 Console 中按对话或专家自由切换 DeepSeek 与 Kimi，在 `.env` 中保留
+`PAICLI_MODEL_PROVIDER=openai-compatible`，并分别配置两个只存在于 Server 进程的密钥：
+
+```powershell
+PAICLI_DEEPSEEK_API_KEY=replace-with-deepseek-key
+PAICLI_KIMI_API_KEY=replace-with-kimi-key
+```
+
+模型方案接口会为每个项目幂等补齐 `DeepSeek V4 Flash` 与 `Kimi K3`。首页模型轨道、对话输入区和专家设置使用同一批方案；选择 Kimi K3 时，Runtime 使用
+`https://api.moonshot.cn/v1`、`kimi-k3`、1M 上下文，并按 K3 协议省略 K2.x 的
+`thinking` 字段，发送 `reasoning_effort=low|high|max`。Kimi K3 始终思考，界面中的关闭开关会禁用。
+
 两种 Key 不要混淆：
 
 - `PAICLI_API_KEY`：浏览器 Console 或 REST Client 访问本机 PaiCLI API 的密钥。
@@ -255,7 +267,7 @@ Content-Type: application/json
 
 ### 阶段 5：DeepSeek V4 与真实 Docker 验收
 
-- 支持 DeepSeek V4 Flash/Pro、每 Run 思考模式和推理等级；默认不按单 Run 累计 Token 截断任务，可通过 `PAICLI_MODEL_MAX_RUN_TOKENS` 设置正数启用可选保护阀。
+- 支持 DeepSeek V4 Flash/Pro、每 Run 思考模式和推理等级；默认不按单 Run 累计 Token 或墙钟时长截断任务，可通过 `PAICLI_MODEL_MAX_RUN_TOKENS`、`PAICLI_MODEL_MAX_RUN_DURATION_SECONDS` 设置正数启用可选保护阀。步骤数、工具调用次数、单次模型请求和流空闲超时保护仍然生效。
 - `reasoning_content`、assistant `tool_calls` 与工具结果会持久化，并在后续模型轮次正确回传。
 - 解析 Prompt Cache 用量，兼容旧 SQLite 结构，并完成真实 Docker 容器验收。
 
@@ -579,6 +591,7 @@ GET/POST                    /v1/productivity/templates
 PUT/DELETE                  /v1/productivity/templates/{id}
 POST                        /v1/productivity/templates/{idOrShortcut}/resolve
 GET/POST                    /v1/productivity/model-profiles
+POST                        /v1/productivity/model-profiles/starter-pack
 PUT/DELETE                  /v1/productivity/model-profiles/{id}
 GET/POST                    /v1/productivity/agent-profiles
 POST                        /v1/productivity/agent-profiles/starter-pack

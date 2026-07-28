@@ -88,7 +88,9 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"agentReasoningEffort\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260728-plan-run-audit")))
+                        "data-effort=\"low\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "20260728-kimi-k3")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -143,8 +145,32 @@ class WebSecurityIntegrationTest {
                         "response.status === 401")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openConnectionSettings")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "renderHomeModelPicker")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "selectedModelIsKimiK3")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
+    }
+
+    @Test
+    void modelProfilesIncludeIdempotentDeepSeekAndKimiStarterPack() throws Exception {
+        String project = "model-starter-" + System.nanoTime();
+        for (int attempt = 0; attempt < 2; attempt++) {
+            mvc.perform(get("/v1/productivity/model-profiles")
+                            .param("projectKey", project)
+                            .header("X-API-Key", "test-secret"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.length()").value(2))
+                    .andExpect(jsonPath("$[?(@.name == 'DeepSeek V4 Flash')].model")
+                            .value("deepseek-v4-flash"))
+                    .andExpect(jsonPath("$[?(@.name == 'Kimi K3')].model")
+                            .value("kimi-k3"))
+                    .andExpect(jsonPath("$[?(@.name == 'Kimi K3')].baseUrl")
+                            .value("https://api.moonshot.cn/v1"))
+                    .andExpect(jsonPath("$[?(@.name == 'Kimi K3')].apiKeyEnv")
+                            .value("PAICLI_KIMI_API_KEY"));
+        }
     }
 
     @Test

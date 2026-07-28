@@ -122,6 +122,43 @@ class OpenAiCompatibleModelClientTest {
     }
 
     @Test
+    void adaptsRequestParametersForKimiK3Route() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] bytes = ("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"check\","
+                    + "\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "https://api.deepseek.com", "deepseek-key", "deepseek-v4-flash",
+                1_000_000, 16_384, 0.75, 6, 16_000, 30, "enabled", "high");
+        ObjectMapper mapper = new ObjectMapper();
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, mapper);
+        client.initialize();
+        ModelRoute kimi = new ModelRoute("profile-kimi", "Kimi K3",
+                "http://127.0.0.1:" + server.getAddress().getPort() + "/v1",
+                "kimi-key", "kimi-k3", "", 1_000_000, 131_072, false);
+
+        ModelResponse response = client.complete(new ModelRequest(
+                List.of(ModelMessage.user("solve")), List.of(), 65_536,
+                "disabled", "low", kimi));
+
+        var body = mapper.readTree(requestBody.get());
+        assertThat(response.reasoningContent()).isEqualTo("check");
+        assertThat(body.path("model").asText()).isEqualTo("kimi-k3");
+        assertThat(body.path("max_completion_tokens").asInt()).isEqualTo(65_536);
+        assertThat(body.has("max_tokens")).isFalse();
+        assertThat(body.has("thinking")).isFalse();
+        assertThat(body.path("reasoning_effort").asText()).isEqualTo("low");
+    }
+
+    @Test
     void preservesEveryParallelToolCallInProviderOrder() throws Exception {
         String stream = "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
                 + "{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}},"
@@ -291,5 +328,37 @@ class OpenAiCompatibleModelClientTest {
         assertThat(response.content()).isEqualTo("fallback-ok");
         assertThat(mapper.readTree(successfulBody.get()).path("model").asText())
                 .isEqualTo("fallback-model");
+    }
+
+    @Test
+    void retriesWhenSuccessfulHttpResponseContainsTruncatedSseJson() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            String stream = requests.incrementAndGet() == 1
+                    ? "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_cut\","
+                    + "\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"match3.html"
+                    : "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\ndata: [DONE]\n\n";
+            byte[] bytes = stream.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "test-model",
+                8_000, 1_000, 0.75, 6, 1_000, 30, "auto", "",
+                2, 1, 10_000, "", 30, 200_000);
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, new ObjectMapper());
+        client.initialize();
+
+        ModelResponse response = client.complete(new ModelRequest(
+                List.of(ModelMessage.user("create game")), List.of(), 1_000));
+
+        assertThat(requests).hasValue(2);
+        assertThat(response.content()).isEqualTo("recovered");
+        assertThat(response.toolCalls()).isEmpty();
     }
 }

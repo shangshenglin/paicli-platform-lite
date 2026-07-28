@@ -24,6 +24,50 @@
 
 ## 2026-07-28
 
+### 单 Run 默认 30 分钟误截断修复
+
+- 变更：`PAICLI_MODEL_MAX_RUN_DURATION_SECONDS` 默认值由 `1800` 改为 `0`，表示默认不按 Run 墙钟时长截断；`RunProcessor` 仅在该配置为正数时执行时长预算判定，预算快照在关闭时显示 `elapsedSeconds=<当前值>/unlimited`。
+- 思路：长思考模型以及等待子 Agent 的父 Run 可能合理运行超过 30 分钟，创建时间到当前时间的墙钟差不等于模型卡死。默认关闭这一硬截断，同时保留最大步骤数、每轮/每 Run 工具调用次数、重复工具调用、单次模型请求和流空闲超时，继续约束循环与网络异常；需要成本或 SLA 硬边界的部署仍可显式设置正秒数。
+- 验证：`PaiCliServerApplicationTest` 与 `RunProcessorTest` 定向 6 项通过；`.\mvnw.cmd test` 全模块 133 项通过；`git diff --check` 通过。
+
+### DeepSeek / Kimi K3 双模型自由切换
+
+- 变更：项目模型方案接口幂等补齐 DeepSeek V4 Flash 与 Kimi K3，分别从 Server 环境变量 `PAICLI_DEEPSEEK_API_KEY`、`PAICLI_KIMI_API_KEY` 读取密钥；新增模型 starter-pack API，密钥仍不进入浏览器、SQLite 或 Sandbox。
+- 变更：首页新增双引擎模型轨道，对话输入区和智能体专家设置复用同一模型方案；选择状态持久化在浏览器本地，专家仍可绑定自己的独立方案。
+- 变更：OpenAI-compatible 客户端按实际路由模型生成请求。Kimi K3 使用 `max_completion_tokens`，省略 K2.x 专属 `thinking`，支持 `reasoning_effort=low|high|max` 并保持 reasoning/tool_calls 多轮回传；K3 Run 强制记录为思考开启。
+- 变更：`.env.example`、README、OpenAPI 可见接口与静态资源版本同步更新。
+- 思路：模型选择应落到持久化 Model Profile 和每个 Run 的明确路由，而不是在浏览器保存供应商密钥；供应商差异集中在模型客户端能力适配层，避免把 Kimi 参数判断散落到业务 Runtime。
+- 验证：`OpenAiCompatibleModelClientTest`、`SqliteRuntimeStoreTest`、`WebSecurityIntegrationTest` 定向 52 项通过；`.\mvnw.cmd test` 全模块 133 项通过；`node --check paicli-server/src/main/resources/static/app.js`、`git diff --check` 与跳过 Spring Boot 重打包的全模块 `package` 通过。标准 `clean test/package` 未完成的唯一原因是本机既有 Java 进程锁定 `paicli-server-0.6.0-SNAPSHOT.jar`，其中 `clean` 无法删除该文件、Boot repackage 无法重命名为 `.original`；未擅自结束该进程。
+
+### 模型流截断恢复
+
+- 变更：OpenAI-compatible 接口返回 HTTP 200 后，如 SSE JSON 在传输中被截断、连接 I/O 中断、流读取超时或 tool call 不完整，模型客户端会记录失败 attempt、退避并重新请求，不再立即将 Run 标记失败。
+- 变更：跨流重试保持 model attempt 序号连续，便于审计供应商或网关的间歇性截断。
+- 思路：把“成功建立 HTTP 响应”和“完整消费模型流”视为同一次 attempt 的两个阶段；只有流完整解析后才提交成功，截断响应会关闭后重试。
+- 验证：新增 `OpenAiCompatibleModelClientTest.retriesWhenSuccessfulHttpResponseContainsTruncatedSseJson`；全项目 127 个测试通过。
+
+### SQLite 并发写入等待修复
+
+- 变更：SQLite 连接为显式事务统一配置 `IMMEDIATE` transaction mode，使写事务在开始时获取写锁并遵循现有的 30 秒 `busy_timeout`。
+- 变更：修复父子 Agent 并发持久化时，Tool outcome 从读事务升级为写事务会立即触发 `SQLITE_BUSY`、导致子 Run 失败且 ToolCall 残留 `RUNNING` 的问题。
+- 思路：DEFERRED 事务在首次读取后形成读快照，随后升级写锁时遇到并发写入可能直接返回 `SQLITE_BUSY`；IMMEDIATE 让显式写事务在开始时排队竞争唯一写锁，自动提交读取保持不变。
+- 验证：新增 `SqliteRuntimeStoreTest.waitsForConcurrentWriterBeforeCommittingToolOutcome`；执行 `.\mvnw.cmd clean package -DskipTests` 成功，修复后的本地服务健康检查通过。
+
+### 物资盘点 Agent 技术实现方案深化
+
+- 变更：扩展 `stockAgent.md`，在周转物资 SKU 盘点和循环物资 SN 盘点业务方案后，新增 Tool Provider + Material Agent Gateway 接入拓扑、事件触发、工具契约、证据聚合、规则与模型分工、数据模型和诊断状态机。
+- 变更：补充 Outbox/Inbox、ActionRequest、幂等键、证据快照、expectedVersion、Approval payloadHash、SN 条件更新、线程池隔离、Bulkhead、权限代理、降级、可观测、压测、测试、灰度和生产演进方案。
+- 变更：新增 Q11–Q24 技术深挖问答、技术实现版简历写法和三分钟项目介绍，并明确现有事实、建议实现和不可过度宣传的 Lite 边界。
+- 思路：将 Agent 定位为受控分析与编排层，盘点服务和 `mall-material` 继续作为单据、库存及 SN 状态的权威来源；用确定性后端机制约束模型不确定性。
+- 验证：人工检查 Markdown 标题、表格、代码块和 Mermaid 结构，运行 `git diff --check`；本次仅修改文档，不执行 Maven 测试。
+
+### 技术架构与面试指南补充 Java 后端专题
+
+- 变更：在 Session/Run、Runtime、ToolCall、Sandbox、模型网关、Context、Memory、RAG、MCP、Multi-Agent、Plan、Step 调度、评测、治理、SSE 和 SQLite 章节后，补充事务边界、并发领取、线程池、锁竞争、幂等、限流、背压、异步派生任务、可观测性、安全与容量演进说明。
+- 变更：在文末新增 Java 后端简历写法、90 秒项目介绍及 Q41–Q50 高频问答，覆盖 `synchronized` 边界、WAL/IMMEDIATE、线程池拒绝、流式批量持久化、模型限流和慢任务诊断等内容。
+- 思路：将现有可运行代码中的具体实现与明确的 Lite 边界一并写清，避免把单机 SQLite/Docker 方案包装成未经验证的分布式高并发能力。
+- 验证：人工交叉核对 `RunWorkerCoordinator`、`ExecutorConfiguration`、`SqliteConnectionFactory`、`SqliteRuntimeStore`、`OpenAiCompatibleModelClient`、`LayeredMemoryService`、`PlanExecutionService` 和 `application.yml`；运行文档结构与 diff 检查。
+
 ### Plan 与 Multi-Agent Graph 协作调度
 
 - 变更：默认 `PAICLI_WORKER_COUNT` 从 1 提升为 4，Run Worker 每轮按空闲槽位批量领取任务；项目并发预算继续限制实际并发。
