@@ -3123,6 +3123,170 @@ async function loadManagedMemories() {
   } catch (error) { showNotice(`Memory 加载失败：${error.message}`, true); }
 }
 
+let memoryWikiPages = [];
+let memoryWikiSelectedId = '';
+let memoryWikiView = 'pages';
+
+async function openMemoryWiki() {
+  $('memoryWikiSearch').value = '';
+  $('memoryWikiDialog').showModal();
+  setMemoryWikiView('pages');
+  await loadMemoryWiki();
+  $('memoryWikiSearch').focus();
+}
+
+async function loadMemoryWiki() {
+  const query = $('memoryWikiSearch').value.trim();
+  $('memoryWikiIndex').replaceChildren(element('div', 'hint', '正在读取 Memory Wiki…'));
+  try {
+    memoryWikiPages = await api(`/v1/memories/wiki?projectKey=${encodeURIComponent(currentProjectKey())}&query=${encodeURIComponent(query)}&limit=200`);
+    renderMemoryWikiIndex();
+    const selected = memoryWikiPages.find(page => page.id === memoryWikiSelectedId) || memoryWikiPages[0];
+    if (memoryWikiView === 'graph') renderMemoryWikiGraph();
+    else if (selected) await showMemoryWikiPage(selected.id);
+    else $('memoryWikiPage').replaceChildren(element('div', 'hint', '没有匹配的 Memory 页面。已有 Memory 会自动保留，并在这里显示。'));
+  } catch (error) {
+    $('memoryWikiIndex').replaceChildren(element('div', 'form-error', `Wiki 加载失败：${error.message}`));
+  }
+}
+
+function renderMemoryWikiIndex() {
+  const index = $('memoryWikiIndex');
+  index.replaceChildren();
+  memoryWikiPages.forEach(page => {
+    const button = element('button', page.id === memoryWikiSelectedId ? 'selected' : '');
+    button.type = 'button';
+    button.append(element('strong', '', page.title), element('small', '', `${page.memoryType} · ${page.tags || '无标签'}`));
+    button.onclick = () => showMemoryWikiPage(page.id).catch(error => showNotice(`Wiki 页面加载失败：${error.message}`, true));
+    index.append(button);
+  });
+  if (!memoryWikiPages.length) index.append(element('div', 'hint', '暂无页面'));
+}
+
+function setMemoryWikiView(view) {
+  memoryWikiView = view;
+  const graph = view === 'graph';
+  $('memoryWikiGraph').hidden = !graph;
+  $('memoryWikiPagesLayout').hidden = graph;
+  $('showMemoryWikiGraph').classList.toggle('primary', graph);
+  $('showMemoryWikiPages').classList.toggle('primary', !graph);
+  if (graph) renderMemoryWikiGraph();
+}
+
+function renderMemoryWikiGraph() {
+  const container = $('memoryWikiGraph');
+  container.replaceChildren();
+  if (!memoryWikiPages.length) {
+    container.append(element('div', 'hint', '暂无可绘制的 Memory 页面'));
+    return;
+  }
+  const pages = memoryWikiGraphPages();
+  const lanes = [
+    {layer: 'L1', label: 'L1 · 当前事实', note: '近期上下文与正在推进的事项'},
+    {layer: 'L2', label: 'L2 · 项目知识', note: '决策、过程经验与可复用方法'},
+    {layer: 'L3', label: 'L3 · 长期偏好', note: '稳定约束、偏好与长期背景'}
+  ];
+  const atlas = element('div', 'memory-atlas');
+  atlas.append(element('div', 'memory-atlas-note', pages.length < memoryWikiPages.length
+    ? `展示 ${pages.length}/${memoryWikiPages.length} 页；点卡片可查看来源和全部关联。`
+    : '点卡片可查看来源和全部关联。'));
+  lanes.forEach(lane => {
+    const laneElement = element('section', `memory-atlas-lane ${lane.layer.toLowerCase()}`);
+    laneElement.append(element('h3', '', lane.label), element('p', '', lane.note));
+    const list = element('div', 'memory-atlas-list');
+    pages.filter(page => page.layer === lane.layer).forEach(page => list.append(memoryAtlasCard(page)));
+    if (!list.childElementCount) list.append(element('div', 'hint', '暂无记忆'));
+    laneElement.append(list); atlas.append(laneElement);
+  });
+  container.append(atlas);
+}
+
+function memoryAtlasCard(page) {
+  const card = element('button', `memory-atlas-card ${page.id === memoryWikiSelectedId ? 'selected' : ''}`);
+  card.type = 'button';
+  card.append(element('strong', '', graphLabel(page.title, 34)), element('small', '',
+    `${page.memoryType} · ${Math.round(Number(page.confidence || 0) * 100)}%`));
+  const links = (page.outgoingLinks || []).slice(0, 2);
+  const relation = element('div', 'memory-atlas-links');
+  if (links.length) links.forEach(link => relation.append(element('span', '',
+    `${String(link.relation).startsWith('tag:') ? '≈' : '→'} ${graphLabel(link.title, 16)}`)));
+  else relation.append(element('span', '', '独立页面'));
+  card.append(relation);
+  card.onclick = () => {
+    memoryWikiSelectedId = page.id;
+    setMemoryWikiView('pages');
+    showMemoryWikiPage(page.id).catch(error => showNotice(`Wiki 页面加载失败：${error.message}`, true));
+  };
+  return card;
+}
+
+function memoryWikiGraphPages() {
+  const selected = memoryWikiPages.find(page => page.id === memoryWikiSelectedId);
+  const layers = ['L1', 'L2', 'L3'];
+  const pages = [];
+  layers.forEach(layer => {
+    const group = memoryWikiPages.filter(page => page.layer === layer).slice(0, 9);
+    if (selected && selected.layer === layer && !group.some(page => page.id === selected.id)) {
+      if (group.length >= 9) group[group.length - 1] = selected;
+      else group.push(selected);
+    }
+    pages.push(...group);
+  });
+  return pages.length ? pages : memoryWikiPages.slice(0, 27);
+}
+
+function graphLabel(value, limit) {
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+async function showMemoryWikiPage(id) {
+  const page = memoryWikiPages.find(value => value.id === id);
+  if (!page) return;
+  memoryWikiSelectedId = id;
+  renderMemoryWikiIndex();
+  const content = $('memoryWikiPage');
+  content.replaceChildren();
+  const title = element('h3', '', page.title);
+  const key = element('div', 'hint', `内部标识 · ${page.memoryKey}`);
+  const body = element('p', '', page.content);
+  const meta = element('div', 'memory-wiki-meta');
+  [`${page.layer}/${page.memoryType}`, `置信度 ${Math.round(Number(page.confidence || 0) * 100)}%`,
+    page.origin === 'automatic' ? 'LLM 自动提取' : '人工维护', page.enabled ? '已启用' : '已停用',
+    page.pinned ? '已置顶' : '', page.confirmedAt ? '已确认' : ''].filter(Boolean)
+    .forEach(value => meta.append(element('span', '', value)));
+  const edit = element('button', 'secondary', '修订此页'); edit.type = 'button';
+  edit.onclick = () => { $('memoryWikiDialog').close(); openMemoryRevision(page); };
+  content.append(title, key, body, meta, edit, memoryWikiLinksBlock('关联页面', page.outgoingLinks || []),
+    memoryWikiLinksBlock('反向引用', page.incomingLinks || []));
+  const sourceBlock = element('section', 'memory-wiki-block');
+  sourceBlock.append(element('h4', '', '可审计来源'), element('div', 'hint', '正在读取来源…'));
+  content.append(sourceBlock);
+  const sources = await api(`/v1/memories/${encodeURIComponent(id)}/sources`);
+  if (memoryWikiSelectedId !== id) return;
+  sourceBlock.replaceChildren(element('h4', '', '可审计来源'));
+  if (!sources.length) sourceBlock.append(element('div', 'hint', '此页面由人工创建，尚无自动提取来源。'));
+  sources.forEach(source => sourceBlock.append(element('div', 'memory-wiki-source',
+    `${source.sourceType} · ${source.sourceId || '未标识来源'} · r${source.sourceRevision || '1'}\n${source.excerpt || '无摘要'}`)));
+}
+
+function memoryWikiLinksBlock(title, links) {
+  const block = element('section', 'memory-wiki-block');
+  block.append(element('h4', '', title));
+  if (!links.length) {
+    block.append(element('div', 'hint', '暂无关联'));
+    return block;
+  }
+  const list = element('div', 'memory-wiki-links');
+  links.forEach(link => {
+    const button = element('button', 'secondary', `${link.title} · ${link.relation}`);
+    button.type = 'button';
+    button.onclick = () => showMemoryWikiPage(link.id).catch(error => showNotice(`Wiki 页面加载失败：${error.message}`, true));
+    list.append(button);
+  });
+  block.append(list);
+  return block;
+}
+
 const MEMORY_LAYER_ORDER = ['L1', 'L2', 'L3'];
 const MEMORY_LAYER_LABELS = {
   L1: 'L1 短期事实',
@@ -3145,7 +3309,7 @@ function renderManagedMemories(values) {
   MEMORY_LAYER_ORDER.forEach(layer => {
     const memories = [...byLayer.get(layer)].sort((left, right) =>
       memoryConfidence(right) - memoryConfidence(left)
-      || String(left.memoryKey || '').localeCompare(String(right.memoryKey || ''), 'zh-Hans-CN'));
+      || memoryDisplayTitle(left).localeCompare(memoryDisplayTitle(right), 'zh-Hans-CN'));
     container.append(memoryLayerSection(layer, memories, values));
   });
 }
@@ -3170,7 +3334,7 @@ function memoryLayerSection(layer, memories, allMemories) {
 function memoryItem(memory, allMemories) {
   const confidence = Math.round(memoryConfidence(memory) * 100);
   const source = memory.origin === 'automatic' ? `自动 · 置信度 ${confidence}%` : `人工 · 置信度 ${confidence}%`;
-  const item = workbenchItem(`${memory.pinned ? '📌 ' : ''}${memory.memoryKey}`,
+  const item = workbenchItem(`${memory.pinned ? '📌 ' : ''}${memoryDisplayTitle(memory)}`,
     `${source} · ${memory.layer}/${memory.memoryType} · ${memory.content}`);
   actionButton(item, memory.pinned ? '取消置顶' : '置顶', () => setMemoryState(memory.id, {pinned: !memory.pinned}));
   actionButton(item, '确认', () => setMemoryState(memory.id, {confirmed: true}));
@@ -3178,6 +3342,16 @@ function memoryItem(memory, allMemories) {
   if (allMemories.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, allMemories));
   actionButton(item, '修订', () => openMemoryRevision(memory));
   return item;
+}
+
+function memoryDisplayTitle(memory) {
+  const content = String(memory?.content || '').replace(/\[\[[^\]]+]]/g, '').replace(/\s+/g, ' ').trim();
+  if (!content) return memory?.memoryKey || '未命名记忆';
+  const sentence = content.search(/[。！？.!?；;]/);
+  const summary = (sentence >= 0 ? content.slice(0, sentence + 1) : content).trim();
+  if (summary.length <= 36) return summary;
+  const boundary = summary.lastIndexOf(' ', 36);
+  return `${summary.slice(0, boundary > 16 ? boundary : 36).trim()}…`;
 }
 
 function memoryConfidence(memory) {
@@ -3842,6 +4016,12 @@ $('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
 $('refreshMemories').onclick = loadManagedMemories;
+$('openMemoryWiki').onclick = () => openMemoryWiki().catch(error => showNotice(`Wiki 加载失败：${error.message}`, true));
+$('closeMemoryWiki').onclick = () => $('memoryWikiDialog').close();
+$('searchMemoryWiki').onclick = () => loadMemoryWiki();
+$('showMemoryWikiGraph').onclick = () => setMemoryWikiView('graph');
+$('showMemoryWikiPages').onclick = () => setMemoryWikiView('pages');
+$('memoryWikiSearch').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); loadMemoryWiki(); } };
 $('refreshArtifacts').onclick = loadArtifacts;
 $('refreshPlans').onclick = loadPlans;
 $('refreshPolicies').onclick = loadApprovalPolicies;

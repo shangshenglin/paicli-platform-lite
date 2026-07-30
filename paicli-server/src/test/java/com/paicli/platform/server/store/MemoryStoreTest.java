@@ -29,6 +29,30 @@ class MemoryStoreTest {
         assertThat(store.findMemory(memory.id())).isEmpty();
     }
 
+    @Test
+    void projectsExistingMemoriesAsLinkedWikiWithoutMutatingThem() throws Exception {
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
+        store.initialize();
+        var command = store.createMemory("project-a", "build-command",
+                "Run [[build-toolchain]] before publishing.", "build,java");
+        var toolchain = store.createMemory("project-a", "build-toolchain",
+                "Use the Maven Wrapper for a reproducible build.", "build,java");
+
+        var pages = store.memoryWiki("project-a", null, 20);
+        var commandPage = pages.stream().filter(page -> page.id().equals(command.id())).findFirst().orElseThrow();
+        var toolchainPage = pages.stream().filter(page -> page.id().equals(toolchain.id())).findFirst().orElseThrow();
+
+        assertThat(commandPage.outgoingLinks()).anySatisfy(link -> {
+            assertThat(link.id()).isEqualTo(toolchain.id());
+            assertThat(link.relation()).isEqualTo("explicit");
+        });
+        assertThat(commandPage.title()).isEqualTo("Run before publishing.");
+        assertThat(commandPage.title()).doesNotContain(command.memoryKey());
+        assertThat(toolchainPage.incomingLinks()).anySatisfy(link -> assertThat(link.id()).isEqualTo(command.id()));
+        assertThat(store.findMemory(command.id()).orElseThrow().content()).isEqualTo(command.content());
+        assertThat(store.memoryWiki("project-a", "wrapper", 20)).extracting("id").contains(toolchain.id());
+    }
+
     private PlatformProperties properties() {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
     }

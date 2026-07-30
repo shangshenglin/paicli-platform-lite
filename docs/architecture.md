@@ -112,6 +112,8 @@ Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`r
 
 Run 完成后先创建持久化 `memory_extractions` 任务，再由 Worker 提取带类型、层级、置信度和来源的 L1/L2/L3 Memory。同 key 变化和人工编辑都先写入 `memory_revisions`。当前 Memory 还保存结构化 payload、生命周期状态、来源类型/ID/修订、有效期、supersedes 和 checksum；自动提取写入 `memory_sources`，同 canonical key 内容变化记录 `memory_conflicts` 供人工审计。召回综合词法/语义相关性、置信度、时间衰减、置顶和稳定 L3 偏好；显式 REST CRUD 是人工纠错边界。
 
+Memory Wiki 不是第二份知识库，也不迁移或改写旧 Memory。它从同一项目的现有 Memory 派生页面视图：页面标题从内容首句生成，内部 key 只作为稳定链接标识；LLM 在确有依赖时以 `[[canonical-key]]` 写入明确关联，系统再补充同标签关联和反向引用。Console 以 L1/L2/L3 分栏地图渲染这些关系，并限制单层节点数以保持可读性。页面继续复用原有来源、修订、置信度、启停和确认状态，因此人工可以从 Wiki 直接回到可审计的 Memory 记录。
+
 DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工具结果按同一持久化边界恢复。模型 delta 批量写入 Event，浏览器按动画帧合并显示，避免每 Token 同步写 SQLite 或创建大量 DOM。
 
 项目规则属于受控上下文，不是自治 Memory。系统只从全局、项目和 Run 工作区的数据根目录读取 `AGENTS.md` / `PAI.md`，更具体层覆盖通用层，并受总字符预算约束。

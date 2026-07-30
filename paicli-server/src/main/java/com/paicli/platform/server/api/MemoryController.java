@@ -2,6 +2,7 @@ package com.paicli.platform.server.api;
 
 import com.paicli.platform.server.domain.MemoryRecord;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -47,6 +48,15 @@ public class MemoryController {
         return store.managedMemoryUnits(projectKey, limit);
     }
 
+    @GetMapping("/wiki")
+    @Operation(summary = "Browse project Memory as a linked LLM wiki")
+    public List<SqliteRuntimeStore.MemoryWikiPage> wiki(
+            @RequestParam(defaultValue = "default") String projectKey,
+            @RequestParam(required = false) String query,
+            @RequestParam(defaultValue = "100") int limit) {
+        return store.memoryWiki(projectKey, query, limit);
+    }
+
     @PostMapping("/{memoryId}/state")
     public SqliteRuntimeStore.MemoryUnit state(@PathVariable String memoryId,
                                                @RequestBody ApiDtos.MemoryStateRequest request) {
@@ -57,6 +67,22 @@ public class MemoryController {
     @GetMapping("/{memoryId}/revisions")
     public List<SqliteRuntimeStore.MemoryRevision> revisions(@PathVariable String memoryId) {
         return store.memoryRevisions(memoryId);
+    }
+
+    @GetMapping("/{memoryId}/sources")
+    @Operation(summary = "List auditable sources behind one Memory wiki page")
+    public List<SqliteRuntimeStore.MemorySource> sources(@PathVariable String memoryId) {
+        if (store.findMemoryUnit(memoryId).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "memory not found");
+        }
+        return store.memorySources(memoryId);
+    }
+
+    @GetMapping("/{memoryId}/wiki")
+    @Operation(summary = "Read one linked LLM wiki page backed by Memory")
+    public SqliteRuntimeStore.MemoryWikiPage wikiPage(@PathVariable String memoryId) {
+        return store.memoryWikiPage(memoryId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "memory not found"));
     }
 
     @PostMapping("/{memoryId}/revisions/{revisionId}/restore")

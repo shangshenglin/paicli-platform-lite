@@ -137,7 +137,8 @@ public class LayeredMemoryService {
                     忽略寒暄、临时任务步骤、一次性输出要求、模型猜测、密码、Token、API Key 和其他凭证。
                     同一事实发生变化时使用与旧记忆相同的 key，让系统保留修订历史并以新值生效。
                     layer: L1=当前话题事实，L2=项目级经验/决策，L3=长期稳定用户偏好。
-                    confidence 必须在 0 到 1 之间。只输出 JSON：
+                    content 的首句必须是一句简洁、可独立理解的概括，供 Wiki 作为页面标题；confidence 必须在 0 到 1 之间。每条 Memory 都是 Wiki 页面；只有确实依赖已有记忆时，
+                    才在 content 内使用精确的 [[canonical-key]] 链接，禁止编造链接，并保持该事实可独立理解。只输出 JSON：
                     {"memories":[{"key":"stable-key","content":"...","type":"EPISODIC|SEMANTIC|PROCEDURAL|PREFERENCE|DECISION|ENTITY_RELATION|FACT|CONSTRAINT|LESSON","layer":"L1|L2|L3","confidence":0.9,"tags":["..."]}]}
 
                     已有记忆：

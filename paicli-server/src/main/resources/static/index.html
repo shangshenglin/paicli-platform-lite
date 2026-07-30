@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260728-kimi-k3">
+  <link rel="stylesheet" href="/app.css?v=20260730-memory-map-fix">
 </head>
 <body>
 <div class="app">
@@ -139,76 +139,18 @@
 <dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
   <div class="dialog-title"><strong>效率工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
   <div class="hint" id="workbenchProject">当前项目：default</div>
-  <section class="capability-section workbench-search-section">
-    <h3>全局检索</h3>
-    <div class="workbench-search"><input id="globalSearch" placeholder="搜索对话、消息、Memory、知识和 Artifact"><button class="primary" id="searchAll">搜索</button></div>
-    <div class="managed-list" id="searchResults"></div>
-  </section>
-  <section class="capability-section productivity-overview">
-    <div class="section-title">
-      <div><h3>长期使用效率</h3><p class="hint">集中查看近 30 天用量、性能与预算风险。</p></div>
-      <div class="managed-actions"><button class="secondary" id="configureUsageBudget">预算与并发</button><button class="secondary" id="refreshProductivity">刷新</button></div>
-    </div>
-    <div class="capability-status usage-metrics" id="usageSummary"></div>
-    <details class="usage-history">
-      <summary><span>最近用量</span><small id="usageHistorySummary">暂无记录</small></summary>
-      <div class="usage-breakdown" id="usageBreakdown"></div>
-    </details>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div>
-    <div class="managed-list" id="templateList"></div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>模型配置方案</h3><button class="primary" id="addProfile">新建方案</button></div>
-    <div class="managed-list" id="profileList"></div>
-  </section>
-  <section class="capability-section">
-    <details class="workbench-collapse" id="queueCollapse">
-      <summary>
-        <span>Run 队列</span>
-        <small id="queueSummary">默认收缩</small>
-        <button class="secondary" id="refreshQueue" type="button">刷新</button>
-      </summary>
-      <div class="managed-list" id="queueList"></div>
-    </details>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>定时任务</h3><button class="primary" id="addSchedule">新建定时任务</button></div>
-    <div class="managed-list" id="scheduleList"></div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>完成通知</h3><button class="primary" id="addNotification">新增通知</button></div>
-    <div class="managed-list" id="notificationList"></div>
-  </section>
-  <section class="capability-section">
-    <h3>Session 导入导出</h3>
-    <div class="portability-actions">
-      <button class="secondary" data-export="markdown">导出 Markdown</button>
-      <button class="secondary" data-export="json">导出 JSON</button>
-      <button class="secondary" data-export="audit">完整审计包</button>
-      <label class="secondary file-action">导入 JSON<input id="sessionImport" type="file" accept="application/json,.json" hidden></label>
-      <label><input id="redactExport" type="checkbox"> 隐私脱敏</label>
-    </div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>Memory 管理</h3><button class="secondary" id="refreshMemories">刷新</button></div>
-    <div class="managed-list" id="memoryList"></div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>Artifact 工作台</h3><button class="secondary" id="refreshArtifacts">刷新</button></div>
-    <div class="managed-list" id="artifactList"></div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>Plan 工作台</h3><button class="secondary" id="refreshPlans">刷新</button></div>
-    <p class="hint">查看持久化 Plan、Step DAG、Async Job 和 Validation Check；启动后由后端调度器复用普通 ReAct Run。</p>
-    <div class="managed-list" id="planList"></div>
-  </section>
-  <section class="capability-section">
-    <div class="section-title"><h3>持久化审批策略</h3><button class="secondary" id="refreshPolicies">刷新</button></div>
-    <p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p>
-    <div class="managed-list" id="policyList"></div>
-  </section>
+  <section class="capability-section workbench-search-section"><h3>全局检索</h3><div class="workbench-search"><input id="globalSearch" placeholder="搜索对话、消息、Memory、知识和 Artifact"><button class="primary" id="searchAll">搜索</button></div><div class="managed-list" id="searchResults"></div></section>
+  <section class="capability-section productivity-overview"><div class="section-title"><div><h3>长期使用效率</h3><p class="hint">集中查看近 30 天用量、性能与预算风险。</p></div><div class="managed-actions"><button class="secondary" id="configureUsageBudget">预算与并发</button><button class="secondary" id="refreshProductivity">刷新</button></div></div><div class="capability-status usage-metrics" id="usageSummary"></div><details class="usage-history"><summary><span>最近用量</span><small id="usageHistorySummary">暂无记录</small></summary><div class="usage-breakdown" id="usageBreakdown"></div></details></section>
+  <section class="capability-section"><div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div><div class="managed-list" id="templateList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>模型配置方案</h3><button class="primary" id="addProfile">新建方案</button></div><div class="managed-list" id="profileList"></div></section>
+  <section class="capability-section"><details class="workbench-collapse" id="queueCollapse"><summary><span>Run 队列</span><small id="queueSummary">默认收缩</small><button class="secondary" id="refreshQueue" type="button">刷新</button></summary><div class="managed-list" id="queueList"></div></details></section>
+  <section class="capability-section"><div class="section-title"><h3>定时任务</h3><button class="primary" id="addSchedule">新建定时任务</button></div><div class="managed-list" id="scheduleList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>完成通知</h3><button class="primary" id="addNotification">新增通知</button></div><div class="managed-list" id="notificationList"></div></section>
+  <section class="capability-section"><h3>Session 导入导出</h3><div class="portability-actions"><button class="secondary" data-export="markdown">导出 Markdown</button><button class="secondary" data-export="json">导出 JSON</button><button class="secondary" data-export="audit">完整审计包</button><label class="secondary file-action">导入 JSON<input id="sessionImport" type="file" accept="application/json,.json" hidden></label><label><input id="redactExport" type="checkbox"> 隐私脱敏</label></div></section>
+  <section class="capability-section"><div class="section-title"><div><h3>长期记忆地图</h3><p class="hint">标题由记忆内容概括生成；内部 key 只保留为稳定标识。</p></div><div class="section-actions"><button class="secondary" id="openMemoryWiki">打开地图</button><button class="secondary" id="refreshMemories">刷新</button></div></div><div class="managed-list" id="memoryList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>Artifact 工作台</h3><button class="secondary" id="refreshArtifacts">刷新</button></div><div class="managed-list" id="artifactList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>Plan 工作台</h3><button class="secondary" id="refreshPlans">刷新</button></div><p class="hint">查看持久化 Plan、Step DAG、Async Job 和 Validation Check；启动后由后端调度器复用普通 ReAct Run。</p><div class="managed-list" id="planList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>持久化审批策略</h3><button class="secondary" id="refreshPolicies">刷新</button></div><p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p><div class="managed-list" id="policyList"></div></section>
 </dialog>
 <dialog id="planDetailDialog" class="wide-dialog audit-dialog">
   <div class="dialog-title"><strong id="planDetailTitle">Plan 详情</strong><button class="secondary" id="closePlanDetail">关闭</button></div>
@@ -441,6 +383,13 @@
     </section>
   </form>
 </dialog>
+<dialog id="memoryWikiDialog" class="wide-dialog memory-wiki-dialog">
+  <div class="dialog-title"><strong>LLM Memory Wiki</strong><button type="button" class="secondary" id="closeMemoryWiki">关闭</button></div>
+  <p class="hint">这是现有 Memory 的导航层，不会升级、覆盖或删除任何记忆。点击页面可查看关联、来源与审计信息。</p>
+  <div class="memory-wiki-toolbar"><input id="memoryWikiSearch" maxlength="120" placeholder="搜索页面、内容或标签"><button class="secondary" id="searchMemoryWiki">搜索</button><button class="secondary" id="showMemoryWikiGraph">关系地图</button><button class="secondary" id="showMemoryWikiPages">页面</button></div>
+  <div class="memory-wiki-layout" id="memoryWikiPagesLayout"><nav class="memory-wiki-index" id="memoryWikiIndex" aria-label="Memory Wiki 页面"></nav><article class="memory-wiki-page" id="memoryWikiPage"></article></div>
+  <section class="memory-wiki-graph" id="memoryWikiGraph" hidden aria-label="Memory Wiki 关系地图"></section>
+</dialog>
 <dialog id="groupDialog">
   <strong>新建对话分组</strong>
   <div class="hint">例如：工作、学习、个人</div>
@@ -450,6 +399,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260728-kimi-k3"></script>
+<script src="/app.js?v=20260730-memory-map-fix"></script>
 </body>
 </html>

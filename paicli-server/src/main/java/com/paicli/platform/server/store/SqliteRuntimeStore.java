@@ -31,6 +31,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,9 +40,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Repository
 public class SqliteRuntimeStore {
+    private static final Pattern WIKI_LINK = Pattern.compile("\\[\\[([a-zA-Z0-9_.-]{1,120})]]");
     private final Path databasePath;
     private final Path workspaceRoot;
     private final Path artifactRoot;
@@ -2699,6 +2704,27 @@ public class SqliteRuntimeStore {
         } catch (SQLException e) { throw failure("list managed memory units", e); }
     }
 
+    /**
+     * Returns a navigable projection of project Memory.  The projection deliberately derives links
+     * from durable Memory content/tags, so the wiki never becomes a second unsynchronised source of truth.
+     */
+    public List<MemoryWikiPage> memoryWiki(String projectKey, String query, int limit) {
+        List<MemoryUnit> all = managedMemoryUnits(projectKey, 500);
+        String needle = query == null ? "" : query.trim().toLowerCase();
+        List<MemoryUnit> selected = all.stream()
+                .filter(memory -> needle.isBlank() || wikiSearchText(memory).contains(needle))
+                .limit(Math.max(1, Math.min(limit, 200)))
+                .toList();
+        return wikiPages(all, selected);
+    }
+
+    public Optional<MemoryWikiPage> memoryWikiPage(String memoryId) {
+        MemoryUnit selected = findMemoryUnit(memoryId).orElse(null);
+        if (selected == null) return Optional.empty();
+        List<MemoryWikiPage> pages = wikiPages(managedMemoryUnits(selected.projectKey(), 500), List.of(selected));
+        return pages.stream().findFirst();
+    }
+
     public Optional<ToolCallRecord> findToolCall(String id) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "SELECT * FROM tool_calls WHERE id=?")) {
@@ -4010,6 +4036,13 @@ public class SqliteRuntimeStore {
                              String sourceRevision, Instant validFrom, Instant validTo, String supersedesId,
                              String checksum) { }
 
+    public record MemoryWikiPage(String id, String projectKey, String memoryKey, String title, String content,
+                                  String tags, String layer, String memoryType, double confidence, String origin,
+                                  String status, boolean pinned, boolean enabled, Instant confirmedAt, Instant updatedAt,
+                                  List<MemoryWikiLink> outgoingLinks, List<MemoryWikiLink> incomingLinks) { }
+
+    public record MemoryWikiLink(String id, String memoryKey, String title, String relation) { }
+
     public record MemoryRevision(String id, String memoryId, String content, String tags, String layer,
                                   String memoryType, double confidence, Instant replacedAt,
                                   String sourceRunId) { }
@@ -4059,6 +4092,88 @@ public class SqliteRuntimeStore {
         return new MemoryRecord(rs.getString("id"), rs.getString("project_key"), rs.getString("memory_key"),
                 rs.getString("content"), rs.getString("tags"), instant(rs.getString("created_at")),
                 instant(rs.getString("updated_at")));
+    }
+
+    private static List<MemoryWikiPage> wikiPages(List<MemoryUnit> all, List<MemoryUnit> selected) {
+        Map<String, MemoryUnit> byKey = new HashMap<>();
+        for (MemoryUnit memory : all) byKey.put(memory.memoryKey().toLowerCase(), memory);
+        Map<String, List<MemoryWikiLink>> outgoing = new HashMap<>();
+        Map<String, List<MemoryWikiLink>> incoming = new HashMap<>();
+        for (MemoryUnit memory : all) {
+            for (MemoryWikiLink link : wikiLinks(memory, all, byKey)) {
+                outgoing.computeIfAbsent(memory.id(), ignored -> new ArrayList<>()).add(link);
+                incoming.computeIfAbsent(link.id(), ignored -> new ArrayList<>())
+                        .add(new MemoryWikiLink(memory.id(), memory.memoryKey(), wikiTitle(memory), "referenced-by"));
+            }
+        }
+        return selected.stream().map(memory -> new MemoryWikiPage(
+                memory.id(), memory.projectKey(), memory.memoryKey(), wikiTitle(memory), memory.content(), memory.tags(),
+                memory.layer(), memory.memoryType(), memory.confidence(), memory.origin(), memory.status(), memory.pinned(),
+                memory.enabled(), memory.confirmedAt(), memory.updatedAt(),
+                List.copyOf(outgoing.getOrDefault(memory.id(), List.of())),
+                List.copyOf(incoming.getOrDefault(memory.id(), List.of())))).toList();
+    }
+
+    private static List<MemoryWikiLink> wikiLinks(MemoryUnit source, List<MemoryUnit> all,
+                                                   Map<String, MemoryUnit> byKey) {
+        Map<String, MemoryWikiLink> links = new LinkedHashMap<>();
+        Matcher matcher = WIKI_LINK.matcher(source.content());
+        while (matcher.find()) {
+            MemoryUnit target = byKey.get(matcher.group(1).toLowerCase());
+            if (target != null && !target.id().equals(source.id())) {
+                links.put(target.id(), new MemoryWikiLink(target.id(), target.memoryKey(), wikiTitle(target), "explicit"));
+            }
+        }
+        Set<String> sourceTags = wikiTags(source.tags());
+        if (!sourceTags.isEmpty()) {
+            for (MemoryUnit target : all) {
+                if (target.id().equals(source.id()) || links.containsKey(target.id())) continue;
+                Set<String> sharedTags = wikiTags(target.tags());
+                sharedTags.retainAll(sourceTags);
+                if (!sharedTags.isEmpty()) {
+                    links.put(target.id(), new MemoryWikiLink(target.id(), target.memoryKey(), wikiTitle(target),
+                            "tag:" + sharedTags.iterator().next()));
+                }
+            }
+        }
+        return links.values().stream().limit(12).toList();
+    }
+
+    private static String wikiSearchText(MemoryUnit memory) {
+        return (memory.memoryKey() + " " + memory.content() + " " + memory.tags() + " " + memory.memoryType())
+                .toLowerCase();
+    }
+
+    private static Set<String> wikiTags(String tags) {
+        Set<String> values = new HashSet<>();
+        if (tags == null || tags.isBlank()) return values;
+        for (String tag : tags.split(",")) {
+            String value = tag.trim().toLowerCase();
+            if (!value.isBlank()) values.add(value);
+        }
+        return values;
+    }
+
+    private static String wikiTitle(MemoryUnit memory) {
+        String content = WIKI_LINK.matcher(memory.content()).replaceAll("")
+                .replaceAll("\\s+", " ").trim();
+        if (content.isBlank()) content = memory.tags() == null ? "" : memory.tags().replace(',', ' ');
+        int sentence = firstSentenceEnd(content);
+        String title = content.substring(0, Math.min(content.length(), sentence)).trim();
+        if (title.length() > 48) {
+            int boundary = title.lastIndexOf(' ', 48);
+            title = title.substring(0, boundary > 20 ? boundary : 48).trim() + "…";
+        }
+        return title.isBlank() ? "未命名记忆" : title;
+    }
+
+    private static int firstSentenceEnd(String content) {
+        for (int index = 0; index < content.length(); index++) {
+            char value = content.charAt(index);
+            if (value == '。' || value == '！' || value == '？' || value == '.' || value == '!' || value == '?'
+                    || value == ';' || value == '；' || value == '\n') return index + 1;
+        }
+        return content.length();
     }
 
     private static MemoryUnit mapMemoryUnit(ResultSet rs) throws SQLException {

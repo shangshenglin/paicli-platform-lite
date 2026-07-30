@@ -383,7 +383,7 @@ Run 完成后先持久化 `memory_extractions` job，再由 Worker 从受限对�
 - 终态 Run 可在原 Session 重试，或复制源 Run 之前的有效历史并创建分支 Session。
 - 审批支持仅本次、本对话、本项目三种范围；策略可在工作台撤销。
 - `/v1/search` 统一检索 Session、Message、Memory、Knowledge 和 Artifact，并返回可跳转标识。
-- Memory 展示来源、层级、类型、置信度和修订历史，支持置顶、启停、确认、合并、编辑和版本恢复。
+- Memory 展示来源、层级、类型、置信度和修订历史，支持置顶、启停、确认、合并、编辑和版本恢复；同时提供不改写原始数据的 LLM Wiki 页面和分层可点击关系图，标题从事实内容概括而非内部 key。
 - Knowledge 展示集合、标签、版本、分块数、Embedding Provider、索引状态、引用位置和反馈。
 - Artifact 支持列表、预览、分段读取、认证下载、删除，以及复用为指定 Session 的待提交附件。
 
@@ -552,6 +552,9 @@ DELETE                      /v1/artifacts/{artifactId}
 GET/POST                    /v1/memories
 GET/PUT/DELETE              /v1/memories/{memoryId}
 GET                         /v1/memories/managed
+GET                         /v1/memories/wiki
+GET                         /v1/memories/{memoryId}/wiki
+GET                         /v1/memories/{memoryId}/sources
 POST                        /v1/memories/{memoryId}/state
 GET                         /v1/memories/{memoryId}/revisions
 POST                        /v1/memories/{memoryId}/revisions/{revisionId}/restore

@@ -90,7 +90,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "data-effort=\"low\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260728-kimi-k3")))
+                        "20260730-memory-map-fix")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -98,7 +98,11 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"memoryMergeForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"memoryRevisionForm\"")));
+                        "id=\"memoryRevisionForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"memoryWikiGraph\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"openMemoryWiki\"")));
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -146,11 +150,17 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openConnectionSettings")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "renderMemoryWikiGraph")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "renderHomeModelPicker")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "selectedModelIsKimiK3")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("localStorage.getItem('paicli_api_key')"))));
+        mvc.perform(get("/app.css"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        ".memory-wiki-layout[hidden], .memory-wiki-graph[hidden]")));
     }
 
     @Test
@@ -189,6 +199,25 @@ class WebSecurityIntegrationTest {
                 .andExpect(jsonPath("$[1].content").value(org.hamcrest.Matchers.containsString("https://example.test")))
                 .andExpect(jsonPath("$[1].runArtifacts[0].id").value(artifact.id()))
                 .andExpect(jsonPath("$[1].runArtifacts[0].name").value("snake.html"));
+    }
+
+    @Test
+    void memoryWikiApiIsAuthenticatedAndKeepsMemoryAsTheSourceOfTruth() throws Exception {
+        String project = "wiki-" + System.nanoTime();
+        var first = store.createMemory(project, "build-command", "Use [[build-toolchain]] first.", "build");
+        var second = store.createMemory(project, "build-toolchain", "Use mvnw.cmd test.", "build");
+
+        mvc.perform(get("/v1/memories/wiki").param("projectKey", project))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/v1/memories/wiki").param("projectKey", project).header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray());
+        mvc.perform(get("/v1/memories/{memoryId}/wiki", first.id()).header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").value("Use [[build-toolchain]] first."))
+                .andExpect(jsonPath("$.outgoingLinks[0].id").value(second.id()));
+        mvc.perform(get("/v1/memories/{memoryId}/sources", first.id()).header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$").isArray());
     }
 
     @Test

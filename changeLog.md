@@ -2,6 +2,20 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-07-30
+
+### Memory Wiki follow-up UI correction
+
+- Change: Restored the productivity workbench to its original vertical section layout. Memory management rows and Wiki pages now use a concise summary derived from memory content as the visible title, while the internal key remains a stable identifier only. Fixed the relationship-map view switch by giving `[hidden]` priority over the layout display rule, and refreshed static asset versions so browsers load the correction.
+- Rationale: The Wiki must make existing memories easier to scan without changing, upgrading, overwriting, or deleting their stored data. The relationship map remains a read-only L1/L2/L3 card map, but now reliably replaces the page view when selected.
+- Verification: `node --check paicli-server/src/main/resources/static/app.js`, targeted Memory/Console integration tests, and `git diff --check`.
+
+### Memory LLM Wiki（保留全部既有记忆）
+
+- 变更：新增 `/v1/memories/wiki`、单页 Wiki 与来源查询 API，并在 Console 增加可搜索、可跳转的 Memory Wiki 页面和关系地图；页面展示关联、反向引用、来源、置信度与当前治理状态，地图以 L1/L2/L3 分栏卡片呈现并可点击回到对应页面。Wiki 标题从内容首句提炼，内部 key 仅作为稳定标识。效率工作台同步重构为项目控制台：将检索、用量、复用、执行、自动化、记忆、成果与治理拆为色彩区分的面板，记忆入口改名为“长期记忆地图”。
+- 思路：Wiki 仅从现有 `memories`、标签和审计来源派生，不创建第二份知识库，也不升级、覆盖或删除旧 Memory。避免把技术 key 当作用户可读标题：自动提取要求首句先给出独立概括，现有 Memory 则动态从内容派生标题；LLM 仅在事实确有依赖时写入 `[[canonical-key]]` 显式关联，人工仍通过原有修订功能纠错。
+- 验证：`git diff --check`、`node --check paicli-server/src/main/resources/static/app.js`，以及 `mvn -pl paicli-server -am "-Dtest=MemoryStoreTest,WebSecurityIntegrationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test` 通过（14 tests）。
+
 ## 记录规范
 
 - 任何会话、任何工作区、任何分支中，只要修改了代码、脚本、配置、测试、文档、静态资源或产品站点，都必须同步更新本文件。
