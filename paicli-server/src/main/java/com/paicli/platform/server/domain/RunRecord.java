@@ -13,6 +13,7 @@ public record RunRecord(
         String error,
         String thinkingMode,
         String reasoningEffort,
+        String executionShell,
         int priority,
         String modelProfileId,
         String agentProfileId,

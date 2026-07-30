@@ -82,7 +82,7 @@ class ContextManagerTest {
         var run = store.createRun(session.id(), "review this code");
         var agent = new ProductivityStore.AgentProfile("agent_1", "alpha", "Code Reviewer",
                 "Reviews code", "Only review correctness and risk.", null,
-                "", "", "[\"read_file\"]", "[]", "summary, risks", "REVIEWER", "MANUAL",
+                "", "", "bash", "[\"read_file\"]", "[]", "summary, risks", "REVIEWER", "MANUAL",
                 "PROJECT", "INHERIT", "reviewer", 1, true, Instant.now(), Instant.now());
 
         var request = manager.prepare(session.id(), run.id(), 128_000, 4_096, agent).request();

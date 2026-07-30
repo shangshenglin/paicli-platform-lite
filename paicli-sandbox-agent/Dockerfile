@@ -1,4 +1,11 @@
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:17-jre AS java-runtime
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+
+COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+ENV POWERSHELL_TELEMETRY_OPTOUT=1
 
 RUN useradd --create-home --uid 10001 sandbox \
     && mkdir -p /workspace \

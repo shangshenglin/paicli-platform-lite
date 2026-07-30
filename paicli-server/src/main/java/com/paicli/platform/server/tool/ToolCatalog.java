@@ -43,7 +43,17 @@ public class ToolCatalog {
                         "required", List.of("path", "content"))),
                 tool("execute_command", "Execute a shell command in the workspace; requires approval. Do not use this as a fallback for ordinary file writes when write_file can satisfy the request.", Map.of(
                         "type", "object", "properties", Map.of(
-                                "command", stringProperty(), "cwd", stringProperty()),
+                                "command", stringProperty(),
+                                "shell", Map.of("type", "string",
+                                        "enum", List.of("sh", "bash", "powershell"),
+                                        "description", "Whitelisted shell; defaults to this Run's execution environment"),
+                                "cwd", stringProperty(),
+                                "timeoutSeconds", Map.of("type", "integer", "minimum", 1, "maximum", 90),
+                                "maxOutputBytes", Map.of("type", "integer", "minimum", 1024,
+                                        "maximum", 4 * 1024 * 1024),
+                                "env", Map.of("type", "object",
+                                        "additionalProperties", Map.of("type", "string"),
+                                        "description", "Non-sensitive explicit environment variables")),
                         "required", List.of("command"))),
                 tool("read_artifact", "Read a character range from an externalized tool result", Map.of(
                         "type", "object", "properties", Map.of(

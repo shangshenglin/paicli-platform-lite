@@ -196,18 +196,31 @@ public class ProductivityStore {
                                          String handoffPolicy, String workspaceScope, String approvalPolicy,
                                          String thinkingMode, String reasoningEffort, boolean enabled,
                                          String templateKey, int templateVersion) {
+        return saveAgentProfile(id, projectKey, name, description, systemPrompt, modelProfileId,
+                toolNamesJson, skillNamesJson, outputSchema, collaborationRole, handoffPolicy,
+                workspaceScope, approvalPolicy, thinkingMode, reasoningEffort, "bash", enabled,
+                templateKey, templateVersion);
+    }
+
+    public AgentProfile saveAgentProfile(String id, String projectKey, String name, String description,
+                                         String systemPrompt, String modelProfileId, String toolNamesJson,
+                                         String skillNamesJson, String outputSchema, String collaborationRole,
+                                         String handoffPolicy, String workspaceScope, String approvalPolicy,
+                                         String thinkingMode, String reasoningEffort, String executionShell,
+                                         boolean enabled, String templateKey, int templateVersion) {
         String key = project(projectKey);
         String resolvedId = blank(id) ? id("agent") : id.trim();
         Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO agent_profiles(id,project_key,name,description,system_prompt,model_profile_id," +
-                        "tool_names_json,skill_names_json,output_schema,thinking_mode,reasoning_effort,collaboration_role,handoff_policy," +
+                        "tool_names_json,skill_names_json,output_schema,thinking_mode,reasoning_effort,execution_shell,collaboration_role,handoff_policy," +
                         "workspace_scope,approval_policy,template_key,template_version,enabled,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
                         "name=excluded.name,description=excluded.description,system_prompt=excluded.system_prompt," +
                         "model_profile_id=excluded.model_profile_id,tool_names_json=excluded.tool_names_json," +
                         "skill_names_json=excluded.skill_names_json,output_schema=excluded.output_schema," +
                         "thinking_mode=excluded.thinking_mode,reasoning_effort=excluded.reasoning_effort," +
+                        "execution_shell=excluded.execution_shell," +
                         "collaboration_role=excluded.collaboration_role,handoff_policy=excluded.handoff_policy," +
                         "workspace_scope=excluded.workspace_scope,approval_policy=excluded.approval_policy," +
                         "template_key=excluded.template_key,template_version=excluded.template_version," +
@@ -224,6 +237,7 @@ public class ProductivityStore {
             ps.setString(i++, value(outputSchema, 8_000));
             ps.setString(i++, expertThinkingMode(thinkingMode));
             ps.setString(i++, expertReasoningEffort(reasoningEffort));
+            ps.setString(i++, com.paicli.platform.common.CommandShell.parse(executionShell).value());
             ps.setString(i++, value(collaborationRole, 40).isBlank() ? "EXPERT" : value(collaborationRole, 40).toUpperCase());
             ps.setString(i++, value(handoffPolicy, 40).isBlank() ? "MANUAL" : value(handoffPolicy, 40).toUpperCase());
             ps.setString(i++, value(workspaceScope, 40).isBlank() ? "PROJECT" : value(workspaceScope, 40).toUpperCase());
@@ -466,18 +480,22 @@ public class ProductivityStore {
     }
 
     public ScheduledTask saveSchedule(String id,String projectKey,String name,String templateId,String type,
-                                      String value,String variablesJson,boolean enabled,Instant nextRunAt){
+                                      String value,String variablesJson,String modelProfileId,String agentProfileId,
+                                      String agentTeamId,boolean enabled,Instant nextRunAt){
         String key=project(projectKey),resolvedId=blank(id)?id("schedule"):id.trim();Instant now=Instant.now();
         String scheduleType=text(type,"scheduleType",20).toUpperCase();
         if(!List.of("ONCE","DAILY","WEEKLY","CRON").contains(scheduleType))throw new IllegalArgumentException("unsupported schedule type");
         try(Connection c=open();PreparedStatement ps=c.prepareStatement(
-                "INSERT INTO scheduled_tasks(id,project_key,name,template_id,schedule_type,schedule_value,variables_json,enabled,next_run_at,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,template_id=excluded.template_id,"+
+                "INSERT INTO scheduled_tasks(id,project_key,name,template_id,schedule_type,schedule_value,variables_json,model_profile_id,agent_profile_id,agent_team_id,enabled,next_run_at,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,template_id=excluded.template_id,"+
                         "schedule_type=excluded.schedule_type,schedule_value=excluded.schedule_value,variables_json=excluded.variables_json,"+
+                        "model_profile_id=excluded.model_profile_id,agent_profile_id=excluded.agent_profile_id,agent_team_id=excluded.agent_team_id,"+
                         "enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at")){
             int i=1;ps.setString(i++,resolvedId);ps.setString(i++,key);ps.setString(i++,text(name,"name",120));
             ps.setString(i++,text(templateId,"templateId",160));ps.setString(i++,scheduleType);ps.setString(i++,value(value,120));
-            ps.setString(i++,json(variablesJson));ps.setInt(i++,enabled?1:0);ps.setString(i++,nextRunAt==null?null:nextRunAt.toString());
+            ps.setString(i++,json(variablesJson));ps.setString(i++,nullable(modelProfileId));
+            ps.setString(i++,nullable(agentProfileId));ps.setString(i++,nullable(agentTeamId));
+            ps.setInt(i++,enabled?1:0);ps.setString(i++,nextRunAt==null?null:nextRunAt.toString());
             ps.setString(i++,now.toString());ps.setString(i,now.toString());ps.executeUpdate();return findSchedule(resolvedId).orElseThrow();
         }catch(SQLException e){throw failure("save scheduled task",e);}
     }
@@ -578,9 +596,9 @@ public class ProductivityStore {
     private Connection open()throws SQLException{return connections.open();}
     private static TaskTemplate template(ResultSet r)throws SQLException{return new TaskTemplate(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("shortcut"),r.getString("prompt"),r.getString("variables_json"),r.getString("attachment_requirements"),r.getString("allowed_tools"),r.getString("model_profile_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")),instant(r.getString("last_used_at")),r.getInt("use_count"));}
     private static ModelProfile profile(ResultSet r)throws SQLException{return new ModelProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("base_url"),r.getString("api_key_env"),r.getString("model"),r.getString("fallback_model"),r.getInt("max_context_tokens"),r.getInt("max_output_tokens"),r.getDouble("input_price"),r.getDouble("output_price"),r.getInt("local_model")!=0,r.getInt("is_default")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
-    private static AgentProfile agentProfile(ResultSet r)throws SQLException{return new AgentProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("system_prompt"),r.getString("model_profile_id"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getString("tool_names_json"),r.getString("skill_names_json"),r.getString("output_schema"),r.getString("collaboration_role"),r.getString("handoff_policy"),r.getString("workspace_scope"),r.getString("approval_policy"),r.getString("template_key"),r.getInt("template_version"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
+    private static AgentProfile agentProfile(ResultSet r)throws SQLException{return new AgentProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("system_prompt"),r.getString("model_profile_id"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getString("execution_shell"),r.getString("tool_names_json"),r.getString("skill_names_json"),r.getString("output_schema"),r.getString("collaboration_role"),r.getString("handoff_policy"),r.getString("workspace_scope"),r.getString("approval_policy"),r.getString("template_key"),r.getInt("template_version"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static AgentTeam agentTeam(ResultSet r)throws SQLException{return new AgentTeam(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("leader_agent_profile_id"),r.getString("member_agent_profile_ids_json"),r.getInt("max_experts"),r.getInt("max_depth"),r.getInt("require_reviewer")!=0,r.getInt("require_runner")!=0,r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
-    private static ScheduledTask schedule(ResultSet r)throws SQLException{return new ScheduledTask(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("template_id"),r.getString("schedule_type"),r.getString("schedule_value"),r.getString("variables_json"),r.getInt("enabled")!=0,instant(r.getString("next_run_at")),instant(r.getString("last_run_at")),r.getString("last_run_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")));}
+    private static ScheduledTask schedule(ResultSet r)throws SQLException{return new ScheduledTask(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("template_id"),r.getString("schedule_type"),r.getString("schedule_value"),r.getString("variables_json"),r.getString("model_profile_id"),r.getString("agent_profile_id"),r.getString("agent_team_id"),r.getInt("enabled")!=0,instant(r.getString("next_run_at")),instant(r.getString("last_run_at")),r.getString("last_run_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationChannel channel(ResultSet r)throws SQLException{return new NotificationChannel(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("type"),r.getString("endpoint"),r.getString("secret_env"),r.getString("events"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationDelivery delivery(ResultSet r)throws SQLException{
         NotificationChannel channel=new NotificationChannel(r.getString("channel_id"),r.getString("project_key"),
@@ -590,7 +608,7 @@ public class ProductivityStore {
         return new NotificationDelivery(r.getString("id"),channel,r.getString("event_type"),r.getString("run_id"),
                 r.getString("message"),r.getInt("attempts"));
     }
-    private static RunRecord run(ResultSet r)throws SQLException{return new RunRecord(r.getString("id"),r.getString("session_id"),RunStatus.valueOf(r.getString("status")),r.getString("input"),r.getInt("current_step"),r.getString("error"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getInt("priority"),r.getString("model_profile_id"),r.getString("agent_profile_id"),r.getInt("retry_count"),instant(r.getString("created_at")),instant(r.getString("started_at")),instant(r.getString("finished_at")),r.getLong("version"));}
+    private static RunRecord run(ResultSet r)throws SQLException{return new RunRecord(r.getString("id"),r.getString("session_id"),RunStatus.valueOf(r.getString("status")),r.getString("input"),r.getInt("current_step"),r.getString("error"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getString("execution_shell"),r.getInt("priority"),r.getString("model_profile_id"),r.getString("agent_profile_id"),r.getInt("retry_count"),instant(r.getString("created_at")),instant(r.getString("started_at")),instant(r.getString("finished_at")),r.getLong("version"));}
     private static String project(String v){String x=blank(v)?"default":v.trim();if(!x.matches("[a-zA-Z0-9_.-]{1,80}"))throw new IllegalArgumentException("invalid projectKey");return x;}
     private static String text(String v,String n,int max){if(blank(v))throw new IllegalArgumentException(n+" must not be blank");return value(v,max);}
     private static String value(String v,int max){String x=v==null?"":v.trim();if(x.length()>max)throw new IllegalArgumentException("value is too long");return x;}
@@ -623,7 +641,7 @@ public class ProductivityStore {
                                String fallbackModel,int maxContextTokens,int maxOutputTokens,double inputPrice,
                                double outputPrice,boolean localModel,boolean defaultProfile,Instant createdAt,Instant updatedAt){}
     public record AgentProfile(String id,String projectKey,String name,String description,String systemPrompt,
-                               String modelProfileId,String thinkingMode,String reasoningEffort,
+                               String modelProfileId,String thinkingMode,String reasoningEffort,String executionShell,
                                String toolNamesJson,String skillNamesJson,String outputSchema,
                                String collaborationRole,String handoffPolicy,String workspaceScope,
                                String approvalPolicy,String templateKey,int templateVersion,boolean enabled,
@@ -642,7 +660,8 @@ public class ProductivityStore {
                                  boolean localModel){}
     public record QueueItem(RunRecord run,String sessionTitle,long elapsedMs,long usedTokens,long remainingBudgetTokens){}
     public record ScheduledTask(String id,String projectKey,String name,String templateId,String scheduleType,
-                                String scheduleValue,String variablesJson,boolean enabled,Instant nextRunAt,
+                                String scheduleValue,String variablesJson,String modelProfileId,String agentProfileId,
+                                String agentTeamId,boolean enabled,Instant nextRunAt,
                                 Instant lastRunAt,String lastRunId,Instant createdAt,Instant updatedAt){}
     public record NotificationChannel(String id,String projectKey,String name,String type,String endpoint,String secretEnv,
                                       String events,boolean enabled,Instant createdAt,Instant updatedAt){}

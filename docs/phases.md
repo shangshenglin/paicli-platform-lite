@@ -83,7 +83,7 @@
 - [x] 模型配置方案、项目默认/后备模型、提交前上下文/输出/成本预估和切换模型重试
 - [x] 按项目与日期统计 Token、缓存、耗时、失败率、重试和估算成本；日/月预算与接近上限提醒
 - [x] Run 优先级、批量取消/重新排队、项目最大并发和 SQLite 单机公平调度
-- [x] 一次性/每日/每周/Cron 定时任务，继续复用普通 Session/Run、Approval、Event 和 Audit 链路
+- [x] 一次性/每日/每周/Cron 定时任务，可独立固定模型方案与执行专家或小队，继续复用普通 Session/Run、Approval、Event、Plan 和 Audit 链路
 - [x] 浏览器与通用 Webhook/邮件网关/企业 IM 网关通知，密钥仅引用 Server 环境变量
 - [x] 模板、模型方案、定时任务和通知的新建操作统一为结构化表单；定时任务使用模板下拉选择与动态周期字段
 - [x] Session Markdown/JSON/完整审计包导出、隐私脱敏和跨实例导入
@@ -184,6 +184,16 @@
 - [x] 子 Run 终态事务自动写 Result Envelope v2、向下游 Session 注入有界上游结果、推进节点并唤醒父 Run；信封从 ToolCall/Artifact/ModelUsage 归集文件、命令、测试和证据。
 - [x] 上游失败支持 `BLOCK_GRAPH`、`DEGRADE`、`REQUIRE_HUMAN`；协作看板和 decision API 可处理等待人工判断的节点。
 - [x] Plan Graph 保留跨步骤条件、REWORK、Validation Gate 和 Human Node，Delegation Graph 承担步骤内/Leader 动态派发；两层统一复用普通 Run。
+
+## 阶段 20：多 Shell Docker 命令运行时
+
+- [x] `execute_command` 增加 `shell`、`cwd`、`timeoutSeconds`、`maxOutputBytes` 和显式 `env`，Shell 仅允许 `sh`、`bash`、`powershell` 固定映射。
+- [x] Docker Sandbox 镜像同时提供 Java 17、Bash 和 PowerShell Core；部署级命令超时同步注入 Sandbox Agent。
+- [x] Schema 迁移 26 为 Run 与 Agent Profile 持久化默认 Shell；模型省略参数时在 ToolCall 原子持久化和 Approval 之前补齐，恢复时复用。
+- [x] stdout/stderr 独立排空，记录退出码、Shell、工作目录、耗时、超时、字节数和截断状态；长结果复用 Artifact Store。
+- [x] 命令进程清空继承环境，显式 `env` 拒绝敏感变量名；Local 模式继续拒绝宿主机命令执行。
+- [x] Run 取消销毁独占容器并返回 Sandbox 取消状态；Console 在首页、对话工具条、专家设置和执行详情展示执行环境。
+- [ ] 增加逐行 stdout/stderr SSE、PTY 交互终端和受控后台服务生命周期。
 
 ### 阶段 16 后续工作
 

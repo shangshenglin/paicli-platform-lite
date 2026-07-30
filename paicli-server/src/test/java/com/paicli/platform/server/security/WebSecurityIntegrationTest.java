@@ -90,9 +90,15 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "data-effort=\"low\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260730-memory-map-fix")))
+                        "20260731-schedule-execution-config")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"scheduleModelProfile\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"scheduleAgentProfile\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"scheduleAgentTeam\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"notificationForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -102,7 +108,11 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"memoryWikiGraph\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"openMemoryWiki\"")));
+                        "id=\"openMemoryWiki\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"executionShell\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"agentExecutionShell\"")));
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -127,6 +137,8 @@ class WebSecurityIntegrationTest {
                         "replaceTopPanel")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "effectiveConversationStatus")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "selectExecutionShell")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openPlanStepRun")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

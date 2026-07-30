@@ -89,7 +89,7 @@ class SqliteRuntimeStoreTest {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25);
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26);
         }
     }
 
@@ -124,8 +124,8 @@ class SqliteRuntimeStoreTest {
             try (var columns = statement.executeQuery("PRAGMA table_info(runs)")) {
                 while (columns.next()) runColumns.add(columns.getString("name"));
             }
-            assertThat(agentColumns).contains("thinking_mode", "reasoning_effort");
-            assertThat(runColumns).contains("workspace_owner_run_id");
+            assertThat(agentColumns).contains("thinking_mode", "reasoning_effort", "execution_shell");
+            assertThat(runColumns).contains("workspace_owner_run_id", "execution_shell");
         }
     }
 
@@ -680,7 +680,7 @@ class SqliteRuntimeStoreTest {
                 "Reviews code changes", "Review code for correctness and risk.", profile.id(),
                 "[\"read_file\",\"search_knowledge\"]", "[\"java-review\"]",
                 "summary, risks, fixes", "REVIEWER", "MANUAL", "PROJECT", "INHERIT",
-                "enabled", "max", true, "", 0);
+                "enabled", "max", "powershell", true, "", 0);
         var leader = productivity.saveAgentProfile(null, "project-p1", "Delivery Leader",
                 "Coordinates experts", "Delegate and synthesize.", profile.id(),
                 "[\"list_agent_profiles\",\"spawn_agent\"]", "[]",
@@ -691,11 +691,13 @@ class SqliteRuntimeStoreTest {
                 2, 1, true, false, true);
         var budget = productivity.saveBudget("project-p1", 10_000, 100_000, 1, 10, .8, 2);
         var session = store.createSession("P1", "project-p1");
-        var run = store.createRun(session.id(), "review", "disabled", "", List.of(), profile.id(), agent.id(), 5, 0);
+        var run = store.createRun(session.id(), "review", "disabled", "", List.of(),
+                profile.id(), agent.id(), 5, 0, agent.executionShell());
         store.recordModelUsage(run.id(), "openai-compatible", profile.model(), 100, 90, 10, 20,
                 250, 1, true);
         var schedule = productivity.saveSchedule(null, "project-p1", "日报", template.id(),
-                "DAILY", "", "{}", true, java.time.Instant.now().minusSeconds(1));
+                "DAILY", "", "{}", profile.id(), agent.id(), null, true,
+                java.time.Instant.now().minusSeconds(1));
         var channel = productivity.saveNotification(null, "project-p1", "浏览器", "BROWSER",
                 "", "", "COMPLETED,FAILED", true);
 
@@ -709,7 +711,9 @@ class SqliteRuntimeStoreTest {
         assertThat(productivity.findAgentTeam(team.id())).contains(team);
         assertThat(agent.thinkingMode()).isEqualTo("enabled");
         assertThat(agent.reasoningEffort()).isEqualTo("max");
+        assertThat(agent.executionShell()).isEqualTo("powershell");
         assertThat(store.findRun(run.id()).orElseThrow().agentProfileId()).isEqualTo(agent.id());
+        assertThat(store.findRun(run.id()).orElseThrow().executionShell()).isEqualTo("powershell");
         assertThat(budget.maxConcurrentRuns()).isEqualTo(2);
         assertThat(productivity.queue("project-p1")).singleElement()
                 .satisfies(item -> {
@@ -730,6 +734,9 @@ class SqliteRuntimeStoreTest {
             });
         });
         assertThat(productivity.dueSchedules()).contains(schedule);
+        assertThat(schedule.modelProfileId()).isEqualTo(profile.id());
+        assertThat(schedule.agentProfileId()).isEqualTo(agent.id());
+        assertThat(schedule.agentTeamId()).isNull();
         assertThat(productivity.claimSchedule(schedule.id())).isTrue();
         productivity.completeSchedule(schedule.id(), run.id(), java.time.Instant.now().plusSeconds(60));
         assertThat(productivity.notificationChannels("project-p1")).containsExactly(channel);

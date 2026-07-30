@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import com.paicli.platform.server.plan.PlanService;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
@@ -23,10 +24,11 @@ public class ScheduledTaskService {
     private static final TypeReference<Map<String,String>> MAP=new TypeReference<>(){};
     private final ProductivityStore productivity;
     private final SqliteRuntimeStore runtime;
+    private final PlanService plans;
     private final ObjectMapper mapper;
 
-    public ScheduledTaskService(ProductivityStore productivity,SqliteRuntimeStore runtime,ObjectMapper mapper){
-        this.productivity=productivity;this.runtime=runtime;this.mapper=mapper;
+    public ScheduledTaskService(ProductivityStore productivity,SqliteRuntimeStore runtime,PlanService plans,ObjectMapper mapper){
+        this.productivity=productivity;this.runtime=runtime;this.plans=plans;this.mapper=mapper;
     }
 
     @Scheduled(fixedDelayString="${paicli.productivity.scheduler-delay-ms:15000}")
@@ -39,7 +41,20 @@ public class ScheduledTaskService {
                 String prompt=render(template.prompt(),variables);
                 ensureBudget(task.projectKey());
                 var session=runtime.createSession("[定时] "+task.name(),task.projectKey(),null);
-                var run=runtime.createRun(session.id(),prompt,"auto","",java.util.List.of(),template.modelProfileId(),0,0);
+                var team=resolveTeam(task);
+                var agent=team == null ? resolveAgent(task) : productivity.resolveAgentProfile(task.projectKey(),
+                        team.leaderAgentProfileId()).orElseThrow();
+                String modelProfileId=resolveModelProfile(task,template,agent);
+                String runInput=team == null ? prompt : teamLeaderInput(prompt,team.name());
+                var run=runtime.createRun(session.id(),runInput,"auto","",java.util.List.of(),modelProfileId,
+                        agent == null ? null : agent.id(),0,0,
+                        agent == null ? "bash" : agent.executionShell());
+                if(team != null){
+                    runtime.saveCollaborationPolicy(run.id(),true,"MEDIUM","MEDIUM",
+                            team.memberAgentProfileIdsJson(),team.maxExperts(),team.maxDepth(),team.maxExperts(),
+                            0,0,false,team.requireReviewer(),team.requireRunner());
+                    plans.createAutomaticCollaborationPlan(session.id(),run.id(),task.projectKey(),prompt);
+                }
                 productivity.markTemplateUsed(task.projectKey(),template.id());
                 productivity.completeSchedule(task.id(),run.id(),next(task));
             }catch(Exception e){
@@ -55,6 +70,35 @@ public class ScheduledTaskService {
                 ||(budget.dailyCost()>0&&day.estimatedCost()>=budget.dailyCost())
                 ||(budget.monthlyCost()>0&&month.estimatedCost()>=budget.monthlyCost()))
             throw new IllegalStateException("project model budget exceeded");
+    }
+    private ProductivityStore.AgentProfile resolveAgent(ProductivityStore.ScheduledTask task){
+        if(task.agentProfileId()==null || task.agentProfileId().isBlank()) return null;
+        return productivity.resolveAgentProfile(task.projectKey(),task.agentProfileId())
+                .orElseThrow(()->new IllegalStateException("scheduled agent profile is unavailable"));
+    }
+    private ProductivityStore.AgentTeam resolveTeam(ProductivityStore.ScheduledTask task){
+        if(task.agentTeamId()==null || task.agentTeamId().isBlank()) return null;
+        var team=productivity.findAgentTeam(task.agentTeamId()).filter(value -> value.enabled()
+                && value.projectKey().equals(task.projectKey()))
+                .orElseThrow(()->new IllegalStateException("scheduled agent team is unavailable"));
+        var leader=productivity.resolveAgentProfile(task.projectKey(),team.leaderAgentProfileId())
+                .orElseThrow(()->new IllegalStateException("scheduled agent team leader is unavailable"));
+        if(!"LEADER".equalsIgnoreCase(leader.collaborationRole())) {
+            throw new IllegalStateException("scheduled agent team leader must be a LEADER profile");
+        }
+        return team;
+    }
+    private String resolveModelProfile(ProductivityStore.ScheduledTask task,ProductivityStore.TaskTemplate template,
+                                       ProductivityStore.AgentProfile agent){
+        String candidate=task.modelProfileId();
+        if((candidate==null || candidate.isBlank()) && agent != null) candidate=agent.modelProfileId();
+        if(candidate==null || candidate.isBlank()) candidate=template.modelProfileId();
+        if(candidate==null || candidate.isBlank()) return null;
+        return productivity.resolveModelProfile(task.projectKey(),candidate)
+                .orElseThrow(()->new IllegalStateException("scheduled model profile is unavailable")).id();
+    }
+    private static String teamLeaderInput(String prompt,String teamName){
+        return "Scheduled team task. You are the Leader of '"+teamName+"'. Follow the persisted team policy, delegate only necessary work to allowed experts, then synthesize conclusions, risks, and next actions.\n\nTask:\n"+prompt;
     }
     private static Instant next(ProductivityStore.ScheduledTask task){
         Instant now=Instant.now();return switch(task.scheduleType()){

@@ -183,7 +183,7 @@ sequenceDiagram
 已经真实落地的能力包括：
 
 - 持久化 ReAct Loop、Run 状态机、工具幂等、恢复和取消。
-- Docker 文件/命令执行边界、危险工具审批、路径和资源限制。
+- Docker 文件/命令执行边界，支持 `sh`、`bash`、PowerShell Core 白名单、workspace cwd、超时、受控 env、输出限制、真实取消和危险工具审批。
 - OpenAI-compatible 流式模型、reasoning、多 ToolCall、重试、熔断和用量记录。
 - 上下文预算、对话压缩、Artifact 外置、自动 Memory、混合 RAG 和多模态附件。
 - Skill、联网、远程 MCP、历史会话检索和持久化 Multi-Agent。
@@ -196,6 +196,7 @@ sequenceDiagram
 - `GIT_WORKTREE` 已有隔离语义和 `workspace_ref`，但不会自动执行真实 `git worktree add`、提交、合并和冲突恢复。
 - DAG 批次和资源冲突已经可分析、可调度，但不是跨机器的分布式并行执行引擎。
 - Async Job 已有持久化对象和状态闭环，真实长命令、下载、CI 查询等执行器仍需继续扩展。
+- 命令工具已经有受限的完成结果和容器级取消，但还没有逐行 stdout/stderr SSE、交互式 PTY、stdin 和后台服务生命周期。
 - Docker 共享宿主内核，不等于 MicroVM，也不适合直接执行公网敌对租户提交的任意代码。
 - RAG 是单机结构化分块、BM25、真实 Embedding 和 RRF，没有独立向量数据库和专用神经重排服务。
 - 评测以确定性规则为主，没有将 LLM Judge 当作硬门禁。
@@ -459,6 +460,27 @@ Worker 使用定时扫描和进程内线程池，没有 Kafka，也没有独立 
 
 `ToolRouter` 只接收已经持久化的 ToolCall。即使工具在 Server 进程内执行，也不能绕过参数校验、Approval、Event、Audit 和结果物化。
 
+#### `execute_command` 为什么不是一个裸字符串
+
+命令工具的结构化参数包括：
+
+```json
+{
+  "command": "mvn test",
+  "shell": "bash",
+  "cwd": ".",
+  "timeoutSeconds": 90,
+  "maxOutputBytes": 262144,
+  "env": {
+    "CI": "true"
+  }
+}
+```
+
+`shell` 只接受 `sh`、`bash`、`powershell`，不能由模型提供任意解释器路径；`cwd` 必须留在当前 Run Workspace；请求超时和输出字节数受上下限约束；`env` 限制数量、名称和值，并拒绝疑似 Key、Token、Secret、Password、Credential 或 Auth 的字段。
+
+Run 和 Agent Profile 都持久化 `execution_shell`。如果模型省略 `shell`，`RunProcessor` 会在同轮 ToolCall 原子落库、计算幂等键和创建 Approval 之前补入 Run 默认值。Retry 默认继承源 Run，委派子 Run 优先使用目标 Agent Profile，否则继承父 Run。这样用户审批的不只是命令文本，也包括执行器、工作目录、超时和环境参数。
+
 #### 多 ToolCall 的原子性和顺序
 
 模型 SSE 中的 ToolCall 名称和 arguments 可能被拆成很多 delta。客户端先用 provider `index` 在内存中重组完整调用，模型轮次结束后才生成 ToolCall Draft。Store 在一个事务中保存 assistant Message 和全部 Draft；其中任何一个参数不合法或写入失败，整轮都不进入可执行状态。
@@ -572,11 +594,12 @@ Agent Loop 只依赖稳定接口：
 
 ```java
 ToolResult execute(ToolRequest request);
+boolean cancel(String runId);
 void release(String runId);
 String mode();
 ```
 
-`ToolRequest` 携带 Run、工具名、参数和幂等键，`ToolResult` 返回成功状态、受限输出和错误。Server 与 Sandbox 不共享数据库连接、模型 Key 或内部 Store 对象，因此未来可以把 Docker 后端替换为远程执行服务，而不重写 ReAct Loop。
+`ToolRequest` 携带 Run、工具名、参数和幂等键，`ToolResult` 返回成功状态、受限输出、错误和结构化 metadata。命令 metadata 包含实际 Shell、相对 cwd、退出码、超时、stdout/stderr 原始字节数和截断状态。Server 与 Sandbox 不共享数据库连接、模型 Key 或内部 Store 对象，因此未来可以把 Docker 后端替换为远程执行服务，而不重写 ReAct Loop。
 
 #### 容器生命周期
 
@@ -587,6 +610,8 @@ String mode();
 5. Server 启动时扫描 PaiCLI label，清理上次异常退出留下的孤儿容器。
 
 每 Run 一个容器位于“每工具一个容器”和“所有任务共享容器”之间：既保留任务内状态，又减少不同 Run 互相污染。
+
+取消 Run 时，Controller 会取消模型请求并沿 Run 树调用 Sandbox cancel。Docker Driver 从租约表移除容器并强制终止它，所以正在运行的命令和子进程也会结束；API 还会返回 `sandboxExecutionCanceled`，让调用方知道是否真正中断了执行资源，而不是只更新数据库状态。
 
 容器边界包括：
 
@@ -618,6 +643,20 @@ Sandbox Agent 对路径执行 `resolve + normalize`，对已存在路径执行 `
 
 持续排空输出很重要：如果只读取前 N KB 后停止消费，子进程可能因为 stdout/stderr 管道写满而阻塞，导致“已超限但命令永远不退出”。PaiCLI 将保存限额和管道消费分开处理。
 
+#### Bash 与 PowerShell 如何同时保持安全边界
+
+Sandbox 镜像同时提供 Java 17、Bash 和 PowerShell Core，外部枚举通过 `CommandShell` 固定映射到容器内 argv：
+
+| Shell | 固定启动方式 |
+|---|---|
+| `sh` | `/bin/sh -lc` |
+| `bash` | `/bin/bash -lc` |
+| `powershell` | `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command` |
+
+进程不会继承 Sandbox Agent 的完整环境，而是从清空后的环境启动，只加入固定 `PATH`、`HOME`、Locale、PowerShell/.NET 临时目录和经过校验的显式变量。stdout 与 stderr 使用独立排空任务，避免互相阻塞；非零退出码作为命令级结果交给模型修正，超时才形成工具失败并终止进程树。长结果可以进入 Artifact，但如果 Sandbox 已达到采集上限，Artifact 会明确标记为截断输出，不能声称保存了未采集到的完整日志。
+
+这里运行的是 Linux 容器中的跨平台 `pwsh`，不是 Windows 宿主 PowerShell。Local Sandbox 仍故意拒绝 `execute_command`，避免开发模式绕过 Docker 边界。
+
 #### 为什么不能直接写用户桌面
 
 Docker 只挂载当前 Workspace，Path Guard 还会拒绝绝对路径、`..` 和符号链接逃逸。不能写桌面是安全设计结果。若产品需要把结果交付到用户目录，更合理的方式是由 Server 提供审批后的白名单导出工具，或让用户从 Artifact 下载，而不是把整个主目录挂进 Sandbox。
@@ -631,7 +670,7 @@ Docker 只挂载当前 Workspace，Path Guard 还会拒绝绝对路径、`..` �
 
 ### 10.4 Lite 如何简化
 
-使用 Docker Desktop 和 `docker exec + loopback HTTP`，没有预热池、快照恢复、远程节点调度和专用 Sandbox Gateway。
+使用 Docker Desktop 和 `docker exec + loopback HTTP`，没有预热池、快照恢复、远程节点调度和专用 Sandbox Gateway。命令结果在进程结束后形成 ToolResult，目前还没有逐行输出协议、PTY、stdin 交互和后台进程托管。
 
 ### 10.5 企业差距与升级
 
@@ -639,7 +678,7 @@ Docker 共享宿主内核，隔离强度弱于 MicroVM。面向敌对多租户�
 
 ### 10.6 面试怎么讲
 
-> 我把 Agent Runtime 看成“脑”，Sandbox 看成“手”。模型密钥只在脑中，手只拿临时控制令牌和当前 Run Workspace。Docker 不是绝对安全，但它验证了脑手分离和可替换执行后端的架构边界。
+> 我把 Agent Runtime 看成“脑”，Sandbox 看成“手”。模型密钥只在脑中，手只拿临时控制令牌和当前 Run Workspace。命令可选择 sh、bash 或 PowerShell Core，但解释器路径、cwd、env、超时和输出都受协议约束；Docker 不是绝对安全，不过它验证了脑手分离和可替换执行后端的架构边界。
 
 ### 10.7 后端补充：隔离、资源与清理
 
@@ -2013,6 +2052,7 @@ REST 负责命令和查询，SSE 负责服务端单向事件流，数据库负�
 - Console 对 delta 使用批量 DOM 更新，长时间线限制节点数量。
 - API Key 只保存在当前标签页 `sessionStorage`。
 - 页面包含聊天、执行详情、Plan、评测、Memory、Knowledge、Artifact、模板、预算、队列和通知入口。
+- 首页、对话工具栏和 Agent Profile 使用同一执行环境选项；执行事件显示 Shell、cwd、退出码、耗时、超时和 Artifact/截断状态。
 - 前端在 SSE 结束或异常时通过 Run 查询做终态对账。
 
 #### API 按资源而不是按页面组织
@@ -2148,7 +2188,7 @@ WAL 改善并发，不会把 SQLite 变成多节点数据库。高写入规模�
 
 #### 迁移策略和兼容
 
-当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。已有迁移覆盖 reasoning、归档、附件、Memory、模型 usage、工作台、评测、生产加固、Plan、租约、资源集合、AgentFeedback 和类型化 Edge。
+当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。当前迁移版本为 1–26，已有迁移覆盖 reasoning、归档、附件、Memory、模型 usage、工作台、评测、生产加固、Plan、租约、资源集合、AgentFeedback、类型化 Edge、协作团队，以及 Run/Agent Profile 的 `execution_shell`。
 
 例如旧 `plan_edges` 会兼容为 `DEPENDENCY + ON_SUCCESS`；旧 Baseline Token 口径保留 `TOTAL` 标志，避免升级后把历史数据错误解释为 output Token。
 
@@ -2382,7 +2422,7 @@ content/reasoning delta 可以先入内存队列，由独立调度器每 100–2
 - 设计可恢复 ReAct Loop，将 Run 提交、Worker 领取、模型调用、ToolCall 原子落库、工具结果回写和终态提交拆成明确事务边界；支持服务重启恢复、取消、失败分类和重复工具循环保护。
 - 建立 ToolCall Effect、幂等键和持久化 Approval 机制，保证用户审批后执行原始参数；对非幂等未知结果进入人工对账状态，大结果外置为带 SHA-256 的 Artifact。
 - 实现 SQLite WAL、busy timeout、迁移兼容、状态与 Event 原子提交、预算预留、通知 Outbox、备份恢复和 Micrometer 指标，覆盖核心 Store 与状态机回归测试。
-- 通过 `SandboxDriver` 解耦 Runtime 与执行环境，使用每 Run Docker 容器、只读根文件系统、工作区挂载、随机令牌、资源限制和路径归一化实现脑手分离。
+- 通过 `SandboxDriver` 解耦 Runtime 与执行环境，使用每 Run Docker 容器、只读根文件系统、工作区挂载、随机令牌、资源限制和路径归一化实现脑手分离；以固定白名单支持 sh、bash、PowerShell Core，并治理 cwd、超时、env、stdout/stderr、截断元数据与容器级取消。
 
 ## 27. AI 平台岗位简历版本
 
@@ -2403,7 +2443,7 @@ content/reasoning delta 可以先入内存队列，由独立调度器每 100–2
 当简历空间有限时，可以只保留三条：
 
 - 基于 Spring Boot + SQLite WAL 实现可恢复 Agent Runtime，以持久化 Run 状态机、ToolCall 原子落库、Effect/幂等键和 Approval 保障模型工具调用的恢复、顺序与副作用安全。
-- 基于 Docker Sandbox 实现脑手分离，并构建 Context、分层 Memory、混合 RAG、Artifact、Skill/MCP 与持久化 Multi-Agent 能力，所有 Provider 统一复用 ToolCall、Event 和 Audit 管线。
+- 基于 Docker Sandbox 实现脑手分离与 sh/bash/PowerShell Core 白名单命令运行时，并构建 Context、分层 Memory、混合 RAG、Artifact、Skill/MCP 与持久化 Multi-Agent 能力，所有 Provider 统一复用 ToolCall、Event 和 Audit 管线。
 - 将复杂任务建模为类型化 Plan Graph，支持租约恢复、资源读写冲突、隔离 Workspace、Human Node、有限失败回流和 Validation Gate；通过真实内部 Run、多 Trial 与 Baseline 建立 Agent 质量回归闭环。
 
 ## 29. 可量化信息怎么写
@@ -2548,6 +2588,14 @@ Approval 表示用户意愿，Path Guard 表示系统安全边界，两者不是
 
 它提供进程、文件系统、网络和资源边界，但共享宿主内核，不等于硬件级隔离。当前定位是单机私有、受控用户下的轻量执行边界。面向公网敌对租户时应升级到 MicroVM、gVisor 或 Kata，并补网络出口、凭证注入和镜像供应链治理。
 
+### Q20A：为什么支持 PowerShell，却不直接调用 Windows 宿主 PowerShell？
+
+当前使用 Linux Docker 中的 PowerShell Core `pwsh`，所以仍受每 Run 容器、只读根文件系统、workspace 挂载、资源限制和网络策略约束。直接调用 Windows 宿主 PowerShell 会让模型命令继承 Server 用户权限，扩大到数据库、密钥和用户目录，与脑手分离目标冲突。
+
+### Q20B：为什么不允许模型直接传 `/bin/zsh` 或其他解释器路径？
+
+Shell 是执行协议的一部分，不是任意字符串。固定枚举让 Tool Schema 可校验、Approval 可理解、幂等键可稳定、恢复可重现，也阻止模型借自定义解释器或启动参数绕过 `-NoProfile`、非交互模式和环境清理。需要新 Shell 时应由管理员更新镜像与白名单并增加测试，而不是由单次模型调用决定。
+
 ## D. 模型、流式协议与前端
 
 ### Q21：模型流已经开始后为什么不能随便重试？
@@ -2560,7 +2608,7 @@ Approval 表示用户意愿，Path Guard 表示系统安全边界，两者不是
 
 ### Q23：为什么选 SSE，不选 WebSocket？
 
-当前主要是服务端向浏览器推送模型 delta、状态、工具和审批事件，反向命令仍通过 REST 完成。SSE 基于 HTTP、实现简单，并支持 Event ID 和断线重放。只有需要交互式终端或高频双向通信时，WebSocket 才更合适。
+当前主要是服务端向浏览器推送模型和持久化 Event，用户输入、审批和控制命令仍走 REST。SSE 基于 HTTP、实现简单，并支持 Event ID 和断线重放。现有命令 stdout/stderr 是完成后结果，不是逐行终端流；若未来增加 PTY、stdin、后台进程或高频双向控制，再为终端协议引入 WebSocket。
 
 ### Q24：数据库已经 COMPLETED，前端仍显示运行中，应该改哪里？
 
@@ -2634,7 +2682,7 @@ Run 完成只表示 Agent 给出了最终回答，没有证明 Done Criteria 满
 
 ### Q40：如果让你继续把项目升级为企业版本，你会先做什么？
 
-我会先保持业务契约不变，依次替换最容易形成容量瓶颈的实现：Store 升级 PostgreSQL 和 Flyway，Run 调度升级 Outbox + 持久化队列，Artifact/Knowledge 升级对象存储，Sandbox 升级远程隔离执行，Event/Audit 接入 OpenTelemetry 和集中日志。随后补真实 Git worktree 合并、更多 Validation 类型、评测数据集版本和 Judge 校准。升级顺序由可靠性、容量和安全风险驱动，而不是一次性把所有中间件堆进系统。
+我会先保持业务契约不变，依次替换最容易形成容量瓶颈的实现：Store 升级 PostgreSQL 和 Flyway，Run 调度升级 Outbox + 持久化队列，Artifact/Knowledge 升级对象存储，Sandbox 升级远程隔离执行并增加增量 stdout/stderr、PTY 与后台进程生命周期，Event/Audit 接入 OpenTelemetry 和集中日志。随后补真实 Git worktree 合并、更多 Validation 类型、评测数据集版本和 Judge 校准。升级顺序由可靠性、容量和安全风险驱动，而不是一次性把所有中间件堆进系统。
 
 ---
 

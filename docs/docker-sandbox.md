@@ -33,7 +33,11 @@ Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤�
 - CPU、内存和 PID 限额可配置。
 - 只把当前 Run 工作区以读写方式挂载。
 - 工具路径必须解析到 `/workspace` 以下，并检查符号链接。
-- 命令输出由限额收集器持续排空，超时会终止 Shell 进程树。
+- 命令只允许 `sh`、`bash`、`powershell` 三个逻辑名称，固定映射到镜像内的 `/bin/sh`、`/bin/bash` 和 PowerShell Core `/usr/bin/pwsh`，不接受解释器路径。
+- 命令支持 workspace 内 `cwd`、1 秒至部署上限的 `timeoutSeconds`、1 KiB 至 4 MiB 的 `maxOutputBytes`，以及最多 32 个显式非敏感环境变量。
+- 命令进程清空继承环境后再注入固定基础变量和已校验的 `env`，不会继承 Sandbox Agent Token。
+- stdout/stderr 分开限额收集并持续排空；结果包含退出码、实际 Shell、耗时、超时和截断元数据，长结果由 Server 外置为 Artifact。
+- 超时会终止 Shell 进程树；取消 Run 会 `docker rm -f`，中断容器内活跃命令。
 
 ## 配置
 
@@ -55,6 +59,8 @@ paicli:
 - Docker Desktop/WSL2 需要单独安装。
 - 尚未实现容器暂停或检查点；新容器会继续使用同一持久化工作区。
 - 尚未实现网络白名单；当前网络完全隔离于外网。
+- 尚未实现逐行 stdout/stderr SSE、PTY 交互和脱离 Run 生命周期的后台服务管理。
+- Local Sandbox 不执行命令；不会回退到 Windows 宿主机 PowerShell。
 - Windows Bind Mount 可能比原生 Linux Volume 慢。
 
 ## 验收记录

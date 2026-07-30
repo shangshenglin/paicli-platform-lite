@@ -76,6 +76,14 @@ public class DockerSandboxDriver implements SandboxDriver {
     }
 
     @Override
+    public boolean cancel(String runId) {
+        ContainerLease lease = leases.remove(runId);
+        if (lease == null) return false;
+        removeContainer(lease.containerId());
+        return true;
+    }
+
+    @Override
     public String mode() {
         return "docker";
     }
@@ -113,6 +121,8 @@ public class DockerSandboxDriver implements SandboxDriver {
                 "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL",
                 "-e", "SANDBOX_AGENT_TOKEN=" + token,
+                "-e", "SANDBOX_COMMAND_TIMEOUT_SECONDS="
+                        + dockerProperties.commandTimeoutSeconds(),
                 "-v", workspace + ":/workspace:rw",
                 dockerProperties.image()
         ));

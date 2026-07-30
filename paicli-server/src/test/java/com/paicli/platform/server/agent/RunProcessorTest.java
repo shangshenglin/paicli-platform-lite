@@ -70,6 +70,46 @@ class RunProcessorTest {
     }
 
     @Test
+    void persistsRunDefaultShellBeforeRequestingCommandApproval() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient model = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                return ModelResponse.tool("call-shell", "execute_command", Map.of("command", "echo ok"));
+            }
+
+            @Override public String name() { return "shell-default-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, model, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties));
+        var session = store.createSession("shell");
+        var run = store.createRun(session.id(), "run command", "disabled", "", List.of(),
+                null, null, 0, 0, "powershell");
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        var call = store.toolCallsForRun(run.id()).get(0);
+        assertThat(call.arguments()).contains("\"shell\":\"powershell\"");
+        assertThat(store.approvalsForRun(run.id())).singleElement()
+                .satisfies(approval -> assertThat(approval.toolCallId()).isEqualTo(call.id()));
+        assertThat(store.messages(session.id()).stream()
+                .filter(message -> "assistant".equals(message.role()))
+                .findFirst().orElseThrow().toolCallsJson()).contains("\"shell\":\"powershell\"");
+    }
+
+    @Test
     void persistsAndExecutesEveryToolCallInModelOrder() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");

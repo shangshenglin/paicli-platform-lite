@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260730-memory-map-fix">
+  <link rel="stylesheet" href="/app.css?v=20260730-shell-runtime">
 </head>
 <body>
 <div class="app">
@@ -48,6 +48,11 @@
           <select id="quickTemplate" title="任务模板"><option value="">快捷指令</option></select>
           <select id="agentProfile" title="智能体专家"><option value="">默认专家</option></select>
           <select id="modelProfile" title="模型配置方案"><option value="">默认模型</option></select>
+          <select id="executionShell" title="Docker Sandbox 默认 Shell">
+            <option value="bash">Bash</option>
+            <option value="sh">POSIX sh</option>
+            <option value="powershell">PowerShell</option>
+          </select>
           <span id="thinkingLabel">深度思考</span>
           <button class="mode-button" data-thinking="disabled">关闭</button>
           <button class="mode-button" data-thinking="enabled">开启</button>
@@ -243,6 +248,7 @@
       <label class="form-field full"><span>模型配置方案</span><select id="agentModelProfile"><option value="">使用项目默认模型</option></select></label>
       <label class="form-field"><span>思考模式</span><select id="agentThinkingMode"><option value="">跟随对话设置</option><option value="disabled">关闭</option><option value="enabled">开启</option></select></label>
       <label class="form-field"><span>思考深度</span><select id="agentReasoningEffort"><option value="">跟随对话设置</option><option value="low">低</option><option value="high">高</option><option value="max">最高</option></select><small id="agentReasoningHint">仅在思考模式开启时生效。</small></label>
+      <label class="form-field"><span>默认执行环境</span><select id="agentExecutionShell"><option value="bash">Bash</option><option value="sh">POSIX sh</option><option value="powershell">PowerShell</option></select><small>仅 Docker Sandbox 执行命令；Local 模式仍拒绝宿主机命令。</small></label>
       <label class="form-field"><span>允许工具</span><select id="agentTools" multiple hidden></select><div id="agentToolsPicker" class="tag-picker"></div><small>按角色提供默认工具；所有专家固定获得受控 Plan 工具，其中创建、调整、启动和取消仍需持久化审批。</small></label>
       <label class="form-field"><span>允许 Skill</span><select id="agentSkills" multiple hidden></select><div id="agentSkillsPicker" class="tag-picker"></div><small>不添加表示不限定 Skill；可搜索后点选添加。</small></label>
       <label class="form-field"><span>交接策略</span><select id="agentHandoff"><option value="MANUAL">Manual</option><option value="LEADER_ASSIGNED">Leader Assigned</option><option value="AUTO">Auto</option></select></label>
@@ -310,6 +316,9 @@
     <div class="form-grid">
       <label class="form-field"><span>任务名称 *</span><input id="scheduleName" maxlength="80" required placeholder="例如：每日代码检查"></label>
       <label class="form-field"><span>任务模板 *</span><select id="scheduleTemplate" required></select></label>
+      <label class="form-field"><span>模型方案</span><select id="scheduleModelProfile"></select><small>此处选择会固定到定时任务，并优先于模板模型。</small></label>
+      <label class="form-field"><span>执行专家</span><select id="scheduleAgentProfile"></select><small>可选；与执行小队二选一。</small></label>
+      <label class="form-field full"><span>执行小队</span><select id="scheduleAgentTeam"></select><small>可选；将使用小队 Leader 创建协作 Run，并按小队成员、并发和审查策略执行。</small></label>
       <label class="form-field"><span>执行周期 *</span>
         <select id="scheduleType">
           <option value="ONCE">一次性</option><option value="DAILY" selected>每日</option><option value="WEEKLY">每周</option><option value="CRON">Cron</option>
@@ -399,6 +408,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260730-memory-map-fix"></script>
+<script src="/app.js?v=20260731-schedule-execution-config"></script>
 </body>
 </html>

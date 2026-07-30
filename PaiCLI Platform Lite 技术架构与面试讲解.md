@@ -247,7 +247,7 @@ SQLite 对 `tool_calls.idempotency_key` 建立 `UNIQUE` 约束。即使同一 Ru
 |---|---|---|
 | `session_groups` | 前端历史对话分组 | 分组名大小写不敏感唯一 |
 | `sessions` | 对话容器 | `project_key`、`group_id`、`internal`、`updated_at`；内部评测/子 Agent 会话不进入普通列表 |
-| `runs` | 一次用户任务的状态机 | `status`、`current_step`、`version`、思考模式 |
+| `runs` | 一次用户任务的状态机 | `status`、`current_step`、`version`、思考模式、`execution_shell` |
 | `messages` | system/user/assistant/tool/summary 会话数据 | `sequence`、`archived`、`reasoning_content`、`tool_calls_json` |
 | `run_events` | SSE 重放和诊断时间线 | Run 内 `sequence` 唯一，全局自增 `id` |
 | `tool_calls` | 工具请求、参数、状态和结果 | `idempotency_key UNIQUE` |
@@ -267,7 +267,7 @@ SQLite 对 `tool_calls.idempotency_key` 建立 `UNIQUE` 约束。即使同一 Ru
 | `plan_revisions` / `plan_events` | Replan 历史与计划事件 | 版本原因、原始 JSON、Plan 内 sequence |
 | `async_jobs` / `validation_checks` | 异步任务与完成证据 | 幂等键、Job 状态、payload/result/log、Done Criteria 和证据 |
 | `agent_feedback` | Plan/Agent 执行后的反馈闭环 | Run/Step 验证状态、得分、失败分类和证据质量 |
-| `schema_migrations` | 数据库版本 | 当前版本 1–21 |
+| `schema_migrations` | 数据库版本 | 当前版本 1–26 |
 
 ### 7.2 为什么使用 WAL
 
@@ -304,6 +304,9 @@ WAL 只在数据库初始化时设置一次，避免每次开连接都重新切�
 21. 受控并行 Plan Step、workspace 引用和 Agent Feedback 闭环。
 22. 专家思考配置和 Session 工作空间归属继承。
 23. 类型化 Plan Graph Edge、确定性条件路由和有限失败回流。
+24. 可复用专家协作团队。
+25. 持久化协作依赖、资源约束和终态传播。
+26. Run 与 Agent Profile 的持久化执行 Shell。
 
 面试时要主动承认：这个方案比 Flyway/Liquibase 轻，但缺少正式的 SQL 版本脚本、回滚和迁移校验。如果进入多节点/商业化阶段，会改用 Flyway 并将 Store 抽象为接口。
 
@@ -637,6 +640,8 @@ Plan 定义任务步骤和验收标准，Multi-Agent 负责把某个步骤委派
 
 这里体现了一个重要分类：工具不一定全部在 Sandbox。`ServerToolProvider` 负责知识、Skill、联网、MCP 和委派，文件与命令类才转发到 `SandboxDriver`。所有 Provider 都只能由已经持久化的 ToolCall 驱动，不能绕开审批、Event/SSE、Audit 和 Artifact 边界。
 
+`execute_command` 不是只有一个自由文本 `command`。当前 Schema 还包含 `shell`、workspace 内 `cwd`、请求级 `timeoutSeconds`、`maxOutputBytes` 和显式 `env`。模型只能从 `sh`、`bash`、`powershell` 中选择，不允许传入任意解释器路径；`env` 也会拒绝疑似 Key、Token、Secret、Password、Credential 或 Auth 的变量名。Run 或 Agent Profile 选定的默认 Shell 会在 ToolCall 原子持久化和 Approval 之前补入参数，因此用户审批、恢复执行和审计看到的是同一个确定值。
+
 工具返回业务失败（例如路径越界、文件不存在、远端查询失败）时，ToolCall 仍持久化为 `FAILED` 并写 `tool.failed` Event，但 Runtime 会同时追加一条结构化 tool-role observation，再把 Run 重新排队。模型下一轮能看到错误并修正参数或直接使用已有 RAG；不会因为一次可解释的工具失败让整轮任务终止。审批拒绝、用户取消和 Runtime 自身异常仍是终止条件。
 
 ### 8.2 审批为什么必须持久化
@@ -699,6 +704,7 @@ Console 可为一次 Run 暂存最多 4 张 PNG/JPEG/GIF。Server 会验证实�
 
 ```text
 ToolResult execute(ToolRequest request);
+boolean cancel(String runId);
 void release(String runId);
 String mode();
 ```
@@ -718,6 +724,8 @@ Docker 模式以 Run 为 key 维护 `ContainerLease`：
 4. Server 启动时按 Docker label 清理孤儿容器。
 
 这个设计比“每个工具一容器”少冷启动，又比“所有 Run 共享一容器”隔离更清晰。
+
+取消不仅改变数据库状态。`RunController` 在取消 Run 树后调用 `ToolRouter.cancel(runId)`；Docker Driver 会移除对应租约并强制终止容器，因此正在执行的命令及其进程树也会停止。取消响应会返回是否实际中断了 Sandbox 执行，便于 Console 区分“只收敛状态”和“确实释放执行资源”。
 
 ### 9.3 容器安全参数
 
@@ -748,7 +756,21 @@ docker exec <container> curl http://127.0.0.1:8081/internal/v1/tools/execute
 
 缺点是每次调用都会创建 `docker exec` 进程，性能不如长连接 Gateway。如果升级为企业版，可替换成 gRPC/WebSocket 长连接和预热池。
 
-### 9.5 路径逃逸防护
+### 9.5 多 Shell 命令运行时
+
+Sandbox 镜像同时包含 Java 17、Bash 和 PowerShell Core。`CommandShell` 将外部枚举固定映射为：
+
+| `shell` | 容器内固定命令 |
+|---|---|
+| `sh` | `/bin/sh -lc` |
+| `bash` | `/bin/bash -lc` |
+| `powershell` | `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command` |
+
+这里的重点不是“把宿主终端搬进网页”，而是把 Shell 作为可持久化的执行协议。Run 创建、Retry、Agent Profile 和委派子 Run 都会保存或继承 `execution_shell`；如果模型没有显式给出 Shell，`RunProcessor` 会在同一轮全部 ToolCall 原子落库之前补齐默认值，再生成幂等键和 Approval。这样重启恢复时不会因为重新推断执行器而改变语义。
+
+`cwd` 必须位于 `/workspace` 内；命令进程从清空后的环境启动，只注入固定的 `PATH`、`HOME`、Locale、PowerShell/.NET 临时目录以及通过校验的显式变量。stdout 和 stderr 分开并发排空，分别受输出字节上限约束，结果元数据记录 Shell、相对 cwd、退出码、超时、原始字节数和截断状态。非零退出码作为可观察的命令结果返回给模型，超时则终止进程树并形成工具失败。长结果仍经 `ToolResultMaterializer` 外置，但若 Sandbox 已达到采集上限，Artifact 保存的是明确标记过的截断结果，不能误称为完整日志。
+
+### 9.6 路径逃逸防护
 
 Sandbox 内部不信任模型给出的路径，而是：
 
@@ -758,7 +780,7 @@ Sandbox 内部不信任模型给出的路径，而是：
 
 因此当前 Agent 只能写 Run 工作区，不能直接写用户桌面。这是安全边界，不是功能 Bug。更合理的产品方式是提供“Artifact 下载/导出到指定目录”的 Server 端白名单功能，而不是将整台宿主机暴露给沙箱。
 
-### 9.6 Docker 不等于 MicroVM
+### 9.7 Docker 不等于 MicroVM
 
 Docker 共享宿主内核，MicroVM 有独立内核和更强硬件隔离。因此该实现适合私有环境中的受控代码，不应对外宣称能安全执行任意敌对代码。
 
@@ -810,7 +832,8 @@ DeepSeek thinking 模式下，当 assistant 消息同时包含 `reasoning_conten
 - `future.cancel(true)`。
 - 关闭 SSE InputStream。
 - Run 转为 `CANCELED`。
-- 回收 Docker 容器。
+- 调用 Sandbox 取消并强制终止当前 Docker 容器中的命令。
+- 回收 Docker 容器租约。
 
 这比只在数据库改一个 canceled 标记更完整，因为它真正释放了网络和执行资源。
 
@@ -944,6 +967,7 @@ Agent 流是典型的服务端单向推送：模型 delta、状态变更、工�
 - 独立执行详情时间线。
 - 危险工具审批，以及仅本次、本对话、本项目三种持久化策略。
 - 深度思考开关和推理等级。
+- 首页、对话工具栏和 Agent Profile 统一选择 `sh`、`bash` 或 `powershell`；执行详情显示实际 Shell、cwd、退出码、耗时、超时和 Artifact/截断状态。
 - 历史对话分组、移动和删除。
 - P0 工作台：统一检索、Memory/Knowledge/Artifact 管理、Run 重试/分支和审批策略撤销。
 - 效率工作台：模板、模型方案、预算/用量、运行队列、定时任务、通知和 Session 迁移；核心指标固定展示，最近用量按需展开并限高滚动。
@@ -1506,6 +1530,7 @@ Plan Runtime 解决的是复杂任务的状态问题。普通聊天里，模型�
 - 单机单租户私有部署。
 - SQLite WAL 持久化 Runtime 状态。
 - Docker Sandbox 作为轻量执行边界。
+- Docker 内 `sh`、`bash`、PowerShell Core 白名单执行，支持 workspace cwd、超时、受控 env、输出上限和真实容器取消。
 - ToolCall 先落库再执行。
 - 危险工具持久化审批。
 - Run、Plan、Async Job、Validation Check 和 Agent Feedback 的恢复闭环。
@@ -1522,6 +1547,7 @@ Plan Runtime 解决的是复杂任务的状态问题。普通聊天里，模型�
 - 独立向量数据库和跨项目 Memory 图谱。
 - 完整 LLM Judge 体系和人工抽检平台。
 - Kubernetes、MicroVM 池、S3、Kafka、Redis 的生产适配器。
+- 命令 stdout/stderr 的逐行 SSE、交互式 PTY 和后台服务生命周期管理。
 
 这段可以直接用于面试：
 
@@ -1586,7 +1612,7 @@ P3 是把 Lite 边界替换成生产组件，但业务语义尽量不变。
 
 #### 第 2 分钟：总体架构
 
-> Spring Boot 是脑，负责 Session、Run 状态机、上下文组装、模型调用和工具路由；Docker Sandbox Agent 是手，只负责工作区内文件和命令执行。中间通过 `SandboxDriver` 和 ToolRequest/ToolResult 协议解耦。
+> Spring Boot 是脑，负责 Session、Run 状态机、上下文组装、模型调用和工具路由；Docker Sandbox Agent 是手，只负责工作区内文件和命令执行。命令支持持久化选择 sh、bash 或 PowerShell Core，并通过固定解释器映射、workspace cwd、超时和受控环境变量限制执行边界。中间通过 `SandboxDriver` 和 ToolRequest/ToolResult 协议解耦。
 
 #### 第 3 分钟：持久化与恢复
 
@@ -1594,7 +1620,7 @@ P3 是把 Lite 边界替换成生产组件，但业务语义尽量不变。
 
 #### 第 4 分钟：安全与上下文
 
-> write_file 和 execute_command 要持久化审批；批准后执行的是用户看到的原参数，不再调模型。Docker 只挂载 Run 工作区，模型 Key 只在 Server。上下文方面做了分层 Prompt、AGENTS/PAI 规则、结构化压缩、自动分层 Memory、RAG 自动召回和大工具结果外置。
+> write_file 和 execute_command 要持久化审批；Run 默认 Shell 会在审批前写入 ToolCall，批准后执行的是用户看到的原命令、Shell、cwd、超时和 env，不再调模型。Docker 只挂载 Run 工作区，模型 Key 只在 Server。上下文方面做了分层 Prompt、AGENTS/PAI 规则、结构化压缩、自动分层 Memory、RAG 自动召回和大工具结果外置。
 
 #### 第 5 分钟：企业版对比与取舍
 
@@ -1608,14 +1634,15 @@ P3 是把 Lite 边界替换成生产组件，但业务语义尽量不变。
 4. 以“写文件”为例讲完整 ReAct + Approval 链路。
 5. 以“执行中崩溃”讲恢复契约和幂等。
 6. 讲 Docker 安全参数和 workspace 路径边界。
-7. 讲 DeepSeek reasoning/tool_calls 持久化回传。
-8. 讲 Summary + Artifact + Memory 三种上下文缩减手段。
-9. 讲推理流合并、Run 累计预算和上下文压缩的区别。
-10. 讲 Plan Runtime 如何把“计划”变成可恢复 DAG，并用 Validation Gate 验证最终产物。
-11. 讲 Multi-Agent 父子 Run 如何通过摘要和 Artifact 协作，而不是共享完整上下文。
-12. 讲 Agent 评测中心如何复用真实 Runtime，并解释 `pass^k`、Baseline 和 Memory 隔离。
-13. 对比 CatPaw 的企业组件和 Lite 替代。
-14. 主动说两个局限和升级路线，体现架构边界感。
+7. 演示同一命令工具如何安全选择 Bash/PowerShell，以及取消如何真实停止容器。
+8. 讲 DeepSeek reasoning/tool_calls 持久化回传。
+9. 讲 Summary + Artifact + Memory 三种上下文缩减手段。
+10. 讲推理流合并、Run 累计预算和上下文压缩的区别。
+11. 讲 Plan Runtime 如何把“计划”变成可恢复 DAG，并用 Validation Gate 验证最终产物。
+12. 讲 Multi-Agent 父子 Run 如何通过摘要和 Artifact 协作，而不是共享完整上下文。
+13. 讲 Agent 评测中心如何复用真实 Runtime，并解释 `pass^k`、Baseline 和 Memory 隔离。
+14. 对比 CatPaw 的企业组件和 Lite 替代。
+15. 主动说两个局限和升级路线，体现架构边界感。
 
 ---
 
@@ -1715,6 +1742,18 @@ sequenceDiagram
 
 **回答**：都不是。Baseline 是人工确认过的一个通过 Trial，用来保存关键工具和资源消耗参考。它不会进入模型上下文，也不会改变模型参数；后续回归主要检查关键工具是否丢失，以及输出 Token 和耗时是否超过基线 1.5 倍。回答不做逐字匹配，避免模型表达变化造成伪回归。
 
+### Q14：为什么同时支持 Bash 和 PowerShell，却不允许模型传解释器路径？
+
+**回答**：跨平台能力和开放任意程序执行不是一回事。系统将 `sh`、`bash`、`powershell` 映射到镜像内经过验证的固定 argv，既能覆盖常见脚本语法，又能让 Tool Schema、审批、审计和恢复使用稳定枚举。如果允许 `/tmp/custom-shell` 或宿主路径，模型就能绕过启动参数和安全策略，执行结果也难以复现。
+
+### Q15：PowerShell 为什么运行在 Linux Docker 内，而不是 Windows 宿主机？
+
+**回答**：这里使用跨平台的 PowerShell Core `pwsh`，仍处于每 Run Docker、只读根文件系统、资源限制和 workspace 挂载边界内。第一版不开放 Windows 宿主 PowerShell，是为了避免把模型命令提升到 Server 所在用户权限；功能兼容不能以破坏脑手分离为代价。
+
+### Q16：现在的命令输出和 Codex 终端还有什么差距？
+
+**回答**：当前会分离采集 stdout/stderr，并在工具完成后通过 Event 展示退出码、耗时、超时、字节数和 Artifact；但还不是逐行推送的终端流，也没有 PTY、stdin 交互和后台 dev server 生命周期。下一步需要为执行协议增加增量事件、进程句柄与会话状态，再考虑 WebSocket/PTY，而不是把模型 delta 的 SSE 直接误用成终端协议。
+
 ---
 
 ## 20. 演示脚本：如何在面试中展示
@@ -1797,6 +1836,7 @@ sequenceDiagram
 - 工具执行前落库，有幂等键和持久化审批。
 - DeepSeek reasoning 在多轮 ToolCall 中正确回传。
 - Docker 不只是“跑一个镜像”，而是有完整生命周期、资源限制、密钥隔离和路径防逃逸。
+- 命令执行不是固定 `/bin/sh`：Run/Profile 可持久化选择 sh、bash 或 PowerShell Core，且 Shell、cwd、超时、env、输出与取消都进入统一工具协议。
 - 上下文不只是历史拼接，而是分层、预算、压缩和 Artifact 回忆。
 - 企业架构与单机实现之间的替代逻辑清晰。
 - RAG、Skill、联网、MCP、Multi-Agent 统一接入 Server Tool Provider，没有复制 CLI 会话模型或绕开恢复主链。
@@ -1813,12 +1853,13 @@ sequenceDiagram
 - MCP 当前只支持远程 Streamable HTTP，不管理本地 stdio 进程；联网搜索依赖显式配置的搜索端点。
 - 评测第一版是确定性硬规则，擅长工具、安全、关键文本和资源预算回归，但尚未实现开放式语义 Rubric、LLM Judge 校准和评测数据集版本发布。
 - 无 Kubernetes、多租户、浏览器自动化。
+- 命令执行尚无逐行 stdout/stderr SSE、交互式 PTY 和后台服务生命周期管理；Local Sandbox 仍故意禁止执行命令。
 - 监控已有 Event/Audit、Micrometer 指标和存储健康检查，仍缺少 OpenTelemetry 分布式 Trace、正式 SLO 告警和自愈闭环。
 
 ### 22.3 简历项目描述参考
 
 > **PaiCLI Platform Lite — 可恢复的 Managed Agent Runtime**  
-> 基于 Java 17 + Spring Boot 实现脑手分离的 Agent 运行时，通过 SQLite WAL 持久化 Session/Run/Plan/Message/Event/ToolCall/Approval，实现可恢复 ReAct Loop、持久化计划 DAG、ToolCall 执行前落库、幂等恢复与危险工具审批；使用 Docker Sandbox Agent 隔离文件/命令执行；通过统一 Server Tool Provider 接入多格式文档 RAG、按需 Skill、联网搜索、远程 MCP 与持久化 Multi-Agent 子 Run，并实现图片附件持久化、OpenAI-compatible 多模态请求、Artifact 外置和 REST/SSE 可回放链路；建设 Agent 评测中心，以真实内部 Run、多 Trial 稳定性门禁、确定性评分和人工基线检测行为与成本退化。
+> 基于 Java 17 + Spring Boot 实现脑手分离的 Agent 运行时，通过 SQLite WAL 持久化 Session/Run/Plan/Message/Event/ToolCall/Approval，实现可恢复 ReAct Loop、持久化计划 DAG、ToolCall 执行前落库、幂等恢复与危险工具审批；使用 Docker Sandbox Agent 隔离文件/命令执行，支持 sh、bash、PowerShell Core 白名单、workspace cwd、超时、受控环境变量、输出治理和容器级取消；通过统一 Server Tool Provider 接入多格式文档 RAG、按需 Skill、联网搜索、远程 MCP 与持久化 Multi-Agent 子 Run，并实现图片附件持久化、OpenAI-compatible 多模态请求、Artifact 外置和 REST/SSE 可回放链路；建设 Agent 评测中心，以真实内部 Run、多 Trial 稳定性门禁、确定性评分和人工基线检测行为与成本退化。
 
 ---
 

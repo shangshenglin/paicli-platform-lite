@@ -17,7 +17,7 @@ final class ApiDtos {
 
     record CreateRunRequest(@NotBlank String input, String thinkingMode, String reasoningEffort,
                             List<String> attachmentIds, String modelProfileId, String agentProfileId,
-                            Integer priority, CollaborationOptions collaboration) { }
+                            String executionShell, Integer priority, CollaborationOptions collaboration) { }
 
     record CollaborationOptions(Boolean enabled, String complexity, String risk,
                                 List<String> allowedAgentProfileIds, Integer maxExperts,
@@ -28,7 +28,8 @@ final class ApiDtos {
 
     record ResolveApprovalRequest(@NotNull ApprovalStatus decision, String rememberScope) { }
 
-    record RetryRunRequest(String input, Boolean branch, String modelProfileId, String agentProfileId) { }
+    record RetryRunRequest(String input, Boolean branch, String modelProfileId, String agentProfileId,
+                           String executionShell) { }
 
     record TaskTemplateRequest(@NotBlank String projectKey, @NotBlank String name, String shortcut,
                                @NotBlank String prompt, Map<String, String> variables,
@@ -46,6 +47,7 @@ final class ApiDtos {
     record AgentProfileRequest(@NotBlank String projectKey, @NotBlank String name,
                                String description, @NotBlank String systemPrompt,
                                String modelProfileId, String thinkingMode, String reasoningEffort,
+                               String executionShell,
                                List<String> toolNames, List<String> skillNames,
                                String outputSchema, String collaborationRole, String handoffPolicy,
                                String workspaceScope, String approvalPolicy, Boolean enabled) { }
@@ -68,6 +70,7 @@ final class ApiDtos {
     record ScheduledTaskRequest(@NotBlank String projectKey, @NotBlank String name,
                                 @NotBlank String templateId, @NotBlank String scheduleType,
                                 String scheduleValue, Map<String, String> variables,
+                                String modelProfileId, String agentProfileId, String agentTeamId,
                                 Boolean enabled, String nextRunAt) { }
 
     record NotificationChannelRequest(@NotBlank String projectKey, @NotBlank String name,

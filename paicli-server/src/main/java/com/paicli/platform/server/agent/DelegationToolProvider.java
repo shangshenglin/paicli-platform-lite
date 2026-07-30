@@ -141,6 +141,7 @@ public class DelegationToolProvider implements ServerToolProvider {
                 profile == null ? null : profile.modelProfileId(),
                 profile == null ? null : profile.thinkingMode(),
                 profile == null ? null : profile.reasoningEffort(),
+                profile == null ? null : profile.executionShell(),
                 planId, planStepId, envelopeJson, graph);
         var child = store.findRun(delegation.childRunId()).orElseThrow();
         Map<String, Object> value = new LinkedHashMap<>();

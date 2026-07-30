@@ -235,6 +235,9 @@ X-API-Key: your-key
 - 每个活跃 Run 使用一个可复用 Docker 容器，Run 结束后强制回收。
 - 容器使用内部网络且不暴露宿主端口；Server 通过 `docker exec` 调用 loopback HTTP Agent。
 - 使用每容器随机 Bearer Token、只读根文件系统、工作区挂载、CPU/内存/PID/capability/超时限制。
+- `execute_command` 支持固定白名单 `sh`、`bash`、`powershell`（PowerShell Core / `pwsh`），并支持受控 `cwd`、请求级 `timeoutSeconds`、`maxOutputBytes` 与显式非敏感 `env`；不接受任意解释器路径。
+- Run 和 Agent Profile 都持久化默认 Shell。模型省略 `shell` 时，Server 会在同轮 ToolCall 原子落库前补入 Run 默认值，使 Approval、幂等键与恢复执行复用同一组最终参数。
+- stdout/stderr 分开收集并持续排空，结果记录实际 Shell、退出码、耗时、超时、字节数和截断状态；超过模型内联预算的输出由既有 Artifact Store 保存并可通过 `read_artifact` 分段读取。
 - `write_file` 和 `execute_command` 先创建持久化 Approval；工具和审批写入 JSONL Audit。
 - Server 启动时清理带 PaiCLI label 的孤儿容器，并覆盖 Fake Docker 与真实 Docker 验收。
 
@@ -396,7 +399,7 @@ Run 完成后先持久化 `memory_extractions` job，再由 Worker 从受限对�
 - **执行小队**：`agent_teams` 持久化 Leader、成员专家、并发人数、委派深度和 Reviewer/Runner 要求；“专家创建”支持小队 CRUD，专家协作首页可直接套用。父界面持续聚合整棵委派树审批，即使父 Run 已终止也继续刷新；子专家页面提供返回父专家入口。
 - **用量与预算**：按日期、项目、Session、模型统计调用、Token、缓存、耗时、失败、重试和估算成本；支持日/月 Token、费用提醒和项目最大并发。
 - **Run 队列**：支持 `-10..10` 优先级、项目公平领取、批量取消、失败/取消 Run 重新排队，并显示步骤、耗时和重试次数。
-- **定时任务**：引用已保存模板，支持一次性、每日、每周和 Spring 六段 Cron；每次触发仍创建普通 Session/Run。
+- **定时任务**：引用已保存模板，支持一次性、每日、每周和 Spring 六段 Cron；创建时可独立固定模型方案，或选择一个执行专家、一个执行小队（二选一）。小队任务以保存的 Leader、成员、并发和审查策略创建协作 Run；每次触发仍创建普通 Session/Run。
 - **完成通知**：浏览器、Webhook、邮件网关和企业 IM 网关；事件覆盖完成、失败、等待审批和预算不足，密钥仅引用 Server 环境变量。
 - **Session 迁移**：导出 Markdown、JSON 或包含 Event/ToolCall/Approval/Artifact 的完整审计包，支持脱敏和跨实例导入。
 - **Skill/MCP 生命周期**：预检、启停、固定、升级、回滚，以及 MCP Console 配置和健康展示。
@@ -449,7 +452,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–25：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据、受控并行 Plan Step 与 Agent Feedback 闭环、专家思考配置与 Session 工作空间继承、类型化 Plan Graph Edge 与确定性路由、可复用执行小队，以及 Delegation Graph 依赖/资源/终态传播。
+SQLite `schema_migrations` 当前记录版本 1–26：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据、受控并行 Plan Step 与 Agent Feedback 闭环、专家思考配置与 Session 工作空间继承、类型化 Plan Graph Edge 与确定性路由、可复用执行小队、Delegation Graph 依赖/资源/终态传播，以及 Run/Agent Profile 默认执行 Shell。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -485,6 +488,23 @@ POST                        /v1/sessions/import
 `/v1/sessions/{sessionId}/messages` 返回 Console 消息视图，保留原 Message 字段，并为每条消息补充 `runArtifacts`，用于在对话页展示最终交付物、Artifact 下载/预览入口和可点击的网页/本地文件引用。
 `/v1/runs/{runId}/audit` 聚合返回该 Run 所属 Session、模型输入与输出、ToolCall 原始参数和结果、持久化 Approval、事件、绑定的 Plan Step 与 Validation Check。Console 的 Plan 摘要和完整详情会在每个已绑定 Run 的 Step 上显示“打开 Run”，无需切换会话即可核对执行与验证证据。
 `/v1/runs/{runId}/workspace-file` 只读取该 Run 所属受控 workspace 下的相对文件路径，并通过认证请求返回文件内容，供 Console 以带 API Key 的方式打开或下载最终 HTML、Markdown、图片等交付物。
+
+创建或重试 Run 时可传 `executionShell: "sh" | "bash" | "powershell"`。若绑定的 Agent Profile 配置了 `executionShell`，专家配置优先；最终值写入 Run。`POST /v1/runs/{runId}/cancel` 除了关闭活跃模型请求，还会销毁该 Run 的 Docker 容器以中断正在执行的命令，并返回 `sandboxExecutionCanceled`。
+
+`execute_command` 的工具参数如下：
+
+```json
+{
+  "command": "mvn test",
+  "shell": "bash",
+  "cwd": ".",
+  "timeoutSeconds": 90,
+  "maxOutputBytes": 262144,
+  "env": {"NODE_ENV": "test"}
+}
+```
+
+`shell` 只能使用白名单；`cwd` 不能越过 Run workspace；环境变量名称、数量和值长度受限，名称包含 Key、Token、Secret、Password、Credential 或 Auth 的变量会被拒绝。命令进程不会继承 Sandbox Agent 环境。非零退出码作为可供模型判断的命令结果返回，不会被误判为 Runtime 调用失败；超时、非法参数和 Sandbox Agent 调用异常则返回失败 observation。
 
 同一 Session 的后续普通 Run 和 Plan Run 会继承已有 workspace owner；协作看板接口在最新 Run 不是 Leader Run 时会回溯该 Session 最近一次协作根 Run，因此续聊、切换计划模式或刷新页面后仍可访问此前工作空间和子专家链路。Console 会按 Session 保存历史阅读位置，后台刷新不再强制跳到底部。占位 Session 在首次提交普通任务或 Plan 后会持久化一个有界的短任务名；Plan 与协作卡片也以摘要作为标题、保留完整目标作为说明。父子 Agent 会话切换时会先停止旧 Run 的事件流和轮询，再从最新持久化事件游标继续监听，避免返回父 Agent 时重放全部历史事件并反复重绘对话。Plan 轮询只局部替换顶部看板，并按高度差补偿滚动锚点，不再重建全部聊天消息；只要 Session 中仍有 `ACTIVE` / `WAITING_APPROVAL` Plan，即使当前 Leader Run 已终态，对话仍显示“计划执行中/计划等待确认”，不会提前显示完成或允许提交新任务。
 
@@ -648,6 +668,7 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
+| `paicli.docker.command-timeout-seconds` | Docker 命令请求的最大超时，同时注入 Sandbox Agent 作为请求级 `timeoutSeconds` 上限；默认 90 秒 |
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
 
@@ -662,13 +683,13 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 .\scripts\start-local.ps1
 ```
 
-当前自动化测试总数为 103，覆盖：
+当前自动化测试覆盖：
 
 - Common、Server、Sandbox Agent 模块边界。
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
 - ContextManager、摘要、Memory、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–25、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–26、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
 - Agent 评测多 Trial、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 Starter Pack 完整性和幂等安装。
@@ -683,6 +704,8 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 - 单机、单租户、私有部署；不实现 Kubernetes、多地域和分布式高可用。
 - SQLite、本地 Artifact、进程内 Worker 和 Docker 分别替代 PostgreSQL、S3、消息队列和 MicroVM。
 - Docker 不是硬件级隔离，不适合执行完全不可信的敌对代码。
+- Local Sandbox 仍不执行 `execute_command`，避免把开发模式升级为可调用 Windows/Linux 宿主机的任意命令边界；Shell 白名单能力仅在 Docker 模式生效。
+- 当前命令输出在 ToolCall 完成后以结构化 Event/Artifact 交付，尚未提供逐行实时 stdout/stderr SSE、PTY 交互终端或可脱离 Run 生命周期的后台服务管理。
 - 当前提供可复用智能体专家 Profile/执行小队、Leader 动态 Delegation Graph、依赖门禁、资源隔离、失败路由、Human Node 和结果信封；尚不包含基于历史成功率的自动专家选择、真实 Git worktree 自动合并和跨项目 Memory 联想图谱。
 - MCP 当前只支持远程 Streamable HTTP，不管理本地 stdio MCP 进程。
 - 默认不依赖外部向量数据库；未配置真实 Embedding 时使用明确的本地降级。

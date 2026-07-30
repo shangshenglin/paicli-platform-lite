@@ -75,6 +75,9 @@ public class RunController {
 
     @PostMapping("/sessions/{sessionId}/runs")
     @ResponseStatus(HttpStatus.ACCEPTED)
+    @Operation(summary = "Create a durable Agent Run",
+            description = "Queues a Run after persisting its input and execution settings. executionShell accepts "
+                    + "sh, bash, or powershell; an Agent Profile executionShell takes precedence.")
     public RunRecord createRun(@PathVariable String sessionId,
                                @Valid @RequestBody ApiDtos.CreateRunRequest request) {
         var session = store.findSession(sessionId).orElseThrow(() ->
@@ -124,7 +127,9 @@ public class RunController {
         store.renameSessionIfGeneric(sessionId, request.input());
         RunRecord run = store.createRun(sessionId, runInput, thinkingMode, reasoningEffort,
                 request.attachmentIds(), profileId, agent == null ? null : agent.id(),
-                request.priority() == null ? 0 : request.priority(), 0);
+                request.priority() == null ? 0 : request.priority(), 0,
+                agent != null && !blank(agent.executionShell())
+                        ? agent.executionShell() : request.executionShell());
         if (requestedCollaboration) {
             saveCollaborationPolicy(run.id(), session.projectKey(), request.collaboration());
         } else if (automaticCollaboration && agent != null) {
@@ -273,7 +278,11 @@ public class RunController {
         String profileId = productivity.resolveModelProfile(session.projectKey(), requestedProfile)
                 .map(ProductivityStore.ModelProfile::id).orElse(null);
         RunRecord retried = store.createRun(sessionId, input, source.thinkingMode(), source.reasoningEffort(),
-                List.of(), profileId, agent == null ? null : agent.id(), source.priority(), source.retryCount() + 1);
+                List.of(), profileId, agent == null ? null : agent.id(), source.priority(),
+                source.retryCount() + 1,
+                agent != null && !blank(agent.executionShell()) ? agent.executionShell()
+                        : request == null || blank(request.executionShell())
+                        ? source.executionShell() : request.executionShell());
         return Map.of("run", retried, "sessionId", sessionId, "branchCreated", branch);
     }
 
@@ -287,16 +296,21 @@ public class RunController {
     }
 
     @PostMapping("/runs/{runId}/cancel")
+    @Operation(summary = "Cancel a Run tree",
+            description = "Persists cancellation for the Run and descendants, closes active model requests, "
+                    + "and destroys leased Docker Sandbox containers to interrupt active commands.")
     public Map<String, Object> cancel(@PathVariable String runId) {
         requireRun(runId);
         List<String> canceledRuns = store.cancelRunTree(runId);
         boolean modelRequestCanceled = false;
+        boolean sandboxExecutionCanceled = false;
         for (String canceledRun : canceledRuns) {
             modelRequestCanceled |= modelClient.cancel(canceledRun);
-            toolRouter.release(canceledRun);
+            sandboxExecutionCanceled |= toolRouter.cancel(canceledRun);
         }
         return Map.of("id", runId, "canceled", canceledRuns.contains(runId),
-                "canceledRunIds", canceledRuns, "modelRequestCanceled", modelRequestCanceled);
+                "canceledRunIds", canceledRuns, "modelRequestCanceled", modelRequestCanceled,
+                "sandboxExecutionCanceled", sandboxExecutionCanceled);
     }
 
     @GetMapping("/runs/{runId}/timeline")

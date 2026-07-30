@@ -30,15 +30,17 @@ class DockerSandboxDriverTest {
                 "tool_1", "run_123", "list_dir", Map.of("path", "."), "key_1"));
         ToolResult second = driver.execute(new ToolRequest(
                 "tool_2", "run_123", "read_file", Map.of("path", "a.txt"), "key_2"));
-        driver.release("run_123");
+        boolean canceled = driver.cancel("run_123");
 
         assertThat(first.success()).isTrue();
         assertThat(second.success()).isTrue();
+        assertThat(canceled).isTrue();
         assertThat(agent.calls).isEqualTo(2);
         assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(1);
         List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")).findFirst().orElseThrow();
         assertThat(run).contains("--read-only", "--cap-drop", "ALL", "--pids-limit", "128",
-                "--network", "paicli-test-network", "--security-opt", "no-new-privileges");
+                "--network", "paicli-test-network", "--security-opt", "no-new-privileges",
+                "SANDBOX_COMMAND_TIMEOUT_SECONDS=10");
         assertThat(run).doesNotContain("-p");
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "container-123")));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "orphan-1")));

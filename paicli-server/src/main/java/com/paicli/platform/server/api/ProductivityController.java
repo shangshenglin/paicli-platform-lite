@@ -182,7 +182,7 @@ public class ProductivityController {
                     seed.prompt(), existing.modelProfileId(), mapper.writeValueAsString(withPlanTools(seed.tools())),
                     mapper.writeValueAsString(List.of()), seed.outputSchema(), seed.role(), seed.handoff(),
                     "PROJECT", seed.approval(), existing.thinkingMode(), existing.reasoningEffort(),
-                    existing.enabled(), seed.key(), seed.version());
+                    existing.executionShell(), existing.enabled(), seed.key(), seed.version());
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
                     : new IllegalArgumentException("restore agent template failed", e);
@@ -203,7 +203,7 @@ public class ProductivityController {
                     source.modelProfileId(), withPlanToolsJson(source.toolNamesJson()),
                     source.skillNamesJson(), source.outputSchema(),
                     source.collaborationRole(), source.handoffPolicy(), source.workspaceScope(), source.approvalPolicy(),
-                    source.thinkingMode(), source.reasoningEffort(), source.enabled(),
+                    source.thinkingMode(), source.reasoningEffort(), source.executionShell(), source.enabled(),
                     source.templateKey(), source.templateVersion());
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
@@ -265,7 +265,7 @@ public class ProductivityController {
         List<String> changed=new ArrayList<>();String action=request.action().trim().toUpperCase();
         for(String runId:request.runIds().stream().filter(v->v!=null&&!v.isBlank()).distinct().limit(100).toList()){
             boolean ok=switch(action){
-                case "CANCEL"->{boolean canceled=runtime.cancelRunTree(runId).contains(runId);modelClient.cancel(runId);tools.release(runId);yield canceled;}
+                case "CANCEL"->{boolean canceled=runtime.cancelRunTree(runId).contains(runId);modelClient.cancel(runId);tools.cancel(runId);yield canceled;}
                 case "REQUEUE"->{boolean requeued=productivity.requeue(runId);if(requeued)runtime.appendEvent(runId,"run.requeued","{\"source\":\"productivity-console\"}");yield requeued;}
                 case "PRIORITY"->productivity.setPriority(runId,request.priority()==null?0:request.priority());
                 default->throw new IllegalArgumentException("action must be CANCEL, REQUEUE, or PRIORITY");};
@@ -318,7 +318,8 @@ public class ProductivityController {
                     r.modelProfileId(), mapper.writeValueAsString(tools),
                     mapper.writeValueAsString(r.skillNames() == null ? List.of() : r.skillNames()),
                     r.outputSchema(), r.collaborationRole(), r.handoffPolicy(), r.workspaceScope(),
-                    approval, r.thinkingMode(), r.reasoningEffort(), r.enabled() == null || r.enabled(), "", 0);
+                    approval, r.thinkingMode(), r.reasoningEffort(), r.executionShell(),
+                    r.enabled() == null || r.enabled(), "", 0);
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
                     : new IllegalArgumentException("invalid agent profile", e);
@@ -358,9 +359,28 @@ public class ProductivityController {
     private ProductivityStore.ScheduledTask saveSchedule(String id,ApiDtos.ScheduledTaskRequest r){
         try{
             productivity.findTemplate(r.projectKey(),r.templateId()).orElseThrow(()->notFound("template"));
+            if(!blank(r.modelProfileId()) && productivity.resolveModelProfile(r.projectKey(),r.modelProfileId()).isEmpty()) {
+                throw notFound("model profile");
+            }
+            if(!blank(r.agentProfileId()) && productivity.resolveAgentProfile(r.projectKey(),r.agentProfileId()).isEmpty()) {
+                throw notFound("agent profile");
+            }
+            if(!blank(r.agentProfileId()) && !blank(r.agentTeamId())) {
+                throw new IllegalArgumentException("a schedule can select either an agent profile or an agent team, not both");
+            }
+            if(!blank(r.agentTeamId())) {
+                var team=productivity.findAgentTeam(r.agentTeamId()).filter(value -> value.enabled()
+                        && value.projectKey().equals(r.projectKey())).orElseThrow(()->notFound("agent team"));
+                var leader=productivity.resolveAgentProfile(r.projectKey(),team.leaderAgentProfileId());
+                if(leader.isEmpty() || !"LEADER".equalsIgnoreCase(leader.get().collaborationRole())) {
+                    throw new IllegalArgumentException("agent team must have an enabled LEADER agent profile");
+                }
+            }
             String type=r.scheduleType().trim().toUpperCase();
             Instant next=firstScheduleRun(type,r.scheduleValue(),r.nextRunAt());
-            return productivity.saveSchedule(id,r.projectKey(),r.name(),r.templateId(),type,r.scheduleValue(),mapper.writeValueAsString(r.variables()==null?Map.of():r.variables()),r.enabled()==null||r.enabled(),next);
+            return productivity.saveSchedule(id,r.projectKey(),r.name(),r.templateId(),type,r.scheduleValue(),
+                    mapper.writeValueAsString(r.variables()==null?Map.of():r.variables()),r.modelProfileId(),
+                    r.agentProfileId(),r.agentTeamId(),r.enabled()==null||r.enabled(),next);
         }
         catch(Exception e){throw e instanceof RuntimeException runtime?runtime:new IllegalArgumentException("invalid schedule",e);}
     }
@@ -389,7 +409,7 @@ public class ProductivityController {
                             withPlanToolsJson(existing.toolNamesJson()), existing.skillNamesJson(), existing.outputSchema(),
                             existing.collaborationRole(), existing.handoffPolicy(), existing.workspaceScope(),
                             existing.approvalPolicy(), existing.thinkingMode(), existing.reasoningEffort(),
-                            existing.enabled(), seed.key(), seed.version());
+                            existing.executionShell(), existing.enabled(), seed.key(), seed.version());
                 }
                 continue;
             }

@@ -26,6 +26,7 @@ const state = {
   homeMode: localStorage.getItem('paicli_home_mode') || 'chat',
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
   agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
+  executionShell: localStorage.getItem('paicli_execution_shell') || 'bash',
   notifiedRunId: '',
   notifiedApprovalIds: new Set(),
   planRefreshTimer: 0,
@@ -299,6 +300,38 @@ function renderHomeModelPicker() {
   return picker;
 }
 
+function renderHomeExecutionPicker() {
+  const picker = element('section', 'home-execution-picker');
+  const copy = element('div', 'home-execution-copy');
+  copy.append(
+    element('strong', '', '执行环境'),
+    element('small', '', '命令在隔离的 Docker Sandbox 内运行；每次工具调用仍需审批。')
+  );
+  const select = element('select', 'home-execution-select');
+  [
+    ['bash', 'Bash'],
+    ['sh', 'POSIX sh'],
+    ['powershell', 'PowerShell']
+  ].forEach(([value, label]) => {
+    const option = element('option', '', label);
+    option.value = value;
+    select.append(option);
+  });
+  select.value = state.executionShell;
+  select.onchange = () => selectExecutionShell(select.value);
+  picker.append(copy, select);
+  return picker;
+}
+
+function selectExecutionShell(shell) {
+  state.executionShell = ['sh', 'bash', 'powershell'].includes(shell) ? shell : 'bash';
+  localStorage.setItem('paicli_execution_shell', state.executionShell);
+  if ($('executionShell')) $('executionShell').value = state.executionShell;
+  document.querySelectorAll('.home-execution-select').forEach(select => {
+    select.value = state.executionShell;
+  });
+}
+
 function renderEmpty() {
   updateComposerVisibility();
   const empty = element('div', 'empty');
@@ -325,6 +358,7 @@ function renderEmpty() {
       element('h1', '', '今天想完成什么？'),
       element('p', '', '直接描述目标。工具调用、推理和审批会收纳在执行详情中。'),
       renderHomeModelPicker(),
+      renderHomeExecutionPicker(),
       actions
     );
   }
@@ -1400,7 +1434,8 @@ async function sendMessage() {
         reasoningEffort: reasoningEffortForRequest(),
         attachmentIds: state.pendingAttachments.map(item => item.id),
         modelProfileId: state.modelProfileId || null,
-        agentProfileId: state.agentProfileId || null
+        agentProfileId: state.agentProfileId || null,
+        executionShell: state.executionShell
       })
     });
     applySessionTaskTitle(text);
@@ -1818,8 +1853,22 @@ function eventSummary(type, data) {
   if (type === 'model.reasoning.delta') return '收到推理内容';
   if (type === 'model.tool_calls') return `模型请求 ${data.count || 0} 个工具`;
   if (type === 'tool.requested') return `请求工具：${data.name || ''}`;
-  if (type === 'tool.completed') return `工具完成 · ${data.durationMs || 0}ms`;
-  if (type === 'tool.failed') return `工具失败：${data.error || ''}`;
+  if (type === 'tool.started') {
+    return data.shell
+      ? `开始执行 · ${data.shell} · ${data.cwd || '.'}`
+      : `开始执行：${data.name || '工具'}`;
+  }
+  if (type === 'tool.completed') {
+    const execution = data.shell ? ` · ${data.shell} · exit ${data.exitCode ?? '-'}` : '';
+    const artifact = data.externalized
+      ? (data.outputTruncated ? ' · 截断输出已保存为 Artifact' : ' · 完整输出已保存为 Artifact')
+      : '';
+    return `工具完成 · ${data.durationMs || 0}ms${execution}${artifact}`;
+  }
+  if (type === 'tool.failed') {
+    const execution = data.shell ? ` · ${data.shell}${data.timedOut ? ' · 已超时' : ''}` : '';
+    return `工具失败${execution}：${data.error || ''}`;
+  }
   if (type === 'approval.requested') return '等待人工确认';
   if (type === 'run.status_changed') return statusNames[data.status] || data.status;
   return type.replaceAll('.', ' · ');
@@ -2019,7 +2068,8 @@ async function retryRun(branch) {
       method: 'POST', body: JSON.stringify({
         branch,
         modelProfileId: state.modelProfileId || null,
-        agentProfileId: state.agentProfileId || null
+        agentProfileId: state.agentProfileId || null,
+        executionShell: state.executionShell
       })
     });
     state.runId = result.run.id;
@@ -2757,6 +2807,7 @@ function openAgentProfileDialog(profile = null) {
   else if (state.modelProfiles.some(value => value.id === state.modelProfileId)) $('agentModelProfile').value = state.modelProfileId;
   $('agentThinkingMode').value = editing ? profile.thinkingMode || '' : '';
   $('agentReasoningEffort').value = editing ? profile.reasoningEffort || '' : '';
+  $('agentExecutionShell').value = editing ? profile.executionShell || 'bash' : state.executionShell;
   updateAgentModelControls();
   fillTagPicker($('agentTools'), $('agentToolsPicker'), agentToolOptions.map(([id, label]) => ({id, label: `${id} · ${label}`})),
       editing ? [...new Set([...parseStringListJson(profile.toolNamesJson), ...expertPlanTools])]
@@ -2783,6 +2834,7 @@ async function submitAgentProfile(event) {
       modelProfileId: $('agentModelProfile').value || null,
       thinkingMode: $('agentThinkingMode').value,
       reasoningEffort: $('agentThinkingMode').value === 'disabled' ? '' : $('agentReasoningEffort').value,
+      executionShell: $('agentExecutionShell').value,
       toolNames: selectedValues($('agentTools')),
       skillNames: selectedValues($('agentSkills')),
       outputSchema: $('agentOutputSchema').value.trim(),
@@ -2945,7 +2997,13 @@ async function cancelQueueRun(id) {
 
 function renderSchedules(values, templates) {
   $('scheduleList').replaceChildren(...values.map(value => {
-    const template = templates.find(item => item.id === value.templateId); const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
+    const template = templates.find(item => item.id === value.templateId);
+    const model = state.modelProfiles.find(item => item.id === value.modelProfileId);
+    const agent = state.agentProfiles.find(item => item.id === value.agentProfileId);
+    const team = state.agentTeams.find(item => item.id === value.agentTeamId);
+    const executor = team ? `小队 ${team.name}` : agent ? `专家 ${agent.name}` : '普通 Run';
+    const modelLabel = model ? `模型 ${model.name}` : '模型继承模板/项目默认';
+    const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · ${modelLabel} · ${executor} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
     actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } }); return item;
   }));
 }
@@ -2984,6 +3042,14 @@ function openScheduleDialog() {
   if (!state.templates.length) return showNotice('请先创建任务模板，再新建定时任务', true);
   $('scheduleForm').reset();
   fillSelect($('scheduleTemplate'), state.templates.map(value => ({id: value.id, label: `${value.shortcut || '模板'} · ${value.name}`})));
+  fillSelect($('scheduleModelProfile'), state.modelProfiles.map(value => ({id: value.id, label: modelProfileLabel(value)})), '使用模板模型或项目默认模型');
+  fillSelect($('scheduleAgentProfile'), state.agentProfiles.filter(value => value.enabled)
+    .map(value => ({id: value.id, label: `${value.name} · ${value.collaborationRole || 'EXPERT'}`})), '不指定专家');
+  fillSelect($('scheduleAgentTeam'), state.agentTeams.filter(value => value.enabled)
+    .map(value => ({id: value.id, label: `${value.name} · Leader/最多 ${value.maxExperts} 位专家`})), '不指定小队');
+  if (state.modelProfiles.some(value => value.id === state.modelProfileId)) {
+    $('scheduleModelProfile').value = state.modelProfileId;
+  }
   $('scheduleOnceAt').value = localDateTimeValue(new Date(Date.now() + 3600000));
   $('scheduleVariables').value = selectedTemplateVariables();
   setFormError('scheduleFormError');
@@ -3019,7 +3085,10 @@ async function submitSchedule(event) {
     await api('/v1/productivity/schedules', {method: 'POST', body: JSON.stringify({
       projectKey: currentProjectKey(), name: $('scheduleName').value.trim(),
       templateId: $('scheduleTemplate').value, scheduleType: type, scheduleValue,
-      variables, enabled: $('scheduleEnabled').checked, nextRunAt
+      variables, modelProfileId: $('scheduleModelProfile').value || null,
+      agentProfileId: $('scheduleAgentProfile').value || null,
+      agentTeamId: $('scheduleAgentTeam').value || null,
+      enabled: $('scheduleEnabled').checked, nextRunAt
     })});
     $('scheduleDialog').close();
     await loadProductivityData();
@@ -4063,6 +4132,12 @@ $('profileLocal').onchange = updateProfilePriceFields;
 $('agentRole').onchange = updateAgentRoleHelp;
 $('scheduleType').onchange = updateScheduleFields;
 $('scheduleTemplate').onchange = () => { $('scheduleVariables').value = selectedTemplateVariables(); };
+$('scheduleAgentProfile').onchange = () => {
+  if ($('scheduleAgentProfile').value) $('scheduleAgentTeam').value = '';
+};
+$('scheduleAgentTeam').onchange = () => {
+  if ($('scheduleAgentTeam').value) $('scheduleAgentProfile').value = '';
+};
 $('notificationType').onchange = () => updateNotificationFields(true);
 $('cancelMemoryMerge').onclick = () => $('memoryMergeDialog').close();
 $('cancelMemoryRevision').onclick = () => $('memoryRevisionDialog').close();
@@ -4085,6 +4160,7 @@ $('messages').addEventListener('scroll', () => rememberMessageScroll(), {passive
 $('modelProfile').onchange = () => {
   selectModelProfile($('modelProfile').value, false);
 };
+$('executionShell').onchange = () => selectExecutionShell($('executionShell').value);
 document.querySelectorAll('[data-export]').forEach(button => button.onclick = () => exportSession(button.dataset.export).catch(error => showNotice(`导出失败：${error.message}`, true)));
 $('sessionImport').onchange = () => { const file = $('sessionImport').files[0]; if (file) importSession(file).catch(error => showNotice(`导入失败：${error.message}`, true)); };
 $('closeCapabilities').onclick = () => $('capabilityDialog').close();
@@ -4121,6 +4197,7 @@ document.addEventListener('keydown', event => {
 $('workspace').classList.toggle('hide-detail', !state.detailOpen);
 clearEvents();
 renderModelControls();
+selectExecutionShell(state.executionShell);
 renderEmpty();
 refreshComposerOptions();
 refreshSessions();

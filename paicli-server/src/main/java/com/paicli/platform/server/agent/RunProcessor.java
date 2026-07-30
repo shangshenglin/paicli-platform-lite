@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -182,19 +183,23 @@ public class RunProcessor {
             }
 
             List<SqliteRuntimeStore.ToolCallDraft> drafts = new ArrayList<>();
+            List<ModelResponse.ToolPlan> persistedPlans = new ArrayList<>();
             for (int index = 0; index < response.toolCalls().size(); index++) {
                 ModelResponse.ToolPlan plan = response.toolCalls().get(index);
-                String argumentsJson = canonicalArguments(plan.arguments());
+                Map<String, Object> persistedArguments = persistedArguments(run, plan);
+                String argumentsJson = canonicalArguments(persistedArguments);
                 String idempotencyKey = run.id() + ":" + run.currentStep() + ":" + index
                         + ":" + plan.name() + ":" + argumentsJson;
                 drafts.add(new SqliteRuntimeStore.ToolCallDraft(
                         plan.callId(), plan.name(), argumentsJson, idempotencyKey,
                         toolRouter.effect(plan.name())));
+                persistedPlans.add(new ModelResponse.ToolPlan(
+                        plan.callId(), plan.name(), persistedArguments));
             }
             enforceToolCallLoopBudget(run.id(), drafts);
             List<ToolCallRecord> calls = store.appendAssistantAndCreateToolCalls(
                     run.sessionId(), run.id(), response.content(), response.reasoningContent(),
-                    json(response.toolCalls()), drafts);
+                    json(persistedPlans), drafts);
             if (calls.isEmpty()) {
                 toolRouter.release(run.id());
                 return;
@@ -310,7 +315,17 @@ public class RunProcessor {
                 "toolCallId", call.id(), "name", call.toolName(),
                 "argumentBytes", call.arguments().length())));
         store.markToolRunning(call.id());
-        store.appendEvent(run.id(), "tool.started", json(Map.of("toolCallId", call.id())));
+        Map<String, Object> startedEvent = new LinkedHashMap<>();
+        startedEvent.put("toolCallId", call.id());
+        startedEvent.put("name", call.toolName());
+        if ("execute_command".equals(call.toolName())) {
+            startedEvent.put("shell", arguments.getOrDefault("shell", run.executionShell()));
+            startedEvent.put("cwd", arguments.getOrDefault("cwd", "."));
+            if (arguments.containsKey("timeoutSeconds")) {
+                startedEvent.put("timeoutSeconds", arguments.get("timeoutSeconds"));
+            }
+        }
+        store.appendEvent(run.id(), "tool.started", json(startedEvent));
         auditService.record("tool.started", run.id(), call.id(), Map.of(
                 "tool", call.toolName(), "arguments", call.arguments(),
                 "target", toolRouter.executionTarget(call.toolName())));
@@ -325,12 +340,15 @@ public class RunProcessor {
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
+            Map<String, Object> completedEvent = new LinkedHashMap<>(result.metadata());
+            completedEvent.put("toolCallId", call.id());
+            completedEvent.put("durationMs", result.durationMs());
+            completedEvent.put("externalized", materialized.artifact() != null);
+            completedEvent.put("artifactId",
+                    materialized.artifact() == null ? "" : materialized.artifact().id());
+            completedEvent.put("content", materialized.modelContent());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
-                    materialized.modelContent(), null, json(Map.of(
-                    "toolCallId", call.id(), "durationMs", result.durationMs(),
-                    "externalized", materialized.artifact() != null,
-                    "artifactId", materialized.artifact() == null ? "" : materialized.artifact().id(),
-                    "content", materialized.modelContent())), run.currentStep());
+                    materialized.modelContent(), null, json(completedEvent), run.currentStep());
             if (!committed) return;
             if (isActiveAgentResult(call, materialized.modelContent())) {
                 store.waitForAgent(run.id());
@@ -345,10 +363,12 @@ public class RunProcessor {
                     "tool", call.toolName(),
                     "error", result.error(),
                     "guidance", "Treat this as a tool observation. Do not retry unchanged arguments; use available context or choose a valid alternative."));
+            Map<String, Object> failedEvent = new LinkedHashMap<>(result.metadata());
+            failedEvent.put("toolCallId", call.id());
+            failedEvent.put("durationMs", result.durationMs());
+            failedEvent.put("error", result.error());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, false,
-                    observation, result.error(), json(Map.of(
-                    "toolCallId", call.id(), "durationMs", result.durationMs(), "error", result.error())),
-                    run.currentStep());
+                    observation, result.error(), json(failedEvent), run.currentStep());
             if (!committed) return;
             auditService.record("tool.failed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
@@ -362,6 +382,13 @@ public class RunProcessor {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to encode event", e);
         }
+    }
+
+    private static Map<String, Object> persistedArguments(RunRecord run, ModelResponse.ToolPlan plan) {
+        if (!"execute_command".equals(plan.name())) return plan.arguments();
+        Map<String, Object> arguments = new LinkedHashMap<>(plan.arguments());
+        arguments.putIfAbsent("shell", run.executionShell());
+        return Map.copyOf(arguments);
     }
 
     private boolean isActiveAgentResult(ToolCallRecord call, String content) {

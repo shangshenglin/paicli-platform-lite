@@ -2,7 +2,28 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-07-31
+
+### 定时任务固定模型、专家与小队
+
+- 变更：定时任务新增持久化的模型方案、执行专家和执行小队选择。模型选择直接写入 Run；专家作为 Run 的 Agent Profile；小队使用其 Leader 并将成员、并发和审查要求保存为协作策略与可恢复 Plan。旧任务的新增字段均为空，继续保留原有模板/服务端默认回退行为。
+- 思路：聊天工具栏中的模型选择仅代表当前交互，不应隐式影响后台任务。将实际执行配置与定时任务一起保存，才能保证定时触发的可预期性和审计可追溯性；专家与小队互斥，避免两个执行主体产生歧义。
+- 验证：新增 SQLite 字段兼容迁移和 Store 回归断言；执行前端语法检查与 Maven 定向测试。
+
+### 多 Shell 技术架构与面试材料同步
+
+- 变更：更新《PaiCLI Platform Lite 技术架构与面试讲解》和《PaiCLI Platform Lite 技术架构与面试指南》，补充 `execute_command` 的 sh/bash/PowerShell Core 固定映射、结构化参数、默认 Shell 持久化时点、Retry/委派继承、环境变量过滤、stdout/stderr 与截断元数据、超时进程树终止和容器级取消；同步 Console 展示、Schema 1–26、简历表述和多 Shell 高频面试问答。
+- 思路：把“支持 Bash/PowerShell”讲成受 ToolCall、Approval、幂等恢复和 Docker 边界共同约束的执行协议，避免误导为开放任意解释器或 Windows 宿主 PowerShell；同时明确完成后 ToolResult 与实时终端的区别，保留逐行 SSE、PTY、stdin 和后台进程生命周期作为后续演进项。
+- 验证：交叉检索两份文档中的 `execute_command`、PowerShell、`execution_shell`、Schema 版本、PTY 与能力边界，执行 `git diff --check` 并检查 Markdown 标题、代码围栏和 Mermaid 围栏结构。
+
 ## 2026-07-30
+
+### Docker Sandbox 多 Shell 命令运行时
+
+- 变更：`execute_command` 新增 `sh`、`bash`、`powershell` 白名单，以及 workspace 内 `cwd`、请求级超时、输出字节上限和显式非敏感环境变量；Docker 镜像改为同时包含 Java 17、Bash 与 PowerShell Core。命令结果区分 stdout/stderr，并记录实际 Shell、退出码、耗时、超时、输出字节数和截断状态，长结果继续由 Artifact Store 外置。
+- 变更：Run 和 Agent Profile 新增兼容迁移字段 `execution_shell`。模型未显式传 Shell 时，RunProcessor 在同轮 ToolCall 原子持久化与 Approval 前补齐默认值；委派子专家继承自身 Profile 或父 Run 的执行环境。Console 首页、对话工具条、专家配置与事件详情统一接入 Shell 选择；取消 Run 会销毁独占 Docker 容器并报告是否中断 Sandbox 执行。
+- 思路：把“支持 Bash/PowerShell”落实为可持久化、可审批、可恢复的执行协议，而不是开放任意解释器或 Windows 宿主机命令。命令进程从空环境启动，只注入固定基础变量和通过校验的请求变量；Local Sandbox 继续拒绝命令执行。逐行输出 SSE、PTY 与后台服务生命周期仍明确保留为后续增量。
+- 验证：`mvn test` 全模块 138 项通过，`mvn -pl paicli-sandbox-agent -am -DskipTests package` 通过；`node --check paicli-server/src/main/resources/static/app.js`、`git diff --check` 通过。真实构建 `paicli-sandbox-agent:shell-test` 镜像后，镜像内解释器和 Sandbox Agent HTTP 链路均返回 `SH_OK/BASH_OK/POWERSHELL_OK`。全模块 `package` 仅因运行中服务锁定既有 `paicli-server` JAR、Boot repackage 无法改名而未完成，未擅自停止该进程。
 
 ### Memory Wiki follow-up UI correction
 

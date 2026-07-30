@@ -108,6 +108,10 @@ public class ToolRouter {
         sandboxDriver.release(runId);
     }
 
+    public boolean cancel(String runId) {
+        return sandboxDriver.cancel(runId);
+    }
+
     private static int integer(Map<String, Object> arguments, String key, int fallback) {
         Object value = arguments.get(key);
         if (value instanceof Number number) return number.intValue();

@@ -89,6 +89,7 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(session_id) REFERENCES sessions(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "thinking_mode", "TEXT NOT NULL DEFAULT 'auto'");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "runs", "execution_shell", "TEXT NOT NULL DEFAULT 'bash'");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "queued_at", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "priority", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "model_profile_id", "TEXT");
@@ -304,6 +305,8 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "template_version", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "thinking_mode", "TEXT NOT NULL DEFAULT ''");
             SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_profiles", "execution_shell",
+                    "TEXT NOT NULL DEFAULT 'bash'");
             SqliteSchemaMigrator.ensureColumn(connection, "runs", "workspace_owner_run_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_profiles_project " +
                     "ON agent_profiles(project_key,enabled DESC,name COLLATE NOCASE)");
@@ -331,8 +334,12 @@ public class SqliteRuntimeStore {
             statement.execute("CREATE TABLE IF NOT EXISTS scheduled_tasks (" +
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, template_id TEXT NOT NULL, " +
                     "schedule_type TEXT NOT NULL, schedule_value TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', " +
+                    "model_profile_id TEXT, agent_profile_id TEXT, agent_team_id TEXT, " +
                     "enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
+            SqliteSchemaMigrator.ensureColumn(connection, "scheduled_tasks", "model_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "scheduled_tasks", "agent_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "scheduled_tasks", "agent_team_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON scheduled_tasks(enabled,next_run_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS notification_channels (" +
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, endpoint TEXT NOT NULL DEFAULT '', " +
@@ -820,6 +827,15 @@ public class SqliteRuntimeStore {
                                String thinkingMode, String reasoningEffort,
                                List<String> attachmentIds, String modelProfileId,
                                String agentProfileId, int priority, int retryCount) {
+        return createRun(sessionId, input, thinkingMode, reasoningEffort, attachmentIds,
+                modelProfileId, agentProfileId, priority, retryCount, "bash");
+    }
+
+    public RunRecord createRun(String sessionId, String input,
+                               String thinkingMode, String reasoningEffort,
+                               List<String> attachmentIds, String modelProfileId,
+                               String agentProfileId, int priority, int retryCount,
+                               String executionShell) {
         if (input == null || input.isBlank()) {
             throw new IllegalArgumentException("input must not be blank");
         }
@@ -833,27 +849,29 @@ public class SqliteRuntimeStore {
         Instant now = Instant.now();
         String resolvedThinking = normalizeThinkingMode(thinkingMode);
         String resolvedEffort = normalizeReasoningEffort(reasoningEffort);
+        String resolvedShell = normalizeExecutionShell(executionShell);
         String workspaceOwnerRunId = latestWorkspaceOwner(sessionId);
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode," +
-                                "reasoning_effort,priority,model_profile_id,agent_profile_id,retry_count," +
-                                "workspace_owner_run_id,created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,?,0)")) {
+                                "reasoning_effort,execution_shell,priority,model_profile_id,agent_profile_id,retry_count," +
+                                "workspace_owner_run_id,created_at,queued_at,version) VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,0)")) {
                     ps.setString(1, runId);
                     ps.setString(2, sessionId);
                     ps.setString(3, RunStatus.QUEUED.name());
                     ps.setString(4, input.trim());
                     ps.setString(5, resolvedThinking);
                     ps.setString(6, resolvedEffort);
-                    ps.setInt(7, Math.max(-10, Math.min(priority, 10)));
-                    ps.setString(8, modelProfileId == null || modelProfileId.isBlank() ? null : modelProfileId);
-                    ps.setString(9, agentProfileId == null || agentProfileId.isBlank() ? null : agentProfileId);
-                    ps.setInt(10, Math.max(0, retryCount));
-                    ps.setString(11, workspaceOwnerRunId);
-                    ps.setString(12, now.toString());
+                    ps.setString(7, resolvedShell);
+                    ps.setInt(8, Math.max(-10, Math.min(priority, 10)));
+                    ps.setString(9, modelProfileId == null || modelProfileId.isBlank() ? null : modelProfileId);
+                    ps.setString(10, agentProfileId == null || agentProfileId.isBlank() ? null : agentProfileId);
+                    ps.setInt(11, Math.max(0, retryCount));
+                    ps.setString(12, workspaceOwnerRunId);
                     ps.setString(13, now.toString());
+                    ps.setString(14, now.toString());
                     ps.executeUpdate();
                 }
                 MessageRecord userMessage = insertMessage(connection, sessionId, runId, "user", input.trim(),
@@ -863,7 +881,8 @@ public class SqliteRuntimeStore {
                 touchSession(connection, sessionId, now);
                 connection.commit();
                 return new RunRecord(runId, sessionId, RunStatus.QUEUED, input.trim(), 0,
-                        null, resolvedThinking, resolvedEffort, Math.max(-10, Math.min(priority, 10)),
+                        null, resolvedThinking, resolvedEffort, resolvedShell,
+                        Math.max(-10, Math.min(priority, 10)),
                         modelProfileId, agentProfileId, Math.max(0, retryCount), now, null, null, 0);
             } catch (Exception e) {
                 rollback(connection);
@@ -1161,6 +1180,17 @@ public class SqliteRuntimeStore {
                                                         String reasoningEffort, String planId,
                                                         String planStepId, String envelopeJson,
                                                         DelegationOptions options) {
+        return createOrGetDelegation(parentRunId, parentToolCallId, agentName, task, agentProfileId,
+                modelProfileId, thinkingMode, reasoningEffort, null, planId, planStepId,
+                envelopeJson, options);
+    }
+
+    public RunDelegationRecord createOrGetDelegation(String parentRunId, String parentToolCallId,
+                                                        String agentName, String task, String agentProfileId,
+                                                        String modelProfileId, String thinkingMode,
+                                                        String reasoningEffort, String executionShell,
+                                                        String planId, String planStepId, String envelopeJson,
+                                                        DelegationOptions options) {
         String name = requireText(agentName, "agentName", 80);
         String input = requireText(task, "task", 32_000);
         String childAgentProfileId = nullableText(agentProfileId);
@@ -1206,6 +1236,8 @@ public class SqliteRuntimeStore {
                         ? parent.thinkingMode() : normalizeThinkingMode(thinkingMode);
                 String resolvedReasoningEffort = nullableText(reasoningEffort) == null
                         ? parent.reasoningEffort() : normalizeReasoningEffort(reasoningEffort);
+                String resolvedExecutionShell = nullableText(executionShell) == null
+                        ? parent.executionShell() : normalizeExecutionShell(executionShell);
                 if (!"enabled".equals(resolvedThinkingMode)) resolvedReasoningEffort = "";
                 List<String> dependencyIds = resolveDelegationDependencies(
                         connection, parentRunId, graph.dependencies());
@@ -1229,19 +1261,20 @@ public class SqliteRuntimeStore {
                 }
                 try (PreparedStatement run = connection.prepareStatement(
                         "INSERT INTO runs(id,session_id,status,input,current_step,thinking_mode,reasoning_effort," +
-                                "model_profile_id,agent_profile_id,workspace_owner_run_id,created_at,queued_at,version) " +
-                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,?,0)")) {
+                                "execution_shell,model_profile_id,agent_profile_id,workspace_owner_run_id,created_at,queued_at,version) " +
+                                "VALUES(?,?,?,?,0,?,?,?,?,?,?,?,?,0)")) {
                     run.setString(1, childRunId);
                     run.setString(2, childSessionId);
                     run.setString(3, RunStatus.QUEUED.name());
                     run.setString(4, input);
                     run.setString(5, resolvedThinkingMode);
                     run.setString(6, resolvedReasoningEffort);
-                    run.setString(7, resolvedModelProfileId);
-                    run.setString(8, resolvedAgentProfileId);
-                    run.setString(9, delegatedWorkspaceOwner);
-                    run.setString(10, now.toString());
+                    run.setString(7, resolvedExecutionShell);
+                    run.setString(8, resolvedModelProfileId);
+                    run.setString(9, resolvedAgentProfileId);
+                    run.setString(10, delegatedWorkspaceOwner);
                     run.setString(11, now.toString());
+                    run.setString(12, now.toString());
                     run.executeUpdate();
                 }
                 insertMessage(connection, childSessionId, childRunId, "user", input,
@@ -3930,7 +3963,8 @@ public class SqliteRuntimeStore {
         return new RunRecord(rs.getString("id"), rs.getString("session_id"),
                 RunStatus.valueOf(rs.getString("status")), rs.getString("input"), rs.getInt("current_step"),
                 rs.getString("error"), rs.getString("thinking_mode"), rs.getString("reasoning_effort"),
-                rs.getInt("priority"), rs.getString("model_profile_id"), rs.getString("agent_profile_id"),
+                rs.getString("execution_shell"), rs.getInt("priority"),
+                rs.getString("model_profile_id"), rs.getString("agent_profile_id"),
                 rs.getInt("retry_count"),
                 instant(rs.getString("created_at")), instant(rs.getString("started_at")),
                 instant(rs.getString("finished_at")), rs.getLong("version"));
@@ -4229,6 +4263,10 @@ public class SqliteRuntimeStore {
             throw new IllegalArgumentException("reasoningEffort must be low, high, or max");
         }
         return normalized;
+    }
+
+    private static String normalizeExecutionShell(String value) {
+        return com.paicli.platform.common.CommandShell.parse(value).value();
     }
 
     private static String normalizeEnum(String value, Set<String> allowed, String fallback) {

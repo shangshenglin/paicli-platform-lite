@@ -56,7 +56,7 @@ PaiCLI Server
 - 模型方案保存用途、端点、模型、后备模型、上下文上限、输出上限和单价。项目可设置默认方案；每个 Run 固化所用方案，失败重试可切到后备方案，本地模型允许不配置 API Key。
 - `model_usage` 记录模型名、输入/输出 Token、缓存命中、耗时、重试和本地模型标志。预算策略按项目限制日/月 Token、日/月费用与最大并发，提交前提供上下文、输出和费用风险估算。
 - Run 队列按优先级领取，并在项目最大并发约束下进行公平调度；Console 可调整优先级、批量取消、重新排队，并查看当前状态、耗时和重试次数。
-- 定时任务通过下拉框引用当前项目已保存模板，支持一次性、每日、每周和 Cron，并按周期动态收集时间字段；Cron 的首次与后续执行均按服务端系统时区计算。调度器创建普通 Session/Run，因此继续复用审批、审计、预算、恢复和通知链路。
+- 定时任务通过下拉框引用当前项目已保存模板，支持一次性、每日、每周和 Cron，并按周期动态收集时间字段；Cron 的首次与后续执行均按服务端系统时区计算。任务可独立持久化模型方案，以及执行专家或执行小队（二选一）；调度时模型优先级为任务显式选择、执行专家模型、模板模型、服务端默认。小队会固化 Leader 与成员策略为协作 Run 和可恢复计划。调度器创建普通 Session/Run，因此继续复用审批、审计、预算、恢复和通知链路。
 - 完成通知支持浏览器通知，以及由 Server 读取环境变量密钥的 Webhook、邮件网关或企业 IM 网关，事件覆盖完成、失败、等待审批和预算不足。
 - Session 可导出 Markdown、JSON 或带 ToolCall、Approval、Event、Artifact 清单的审计包；导出支持隐私脱敏，导入会在另一实例创建新的可继续对话 Session。
 - Skill 生命周期记录来源仓库、Ref、Commit、安装时间和作用域，GitHub tree/blob 链接可从路径推断 Skill 目录名，安装前展示文件清单与权限声明，并支持启停、固定、检查更新、升级和单级回滚。MCP Server 可在 Console 新增、测试、启停和删除，敏感 Header 只保存环境变量名，工具 Schema、健康和熔断状态可见。
@@ -151,4 +151,6 @@ Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真
 
 `LocalSandboxDriver` 仅用于开发，不是安全沙箱。Docker 模式按活跃 Run 创建受限容器，工作区留在宿主机，容器使用无外部路由的内部网络且不发布端口；Server 通过 `docker exec` 调用容器 loopback 的带令牌 HTTP Agent。
 
-Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令和 Docker 输出只保留有限前缀，但持续排空管道；超时会终止进程及后代。危险工具在任何容器调用前创建持久化 Approval，批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作。
+Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定映射到 `/bin/sh -lc`、`/bin/bash -lc` 或 `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command`，模型不能传解释器路径。Run 与 Agent Profile 持久化默认 Shell；RunProcessor 在同轮 ToolCall 原子落库前补齐缺省 Shell，因此审批参数、幂等键和恢复执行一致。
+
+命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。危险工具在任何容器调用前创建持久化 Approval，批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作。
