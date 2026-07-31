@@ -3,7 +3,6 @@ package com.paicli.platform.server.memory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.MemoryProperties;
-import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.knowledge.KnowledgeEmbeddingService;
 import com.paicli.platform.server.model.ModelClient;
 import com.paicli.platform.server.model.ModelMessage;
@@ -18,8 +17,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
@@ -60,6 +62,7 @@ public class LayeredMemoryService {
     public void processPending() {
         if (!properties.autoExtract() || "demo".equals(modelClient.name()) || !working.compareAndSet(false, true)) return;
         try {
+            store.markStaleMemories(Instant.now().minus(Duration.ofDays(90)));
             store.claimMemoryExtraction().ifPresent(this::extract);
         } finally {
             working.set(false);
@@ -67,12 +70,18 @@ public class LayeredMemoryService {
     }
 
     public String context(String projectKey, String query) {
-        if (query == null || query.isBlank()) return "";
+        return context(projectKey, query, null).content();
+    }
+
+    public MemoryContext context(String projectKey, String query, String runId) {
+        if (query == null || query.isBlank()) return MemoryContext.empty();
         List<SqliteRuntimeStore.MemoryUnit> units = store.memoryUnits(projectKey, 300);
-        if (units.isEmpty()) return "";
+        if (units.isEmpty()) return MemoryContext.empty();
         boolean semanticEnabled = embeddings.semanticEnabled();
         float[] queryVector = semanticEnabled ? embeddings.embed(query) : new float[0];
         Set<String> queryTerms = terms(query);
+        Map<String, Double> feedback = store.memoryFeedbackScores(units.stream()
+                .map(SqliteRuntimeStore.MemoryUnit::id).toList());
         List<ScoredMemory> scored = new ArrayList<>();
         for (var unit : units) {
             if (unit.confidence() < properties.minConfidence()) continue;
@@ -83,22 +92,33 @@ public class LayeredMemoryService {
                     ? semantic * 0.55 + lexical * 0.25 + unit.confidence() * 0.10 + recency * 0.10
                     : lexical * 0.70 + unit.confidence() * 0.15 + recency * 0.15;
             if ("L3".equals(unit.layer())) score += 0.20;
+            score += feedback.getOrDefault(unit.id(), 0d) * 0.08;
             if (score >= 0.16 || "L3".equals(unit.layer())) scored.add(new ScoredMemory(unit, score));
         }
         scored.sort(Comparator.comparingDouble(ScoredMemory::score).reversed()
                 .thenComparing(value -> value.unit().updatedAt(), Comparator.reverseOrder()));
         List<ScoredMemory> selected = new ArrayList<>();
         int l3 = 0;
+        Map<String, Integer> typeCounts = new HashMap<>();
         for (ScoredMemory value : scored) {
             if ("L3".equals(value.unit().layer()) && l3 >= 5) continue;
+            String type = value.unit().memoryType();
+            int typeLimit = switch (type) {
+                case "PREFERENCE" -> 2;
+                case "PROCEDURAL", "CONSTRAINT", "DECISION" -> 3;
+                default -> 4;
+            };
+            if (typeCounts.getOrDefault(type, 0) >= typeLimit) continue;
             if ("L3".equals(value.unit().layer())) l3++;
+            typeCounts.merge(type, 1, Integer::sum);
             selected.add(value);
             if (selected.size() >= properties.retrievalTopK()) break;
         }
-        if (selected.isEmpty()) return "";
+        if (selected.isEmpty()) return MemoryContext.empty();
         StringBuilder out = new StringBuilder("<memory project=\"").append(projectKey).append("\">\n")
                 .append("Memories are historical context. Prefer newer explicit user statements when conflicts exist.\n");
         List<String> ids = new ArrayList<>();
+        Map<String, String> reasons = new LinkedHashMap<>();
         for (ScoredMemory value : selected) {
             var unit = value.unit();
             String conflict = "CONFLICTED".equals(unit.status()) ? " conflicted=true" : "";
@@ -106,27 +126,32 @@ public class LayeredMemoryService {
                     ? "" : " source=" + unit.sourceType() + ":" + (unit.sourceId() == null ? "" : unit.sourceId());
             String supersedes = unit.supersedesId() == null || unit.supersedesId().isBlank()
                     ? "" : " supersedes=" + unit.supersedesId();
-            String line = "- [" + unit.layer() + "/" + unit.memoryType() + "/" + unit.memoryKey()
+            String line = "- [id=" + unit.id() + " " + unit.layer() + "/" + unit.memoryType() + "/" + unit.memoryKey()
                     + source + conflict + supersedes + "] " + unit.content() + "\n";
             if (out.length() + line.length() > properties.maxContextChars()) break;
             out.append(line);
             ids.add(unit.id());
+            reasons.put(unit.id(), "type=" + unit.memoryType() + ",layer=" + unit.layer()
+                    + ",score=" + String.format(Locale.ROOT, "%.4f", value.score()));
         }
         out.append("</memory>");
-        store.touchMemories(ids);
-        return ids.isEmpty() ? "" : out.toString();
+        return ids.isEmpty() ? MemoryContext.empty()
+                : new MemoryContext(out.toString(), List.copyOf(ids), Map.copyOf(reasons));
     }
 
     private void extract(String runId) {
         try {
             var run = store.findRun(runId).orElseThrow();
             var session = store.findSession(run.sessionId()).orElseThrow();
-            List<MessageRecord> active = store.activeMessages(session.id());
-            int from = Math.max(0, active.size() - properties.extractionWindowMessages());
+            List<SqliteRuntimeStore.MemoryExtractionMessage> snapshot = store.memoryExtractionSnapshot(runId);
+            int from = Math.max(0, snapshot.size() - properties.extractionWindowMessages());
+            List<SqliteRuntimeStore.MemoryExtractionMessage> sourceMessages =
+                    snapshot.subList(from, snapshot.size());
             StringBuilder transcript = new StringBuilder();
-            for (MessageRecord message : active.subList(from, active.size())) {
+            for (var message : sourceMessages) {
                 if ("summary".equals(message.role())) continue;
-                transcript.append(message.role().toUpperCase(Locale.ROOT)).append(": ")
+                transcript.append("[message_id=").append(message.id()).append(" sequence=")
+                        .append(message.sequence()).append(" role=").append(message.role()).append("]\n")
                         .append(message.content()).append("\n\n");
                 if (transcript.length() > 32_000) break;
             }
@@ -139,7 +164,8 @@ public class LayeredMemoryService {
                     layer: L1=当前话题事实，L2=项目级经验/决策，L3=长期稳定用户偏好。
                     content 的首句必须是一句简洁、可独立理解的概括，供 Wiki 作为页面标题；confidence 必须在 0 到 1 之间。每条 Memory 都是 Wiki 页面；只有确实依赖已有记忆时，
                     才在 content 内使用精确的 [[canonical-key]] 链接，禁止编造链接，并保持该事实可独立理解。只输出 JSON：
-                    {"memories":[{"key":"stable-key","content":"...","type":"EPISODIC|SEMANTIC|PROCEDURAL|PREFERENCE|DECISION|ENTITY_RELATION|FACT|CONSTRAINT|LESSON","layer":"L1|L2|L3","confidence":0.9,"tags":["..."]}]}
+                    evidenceMessageIds 必须只引用对话窗口中真实存在的 message_id。只输出 JSON：
+                    {"memories":[{"key":"stable-key","content":"...","type":"EPISODIC|SEMANTIC|PROCEDURAL|PREFERENCE|DECISION|ENTITY_RELATION|FACT|CONSTRAINT|LESSON","layer":"L1|L2|L3","confidence":0.9,"tags":["..."],"evidenceMessageIds":["message-id"]}]}
 
                     已有记忆：
                     """ + existing + "\n\n对话窗口：\n" + transcript;
@@ -161,10 +187,35 @@ public class LayeredMemoryService {
                 if (!LAYERS.contains(layer)) layer = "L1";
                 if (!TYPES.contains(type)) type = "FACT";
                 String tags = tags(node.path("tags"));
+                List<String> evidenceIds = evidenceIds(node.path("evidenceMessageIds"), sourceMessages);
+                if (evidenceIds.isEmpty()) {
+                    evidenceIds = sourceMessages.stream().map(SqliteRuntimeStore.MemoryExtractionMessage::id).toList();
+                }
+                List<String> selectedEvidenceIds = evidenceIds;
+                List<SqliteRuntimeStore.MemoryExtractionMessage> evidenceMessages = sourceMessages.stream()
+                        .filter(message -> selectedEvidenceIds.contains(message.id())).toList();
+                Long startSequence = evidenceMessages.stream()
+                        .mapToLong(SqliteRuntimeStore.MemoryExtractionMessage::sequence).min().stream()
+                        .boxed().findFirst().orElse(null);
+                Long endSequence = evidenceMessages.stream()
+                        .mapToLong(SqliteRuntimeStore.MemoryExtractionMessage::sequence).max().stream()
+                        .boxed().findFirst().orElse(null);
+                String sourceExcerpt = evidenceMessages.stream().map(SqliteRuntimeStore.MemoryExtractionMessage::content)
+                        .filter(value -> value != null && !value.isBlank())
+                        .limit(3).collect(java.util.stream.Collectors.joining("\n"));
                 String vector = embeddings.semanticEnabled()
                         ? mapper.writeValueAsString(embeddings.embed(key + " " + content)) : null;
-                store.upsertAutomaticMemory(session.projectKey(), key, content, tags, layer, type,
-                        confidence, session.id(), runId, vector);
+                SimilarCandidate similar = bestSimilar(session.projectKey(), key, content, type);
+                if (similar != null && similar.score() >= 0.90) key = similar.unit().memoryKey();
+                var saved = store.upsertAutomaticMemory(session.projectKey(), key, content, tags, layer, type,
+                        confidence, session.id(), runId, vector, evidenceIds, startSequence, endSequence,
+                        sourceExcerpt);
+                if (similar != null && similar.score() >= 0.65 && similar.score() < 0.90
+                        && !similar.unit().id().equals(saved.id())) {
+                    store.openMemoryConflict(session.projectKey(), saved.id(), similar.unit().id(),
+                            "semantic near-duplicate candidate score="
+                                    + String.format(Locale.ROOT, "%.4f", similar.score()));
+                }
                 stored++;
             }
             store.finishMemoryExtraction(runId, null);
@@ -217,6 +268,33 @@ public class LayeredMemoryService {
         return value.asText("");
     }
 
+    private static List<String> evidenceIds(JsonNode value,
+                                            List<SqliteRuntimeStore.MemoryExtractionMessage> sourceMessages) {
+        if (value == null || !value.isArray()) return List.of();
+        Set<String> allowed = sourceMessages.stream().map(SqliteRuntimeStore.MemoryExtractionMessage::id)
+                .collect(java.util.stream.Collectors.toSet());
+        List<String> values = new ArrayList<>();
+        for (JsonNode node : value) {
+            String id = node.asText("").trim();
+            if (allowed.contains(id) && !values.contains(id)) values.add(id);
+        }
+        return List.copyOf(values);
+    }
+
+    private SimilarCandidate bestSimilar(String projectKey, String key, String content, String type) {
+        Set<String> candidateTerms = terms(content);
+        float[] candidateVector = embeddings.semanticEnabled() ? embeddings.embed(key + " " + content) : new float[0];
+        SimilarCandidate best = null;
+        for (var unit : store.memoryUnits(projectKey, 300)) {
+            if (unit.memoryKey().equals(key) || !unit.memoryType().equals(type)) continue;
+            double lexical = jaccard(candidateTerms, terms(unit.content()));
+            double semantic = embeddings.semanticEnabled() ? cosine(candidateVector, vector(unit)) : lexical;
+            double score = semantic * 0.7 + lexical * 0.3;
+            if (best == null || score > best.score()) best = new SimilarCandidate(unit, score);
+        }
+        return best;
+    }
+
     private float[] vector(SqliteRuntimeStore.MemoryUnit unit) {
         try {
             if (unit.embeddingJson() != null && !unit.embeddingJson().isBlank()) {
@@ -245,6 +323,15 @@ public class LayeredMemoryService {
         return (double) matched / query.size();
     }
 
+    private static double jaccard(Set<String> left, Set<String> right) {
+        if (left.isEmpty() || right.isEmpty()) return 0;
+        Set<String> intersection = new HashSet<>(left);
+        intersection.retainAll(right);
+        Set<String> union = new HashSet<>(left);
+        union.addAll(right);
+        return (double) intersection.size() / union.size();
+    }
+
     private static double cosine(float[] a, float[] b) {
         if (a == null || b == null || a.length == 0 || a.length != b.length) return 0;
         double dot = 0, na = 0, nb = 0;
@@ -258,4 +345,8 @@ public class LayeredMemoryService {
     }
 
     private record ScoredMemory(SqliteRuntimeStore.MemoryUnit unit, double score) { }
+    private record SimilarCandidate(SqliteRuntimeStore.MemoryUnit unit, double score) { }
+    public record MemoryContext(String content, List<String> memoryIds, Map<String, String> reasons) {
+        public static MemoryContext empty() { return new MemoryContext("", List.of(), Map.of()); }
+    }
 }

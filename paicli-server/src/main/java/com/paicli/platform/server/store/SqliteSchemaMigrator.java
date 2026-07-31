@@ -35,7 +35,8 @@ final class SqliteSchemaMigrator {
             new Migration(23, "typed plan graph edges and deterministic routing"),
             new Migration(24, "reusable expert collaboration teams"),
             new Migration(25, "durable collaboration graph dependencies resources and terminal propagation"),
-            new Migration(26, "durable run and agent profile execution shell")
+            new Migration(26, "durable run and agent profile execution shell"),
+            new Migration(27, "immutable memory sources context feedback and harness governance")
     );
 
     private SqliteSchemaMigrator() { }

@@ -28,9 +28,9 @@ public class PromptAssembler {
         return String.join("\n\n", load("base.md"), load("safety.md"), load("agent.md")).trim();
     }
 
-    public String runtimeContext(Path workspaceRoot) {
+    public String runtimeContext(Path workspaceRoot, Instant runStartedAt) {
         return "<runtime_context>\n"
-                + "当前时间：" + Instant.now() + "\n"
+                + "本次 Run 的基准时间：" + runStartedAt + "\n"
                 + "工作区根目录：" + workspaceRoot.toAbsolutePath().normalize() + "\n"
                 + "所有文件工具路径必须相对于当前 Run 工作区，不得传入宿主机绝对路径。\n"
                 + "执行环境由 SandboxDriver 选择。\n"

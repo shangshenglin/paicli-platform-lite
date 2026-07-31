@@ -100,7 +100,7 @@
 - [x] 多 Trial 全通过的 `pass^k` 稳定性聚合及可刷新异步执行报告
 - [x] 人工确认基线、关键工具保留检查和 Token/耗时 150% 退化判断
 - [x] 内部评测 Run 排除自动 Memory 提取，避免评测输入污染长期记忆
-- [x] 版本化官方 Starter Pack：4 个套件、17 个用例、幂等安装和 Console 用例启停
+- [x] 版本化官方 Starter Pack：6 个套件、25 个用例、幂等安装和 Console 用例启停
 - [x] 评测中心从效率工作台抽离为首页一级入口，套件/报告双栏展示、用例默认折叠并独立滚动
 - [x] Schema 迁移 12、评测 Console、Store/评分回归测试和中文文档
 - [x] 65 项自动化测试覆盖 Common、Server 与 Sandbox Agent，并通过真实 REST 多 Trial/基线冒烟
@@ -194,6 +194,17 @@
 - [x] 命令进程清空继承环境，显式 `env` 拒绝敏感变量名；Local 模式继续拒绝宿主机命令执行。
 - [x] Run 取消销毁独占容器并返回 Sandbox 取消状态；Console 在首页、对话工具条、专家设置和执行详情展示执行环境。
 - [ ] 增加逐行 stdout/stderr SSE、PTY 交互终端和受控后台服务生命周期。
+
+## 阶段 21：Context 与 Memory 认知控制层
+
+- [x] `memory_extractions` 在 job 创建时冻结所属 Run 的不可变 Message 快照；Worker 只读快照，旧 job 保留兼容回退。
+- [x] `memory_sources` 保存证据 Message id、起止 sequence 和摘录，来源 API 可回跳到具体消息或工具结果；Schema 迁移 27。
+- [x] Context Manifest 记录各区块 Token、PlanState、RAG citation、Memory id/选择理由、动态工具和丢弃来源，Rules/Skills/Tools/History/Summary/Plan/Memory/RAG 进入统一预算。
+- [x] Conversation Summary 固定为目标约束、计划、已验证事实、未验证假设、决策、失败尝试、待办和证据八节；模型输出缺节、乱序或超预算时使用结构化确定性降级。
+- [x] 默认只常驻核心 Tool Schema 与 `tool_search`；Knowledge、Skill、Web、MCP、Multi-Agent 等扩展工具在发现后按需加载，Agent Profile 白名单继续作为权限上限。
+- [x] Memory 增加近重复 canonical key 归并、中相似冲突队列、L1 陈旧标记、类型召回配额和 `memory_usage_feedback`；Run 终态与 Plan 验证结果形成排序反馈。
+- [x] 官方 Starter Pack `1.1.0` 增加 Context/Memory Harness 六个专项 Case，并补来源冻结、source span、反馈、结构化摘要、按需工具和预算回归测试。
+- [x] Prompt Cache 模板改为稳定前缀、历史前置、动态尾部和持久化 Run 时间；README/架构文档单列命中率优化、增量指标口径及合理失效条件。
 
 ### 阶段 16 后续工作
 

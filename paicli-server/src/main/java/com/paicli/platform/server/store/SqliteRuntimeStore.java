@@ -182,6 +182,10 @@ public class SqliteRuntimeStore {
                     "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT, " +
                     "source_revision TEXT NOT NULL DEFAULT '1', excerpt TEXT NOT NULL DEFAULT '', " +
                     "created_at TEXT NOT NULL, FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE)");
+            SqliteSchemaMigrator.ensureColumn(connection, "memory_sources", "source_message_ids_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memory_sources", "source_start_sequence", "INTEGER");
+            SqliteSchemaMigrator.ensureColumn(connection, "memory_sources", "source_end_sequence", "INTEGER");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_sources_memory " +
                     "ON memory_sources(memory_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_conflicts (" +
@@ -195,8 +199,17 @@ public class SqliteRuntimeStore {
                     "run_id TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, " +
                     "error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "memory_extractions", "source_snapshot_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_extractions_status " +
                     "ON memory_extractions(status, updated_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS memory_usage_feedback (" +
+                    "run_id TEXT NOT NULL, memory_id TEXT NOT NULL, selected_at TEXT NOT NULL, " +
+                    "outcome TEXT NOT NULL DEFAULT 'SELECTED', updated_at TEXT NOT NULL, " +
+                    "PRIMARY KEY(run_id,memory_id), FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_memory_usage_feedback_memory " +
+                    "ON memory_usage_feedback(memory_id,outcome,updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS model_usage (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, provider TEXT NOT NULL, " +
                     "estimated_input_tokens INTEGER NOT NULL, input_tokens INTEGER NOT NULL, " +
@@ -724,6 +737,7 @@ public class SqliteRuntimeStore {
                     }
                     deleteBySessionRuns(connection, "model_usage", currentSession);
                     deleteBySessionRuns(connection, "model_attempts", currentSession);
+                    deleteBySessionRuns(connection, "memory_usage_feedback", currentSession);
                     deleteBySessionRuns(connection, "memory_extractions", currentSession);
                     deleteBySessionRuns(connection, "run_collaboration_policies", currentSession);
                     deleteBySessionRuns(connection, "async_jobs", currentSession);
@@ -1608,6 +1622,47 @@ public class SqliteRuntimeStore {
         return messages(sessionId, true);
     }
 
+    public List<MessageRecord> messagesForRun(String runId) {
+        List<MessageRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM messages WHERE run_id=? ORDER BY sequence")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapMessage(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list run messages", e);
+        }
+    }
+
+    public String planContextForRun(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT p.id plan_id,p.objective,p.status plan_status,ps.id step_id,ps.title," +
+                        "ps.description,ps.status step_status,ps.done_criteria_json,ps.attempt," +
+                        "ps.result_summary,ps.failure_reason FROM plan_steps ps " +
+                        "JOIN plans p ON p.id=ps.plan_id WHERE ps.run_id=? ORDER BY ps.updated_at DESC LIMIT 1")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return "";
+                return "<plan_state plan_id=\"" + rs.getString("plan_id") + "\" step_id=\""
+                        + rs.getString("step_id") + "\">\n"
+                        + "objective: " + rs.getString("objective") + "\n"
+                        + "plan_status: " + rs.getString("plan_status") + "\n"
+                        + "step_title: " + rs.getString("title") + "\n"
+                        + "step_description: " + rs.getString("description") + "\n"
+                        + "step_status: " + rs.getString("step_status") + "\n"
+                        + "attempt: " + rs.getInt("attempt") + "\n"
+                        + "done_criteria: " + rs.getString("done_criteria_json") + "\n"
+                        + "result_summary: " + String.valueOf(rs.getString("result_summary")) + "\n"
+                        + "failure_reason: " + String.valueOf(rs.getString("failure_reason")) + "\n"
+                        + "</plan_state>";
+            }
+        } catch (SQLException e) {
+            throw failure("read plan context for run", e);
+        }
+    }
+
     private List<MessageRecord> messages(String sessionId, boolean activeOnly) {
         List<MessageRecord> values = new ArrayList<>();
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
@@ -1979,6 +2034,15 @@ public class SqliteRuntimeStore {
     public MemoryRecord upsertAutomaticMemory(String projectKey, String memoryKey, String content, String tags,
                                               String layer, String memoryType, double confidence,
                                               String sessionId, String runId, String embeddingJson) {
+        return upsertAutomaticMemory(projectKey, memoryKey, content, tags, layer, memoryType, confidence,
+                sessionId, runId, embeddingJson, List.of(), null, null, "");
+    }
+
+    public MemoryRecord upsertAutomaticMemory(String projectKey, String memoryKey, String content, String tags,
+                                              String layer, String memoryType, double confidence,
+                                              String sessionId, String runId, String embeddingJson,
+                                              List<String> sourceMessageIds, Long sourceStartSequence,
+                                              Long sourceEndSequence, String sourceExcerpt) {
         String project = normalizeProjectKey(projectKey);
         String key = requireText(memoryKey, "memoryKey", 120);
         String value = requireText(content, "content", 32_000);
@@ -2036,7 +2100,8 @@ public class SqliteRuntimeStore {
                     ps.executeUpdate();
                 }
                 insertMemorySource(connection, memoryId, "run", runId, runId == null ? "1" : runId,
-                        excerpt(value));
+                        sourceExcerpt == null || sourceExcerpt.isBlank() ? excerpt(value) : excerpt(sourceExcerpt),
+                        sourceMessageIds, sourceStartSequence, sourceEndSequence);
                 connection.commit();
                 return findMemory(memoryId).orElseThrow();
             } catch (Exception e) {
@@ -2084,15 +2149,137 @@ public class SqliteRuntimeStore {
 
     public void enqueueMemoryExtraction(String runId) {
         String now = Instant.now().toString();
-        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "INSERT OR IGNORE INTO memory_extractions(run_id,status,attempts,error,created_at,updated_at) " +
-                        "VALUES(?,'PENDING',0,NULL,?,?)")) {
-            ps.setString(1, runId);
-            ps.setString(2, now);
-            ps.setString(3, now);
-            ps.executeUpdate();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                List<MemoryExtractionMessage> snapshot = new ArrayList<>();
+                try (PreparedStatement select = connection.prepareStatement(
+                        "SELECT id,sequence,role,content,tool_call_id FROM messages WHERE run_id=? ORDER BY sequence")) {
+                    select.setString(1, runId);
+                    try (ResultSet rs = select.executeQuery()) {
+                        while (rs.next()) snapshot.add(new MemoryExtractionMessage(
+                                rs.getString("id"), rs.getLong("sequence"), rs.getString("role"),
+                                rs.getString("content"), rs.getString("tool_call_id")));
+                    }
+                }
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "INSERT OR IGNORE INTO memory_extractions(run_id,status,attempts,error,created_at,updated_at," +
+                                "source_snapshot_json) VALUES(?,'PENDING',0,NULL,?,?,?)")) {
+                    ps.setString(1, runId);
+                    ps.setString(2, now);
+                    ps.setString(3, now);
+                    ps.setString(4, mapper.writeValueAsString(snapshot));
+                    ps.executeUpdate();
+                }
+                connection.commit();
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
         } catch (SQLException e) {
             throw failure("enqueue memory extraction", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to snapshot memory extraction source", e);
+        }
+    }
+
+    public void recordMemorySelections(String runId, List<String> memoryIds) {
+        if (runId == null || memoryIds == null || memoryIds.isEmpty()) return;
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO memory_usage_feedback(run_id,memory_id,selected_at,outcome,updated_at) " +
+                        "VALUES(?,? ,?,'SELECTED',?) ON CONFLICT(run_id,memory_id) DO NOTHING")) {
+            for (String memoryId : memoryIds.stream().filter(value -> value != null && !value.isBlank())
+                    .distinct().toList()) {
+                ps.setString(1, runId);
+                ps.setString(2, memoryId);
+                ps.setString(3, now);
+                ps.setString(4, now);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        } catch (SQLException e) {
+            throw failure("record memory selections", e);
+        }
+    }
+
+    public void recordMemoryOutcome(String runId, String outcome) {
+        if (runId == null || outcome == null || outcome.isBlank()) return;
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE memory_usage_feedback SET outcome=?,updated_at=? WHERE run_id=?")) {
+            ps.setString(1, outcome.trim().toUpperCase());
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, runId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("record memory outcome", e);
+        }
+    }
+
+    public Map<String, Double> memoryFeedbackScores(List<String> memoryIds) {
+        if (memoryIds == null || memoryIds.isEmpty()) return Map.of();
+        Map<String, Double> scores = new HashMap<>();
+        String placeholders = String.join(",", java.util.Collections.nCopies(memoryIds.size(), "?"));
+        String sql = "SELECT memory_id," +
+                "SUM(CASE WHEN outcome IN ('RUN_COMPLETED','VALIDATED','PASSED') THEN 1 ELSE 0 END) positive," +
+                "SUM(CASE WHEN outcome NOT IN ('SELECTED') THEN 1 ELSE 0 END) terminal " +
+                "FROM memory_usage_feedback WHERE memory_id IN (" + placeholders + ") GROUP BY memory_id";
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(sql)) {
+            for (int index = 0; index < memoryIds.size(); index++) ps.setString(index + 1, memoryIds.get(index));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int terminal = rs.getInt("terminal");
+                    scores.put(rs.getString("memory_id"), terminal == 0 ? 0d
+                            : (double) rs.getInt("positive") / terminal);
+                }
+            }
+            return Map.copyOf(scores);
+        } catch (SQLException e) {
+            throw failure("read memory feedback scores", e);
+        }
+    }
+
+    public int markStaleMemories(Instant cutoff) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE memories SET status='STALE',updated_at=? WHERE status='ACTIVE' AND layer='L1' " +
+                        "AND pinned=0 AND updated_at<? AND (last_accessed_at IS NULL OR last_accessed_at<?)")) {
+            ps.setString(1, Instant.now().toString());
+            ps.setString(2, cutoff.toString());
+            ps.setString(3, cutoff.toString());
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("mark stale memories", e);
+        }
+    }
+
+    public void openMemoryConflict(String projectKey, String memoryId,
+                                   String conflictingMemoryId, String reason) {
+        try (Connection connection = open()) {
+            recordMemoryConflict(connection, normalizeProjectKey(projectKey), memoryId,
+                    conflictingMemoryId, requireText(reason, "reason", 1_000));
+        } catch (SQLException e) {
+            throw failure("open memory conflict", e);
+        }
+    }
+
+    public List<MemoryExtractionMessage> memoryExtractionSnapshot(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT source_snapshot_json FROM memory_extractions WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String json = rs.getString(1);
+                    if (json != null && !json.isBlank() && !"[]".equals(json)) {
+                        return List.of(mapper.readValue(json, MemoryExtractionMessage[].class));
+                    }
+                }
+            }
+            return messagesForRun(runId).stream().map(message -> new MemoryExtractionMessage(
+                    message.id(), message.sequence(), message.role(), message.content(), message.toolCallId())).toList();
+        } catch (SQLException e) {
+            throw failure("read memory extraction snapshot", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to decode memory extraction snapshot", e);
         }
     }
 
@@ -2908,7 +3095,9 @@ public class SqliteRuntimeStore {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) values.add(new MemorySource(rs.getString("id"), rs.getString("memory_id"),
                         rs.getString("source_type"), rs.getString("source_id"), rs.getString("source_revision"),
-                        rs.getString("excerpt"), instant(rs.getString("created_at"))));
+                        rs.getString("excerpt"), readStringList(rs.getString("source_message_ids_json")),
+                        nullableLong(rs, "source_start_sequence"), nullableLong(rs, "source_end_sequence"),
+                        instant(rs.getString("created_at"))));
             }
             return values;
         } catch (SQLException e) { throw failure("list memory sources", e); }
@@ -3044,6 +3233,20 @@ public class SqliteRuntimeStore {
         return text.length() > 500 ? text.substring(0, 500) : text;
     }
 
+    private List<String> readStringList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return List.of(mapper.readValue(json, String[].class));
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    private static Long nullableLong(ResultSet result, String column) throws SQLException {
+        long value = result.getLong(column);
+        return result.wasNull() ? null : value;
+    }
+
     private void insertMemoryRevision(Connection connection, MemoryUnit value, String sourceRunId)
             throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
@@ -3058,10 +3261,12 @@ public class SqliteRuntimeStore {
     }
 
     private void insertMemorySource(Connection connection, String memoryId, String sourceType, String sourceId,
-                                    String sourceRevision, String excerpt) throws SQLException {
+                                    String sourceRevision, String excerpt, List<String> sourceMessageIds,
+                                    Long sourceStartSequence, Long sourceEndSequence) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO memory_sources(id,memory_id,source_type,source_id,source_revision,excerpt,created_at) " +
-                        "VALUES(?,?,?,?,?,?,?)")) {
+                "INSERT INTO memory_sources(id,memory_id,source_type,source_id,source_revision,excerpt,created_at," +
+                        "source_message_ids_json,source_start_sequence,source_end_sequence) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id("memory_source"));
             ps.setString(2, memoryId);
             ps.setString(3, sourceType == null || sourceType.isBlank() ? "manual" : sourceType);
@@ -3069,6 +3274,16 @@ public class SqliteRuntimeStore {
             ps.setString(5, sourceRevision == null || sourceRevision.isBlank() ? "1" : sourceRevision);
             ps.setString(6, excerpt == null ? "" : excerpt);
             ps.setString(7, Instant.now().toString());
+            try {
+                ps.setString(8, mapper.writeValueAsString(
+                        sourceMessageIds == null ? List.of() : sourceMessageIds));
+            } catch (Exception e) {
+                throw new SQLException("failed to serialize memory source message ids", e);
+            }
+            if (sourceStartSequence == null) ps.setNull(9, java.sql.Types.BIGINT);
+            else ps.setLong(9, sourceStartSequence);
+            if (sourceEndSequence == null) ps.setNull(10, java.sql.Types.BIGINT);
+            else ps.setLong(10, sourceEndSequence);
             ps.executeUpdate();
         }
     }
@@ -4081,9 +4296,12 @@ public class SqliteRuntimeStore {
                                   String memoryType, double confidence, Instant replacedAt,
                                   String sourceRunId) { }
     public record MemorySource(String id, String memoryId, String sourceType, String sourceId,
-                               String sourceRevision, String excerpt, Instant createdAt) { }
+                               String sourceRevision, String excerpt, List<String> sourceMessageIds,
+                               Long sourceStartSequence, Long sourceEndSequence, Instant createdAt) { }
     public record MemoryConflict(String id, String projectKey, String memoryId, String conflictingMemoryId,
                                  String reason, String status, Instant createdAt, Instant resolvedAt) { }
+    public record MemoryExtractionMessage(String id, long sequence, String role,
+                                          String content, String toolCallId) { }
 
     public record ApprovalPolicy(String id, String scope, String sessionId, String projectKey,
                                  String toolName, String argumentsSha256, Instant createdAt) { }

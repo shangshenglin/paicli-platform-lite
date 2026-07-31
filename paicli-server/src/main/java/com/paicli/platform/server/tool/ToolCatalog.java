@@ -13,6 +13,8 @@ import java.util.Set;
 
 @Component
 public class ToolCatalog {
+    private static final Set<String> CORE_CONTEXT_TOOLS = Set.of(
+            "list_dir", "read_file", "write_file", "execute_command", "read_artifact", "tool_search");
     private final List<ServerToolProvider> providers;
 
     @Autowired
@@ -31,6 +33,40 @@ public class ToolCatalog {
     }
 
     public List<ModelToolDefinition> definitions(Set<String> allowedNames) {
+        return allDefinitions(allowedNames);
+    }
+
+    public List<ModelToolDefinition> definitionsForContext(Set<String> allowedNames, Set<String> activatedNames) {
+        Set<String> allow = allowedNames == null ? Set.of() : allowedNames;
+        Set<String> activated = activatedNames == null ? Set.of() : activatedNames;
+        if (!allow.isEmpty()) {
+            Set<String> expanded = new HashSet<>(allow);
+            expanded.add("tool_search");
+            return allDefinitions(expanded);
+        }
+        List<ModelToolDefinition> all = allDefinitions(Set.of());
+        return all.stream().filter(definition -> CORE_CONTEXT_TOOLS.contains(definition.name())
+                || activated.contains(definition.name())).toList();
+    }
+
+    public List<ToolDirectoryEntry> search(String query, int requestedLimit, Set<String> allowedNames) {
+        String value = query == null ? "" : query.trim().toLowerCase();
+        List<String> terms = java.util.Arrays.stream(value.split("[^\\p{L}\\p{N}_-]+"))
+                .filter(term -> !term.isBlank()).distinct().toList();
+        int limit = Math.max(1, Math.min(requestedLimit, 12));
+        return allDefinitions(allowedNames).stream()
+                .filter(definition -> !CORE_CONTEXT_TOOLS.contains(definition.name()))
+                .filter(definition -> terms.isEmpty() || terms.stream().anyMatch(
+                        term -> (definition.name() + " " + definition.description())
+                                .toLowerCase().contains(term)))
+                .sorted(Comparator.comparing(ModelToolDefinition::name))
+                .limit(limit)
+                .map(definition -> new ToolDirectoryEntry(
+                        definition.name(), definition.description(), providerId(definition.name())))
+                .toList();
+    }
+
+    private List<ModelToolDefinition> allDefinitions(Set<String> allowedNames) {
         Set<String> allow = allowedNames == null ? Set.of() : allowedNames;
         List<ModelToolDefinition> definitions = new ArrayList<>(List.of(
                 tool("list_dir", "List files under a workspace directory", Map.of(
@@ -60,7 +96,13 @@ public class ToolCatalog {
                                 "artifact_id", stringProperty(),
                                 "offset", Map.of("type", "integer", "minimum", 0),
                                 "limit", Map.of("type", "integer", "minimum", 1, "maximum", 32000)),
-                        "required", List.of("artifact_id")))
+                        "required", List.of("artifact_id"))),
+                tool("tool_search", "Search the deferred tool directory. Matching tools are activated with full schemas on the next model turn.", Map.of(
+                        "type", "object", "properties", Map.of(
+                                "query", Map.of("type", "string",
+                                        "description", "Capability, tool name, or task keyword"),
+                                "limit", Map.of("type", "integer", "minimum", 1, "maximum", 12)),
+                        "required", List.of("query")))
         ));
         if (!allow.isEmpty()) definitions.removeIf(definition -> !allowed(allow, definition.name()));
         Set<String> names = new HashSet<>();
@@ -75,6 +117,11 @@ public class ToolCatalog {
             }
         }
         return List.copyOf(definitions);
+    }
+
+    private String providerId(String toolName) {
+        return providers.stream().filter(provider -> provider.supports(toolName))
+                .findFirst().map(ServerToolProvider::id).orElse("sandbox");
     }
 
     private static ModelToolDefinition tool(String name, String description, Map<String, Object> parameters) {
@@ -92,4 +139,6 @@ public class ToolCatalog {
     private static Map<String, Object> stringProperty() {
         return Map.of("type", "string");
     }
+
+    public record ToolDirectoryEntry(String name, String description, String provider) { }
 }

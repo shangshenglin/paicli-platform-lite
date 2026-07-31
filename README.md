@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–18，并补齐 Memory/RAG/Plan/Agent Harness 阶段 2/3/4 增量闭环、方案阶段 5/6 的受控并行与闭环生产加固，以及类型化 Graph Runtime；现有 113 项自动化测试覆盖 Runtime、Store、Graph 路由、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–21，并补齐 Memory/RAG/Plan/Agent Harness、受控并行、类型化 Graph Runtime、多 Shell 执行和 Context/Memory 认知控制层；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 ## 项目解决什么问题
 
@@ -24,11 +24,11 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 基础使用 | 聊天 Console、Session 分组、流式回答、思考模式、图片/文档附件、Run 时间线 |
 | 可靠 Runtime | SQLite WAL、持久化状态机、可恢复 Worker、ToolCall 幂等、SSE 重放、取消与失败恢复 |
 | 执行安全 | Local/Docker Sandbox、危险工具审批、持久化审批策略、路径/资源/密钥边界、JSONL 审计 |
-| 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、摘要、Token 预算、Artifact、项目规则 |
+| 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、结构化工作记忆、Context Manifest、统一 Token 预算、按需工具 Schema、Artifact、项目规则 |
 | Plan / Graph Runtime | 持久化 Plan/Step/类型化 Edge、确定性条件分支、有限失败回流、PlanState 快照、Human Node 决策、DAG 校验、Step 调度复用普通 ReAct Run、Validation Gate 与受控并行 |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
-| 质量闭环 | 官方入门评测集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
+| 质量闭环 | 官方入门评测集、Context/Memory Harness 专项集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
 | 运维交付 | API Key、OpenAPI、Actuator 指标、WAL 维护、保留策略、备份恢复、CI、Dependabot、SBOM |
 
 ## 总体架构
@@ -208,6 +208,51 @@ X-API-Key: your-key
   → 同步提交最终 assistant Message 与 Run 终态
 ```
 
+### Prompt Cache 命中率优化
+
+优化前的实际样本为输入 Token `8,714,118`、缓存命中 Token `544,640`，累计命中率约 `6.25%`。主要原因不是模型没有缓存能力，而是早期 Prompt 中包含每轮变化的墙钟时间，RAG、Memory 和 Run 工作区等动态内容又位于长历史之前；任一动态块变化都会截断后续原本可以复用的共同前缀。
+
+当前按以下顺序组装模型上下文：
+
+```text
+稳定系统前缀
+  = 基础 Prompt + 安全规则 + Agent 循环
+  + 专家配置 + 项目规则 + Skill 索引
+→ 已归档摘要
+→ 当前 Run 之前的会话历史
+→ Run 动态上下文
+  = 持久化 Run 基准时间 + 工作区 + RAG + Memory
+→ 当前 Run 的 user / assistant / tool 消息
+```
+
+具体优化包括：
+
+- 不再在每轮调用的早期 Prompt 中写入 `Instant.now()`；同一 Run 始终使用持久化的创建时间作为基准时间。
+- 将既有摘要和历史移动到 RAG、Memory、工作区等 Run 动态块之前，使同一会话的新 Run 仍可复用已有长前缀。
+- 基础 Prompt、专家指令、项目规则和 Skill 索引使用稳定顺序与系统消息角色；内容或规则真正变化时才合理失效。
+- Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、Web、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
+- 必需指令、历史、当前 Run 消息和工具 Schema 先占预算；RAG 与 Memory 共享剩余动态预算，超限时写入明确标记并有界裁剪。
+- 每轮在 `run_events` 写入 `context.prepared` Context Manifest，记录可复用前缀 Token 和 SHA-256、工具 Token、各消息分区 Token、Plan 状态、RAG citation/命中理由、实际选择的 Memory id/理由、完整工具名/选择理由、动态激活工具和被丢弃来源，便于解释后续命中率与上下文选择。
+
+缓存效果必须按部署新版本后的增量窗口计算：
+
+```text
+增量缓存命中率 = 新增 cached input tokens / 新增 input tokens
+```
+
+历史累计数据会长期稀释优化后的结果。同一 Run 的多轮 ReAct、包含稳定历史的连续 Run 最容易获得提升；短于供应商最小缓存前缀、模型/工具集频繁切换、项目规则实际变化或供应商不支持 Prompt Cache 时，命中率仍可能较低。
+
+### Context 与 Memory Harness 补齐
+
+本轮把 Context 和 Memory 从“能拼进 Prompt”推进为可持久化、可解释、可反馈的认知控制层：
+
+- **来源冻结与回跳**：创建 `memory_extractions` job 时把该 Run 的 Message id、序列、角色、正文和 ToolCall 引用序列化为不可变快照。Worker 后续只能读取快照；每条自动 Memory 在 `memory_sources` 保存证据 Message id 列表、起止 sequence 和摘录，`GET /v1/memories/{memoryId}/sources` 可直接回跳证据范围。
+- **统一 Context Manifest**：Rules、Skill 索引、工具 Schema、摘要、历史、PlanState、Memory、RAG 和当前 Run 进入同一输入预算；Manifest 记录各区块 Token、选择原因、引用、裁剪与丢弃项，不再只在超限时失败。
+- **结构化工作记忆**：压缩摘要固定包含“目标与硬约束、计划状态、已验证事实、未验证假设、技术决策、失败尝试、待办与下一步、证据引用”八节。模型摘要缺节、乱序或超预算时拒绝采用，并回退到同 Schema 的确定性摘要。
+- **按需工具加载**：常驻核心工具加 `tool_search`；扩展能力只先暴露轻量目录项，模型搜索后才在后续轮次注入匹配工具的完整 Schema。Agent Profile 的显式工具白名单仍是上限，工具发现不能绕过权限。
+- **Memory 归并与反馈**：自动提取对高相似候选复用 canonical key，中等相似候选进入 OPEN conflict；L1 长期未访问记录自动标记 STALE。召回执行类型配额，保存本轮选择的 Memory id 与理由，并用 Run 完成/失败、Plan 验证通过/返工结果形成历史效果分，参与后续排序。
+- **专项评测**：官方 Starter Pack `1.1.0` 新增“Context 与 Memory Harness”套件，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现与统一上下文预算；依赖夹具的用例默认关闭，由用户准备数据后启用。
+
 系统遵守以下硬约束：
 
 1. 工具调用必须先持久化，再执行。
@@ -349,9 +394,11 @@ data/workspaces/{runId}/PAI.md
 
 Run 完成后先持久化 `memory_extractions` job，再由 Worker 从受限对话窗口提取偏好、事实、约束、决策和经验：
 
-- L1/L2/L3 Memory 保存类型、置信度、来源 Run/Session 和访问统计。
-- 同一 key 的新值替换当前事实，旧值进入 `memory_revisions`。
-- 召回综合词法/语义相关性、置信度、时间衰减、层级、置顶和启用状态。
+- job 创建时冻结所属 Run 的不可变消息快照，Worker 不读取稍后变化的 Session；自动 Memory 保存来源 Message id、序列范围和摘录。
+- L1/L2/L3 Memory 保存类型、置信度、来源 Run/Session、访问统计和生命周期状态；长期未访问的短期 L1 可进入 `STALE`。
+- 同一 key 的新值替换当前事实，旧值进入 `memory_revisions`；高相似候选复用 canonical key，中等相似候选进入 `memory_conflicts` 人工审计队列。
+- 召回综合词法/语义相关性、置信度、时间衰减、层级、类型配额、置顶、启用状态和历史效果反馈。
+- 每个 Run 记录被选入上下文的 Memory；Run 终态和 Plan 验证结果回写完成、失败、验证通过或返工结果，用于后续排序分析。
 - 显式 REST CRUD、人工确认、启停、置顶、合并、修订与历史恢复构成人工纠错边界。
 - 评测内部 Run 不创建自动 Memory job，避免测试 Prompt 污染长期记忆。
 
@@ -410,12 +457,14 @@ Run 完成后先持久化 `memory_extractions` job，再由 Worker 从受限对�
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.0.0` 包含 4 个套件、17 个用例：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.1.0` 包含 6 个套件、25 个用例：
 
 - **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
 - **工具与审批**：写文件、执行命令、破坏性命令拒绝和写后读取；危险工具会真实等待 Approval。
 - **上下文与受管能力**：Knowledge、Session Search、Skill、Web 和 Multi-Agent；依赖项目数据或外部配置，默认停用，可在 Console 按需启用。
 - **稳定性与预算**：默认 3 Trial，检查固定指令、随机工具调用、输出 Token 和耗时预算。
+- **Plan DAG 与验证**：结构化计划和验证证据模板，默认停用。
+- **Context 与 Memory Harness**：长会话、结构化摘要、错误/冲突 Memory、工具发现和统一输入预算，默认停用。
 
 1. Suite 保存项目、默认 Trial 次数和通过阈值。
 2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；报告同时展示输入、输出和总 Token。
@@ -452,7 +501,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–26：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据、受控并行 Plan Step 与 Agent Feedback 闭环、专家思考配置与 Session 工作空间继承、类型化 Plan Graph Edge 与确定性路由、可复用执行小队、Delegation Graph 依赖/资源/终态传播，以及 Run/Agent Profile 默认执行 Shell。
+SQLite `schema_migrations` 当前记录版本 1–27：基础 Runtime、reasoning/message archive、思考控制、Session 分组与安全删除、Multi-Agent、公平队列、附件、自动 Memory、ModelUsage、业务工作台、长期效率、Agent 评测、生产级 Run 状态机、评测 Token 口径与 SQLite 并发加固、Plan Runtime 基础表、Plan 调度/Async Job/Validation Check、智能体专家 Profile 目录、可按专家 Profile 派发 delegated child Run、Plan Step 领取租约与恢复元数据、类型化 Memory/RAG 查询规划/Plan 绑定 Agent 委派元数据、受控并行 Plan Step 与 Agent Feedback 闭环、专家思考配置与 Session 工作空间继承、类型化 Plan Graph Edge 与确定性路由、可复用执行小队、Delegation Graph 依赖/资源/终态传播、Run/Agent Profile 默认执行 Shell，以及不可变 Memory 来源快照、source span 与使用效果反馈。
 
 不要提交 `.env`、`data/`、`backups/` 和 `target/`。
 
@@ -636,7 +685,7 @@ PUT/DELETE                  /v1/productivity/notifications/{id}
 
 #### Memory/RAG/Plan-Agent 阶段 2/3/4 增量
 
-- Memory：`memories` 增加 `structured_payload`、`status`、`source_type/source_id/source_revision`、有效期、`supersedes_id` 和 checksum；新增 `memory_sources` 与 `memory_conflicts`，自动 Memory 同 key 内容变化会保留 revision、记录来源并打开冲突审计。
+- Memory：`memories` 增加 `structured_payload`、`status`、`source_type/source_id/source_revision`、有效期、`supersedes_id` 和 checksum；`memory_extractions` 冻结 Run 消息快照，`memory_sources` 保存 message id 与 sequence span，`memory_conflicts` 承载近重复/变更审计，`memory_usage_feedback` 关联实际召回与终态/验证结果。
 - RAG：检索入口增加轻量 Query Plan，识别代码路径、符号、排障、决策和架构类查询；SearchHit 返回 BM25 分、查询类型、检索策略、文档版本、citation 和命中原因，便于后续 UI 解释与排序调参。
 - Plan-Agent：`spawn_agent` 在保持旧字段兼容的同时支持 `plan_id`、`plan_step_id`、scope、允许文件/工具、输入 artifact、期望输出契约、验收标准、预算、deadline、依赖、资源读写集、workspace 引用、失败策略和禁止操作。`dependencies` 可引用同一父 Run 下已创建委派的 `delegation_id`、`child_run_id`、唯一专家名或 Plan Step id；未满足依赖的子 Run 保持 `BLOCKED`，不会被 Worker 领取。
 - Agent Graph：相同 workspace 中读读可并行，读写/写写冲突串行；不同 `workspace_ref` 映射到不同 workspace owner，可并行执行。上游失败后，下游按 `BLOCK_GRAPH`、`DEGRADE` 或 `REQUIRE_HUMAN` 路由，人工节点由持久化 decision API 和 Console 协作看板处理。
@@ -687,12 +736,12 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 
 - Common、Server、Sandbox Agent 模块边界。
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
-- ContextManager、摘要、Memory、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
+- ContextManager、Context Manifest、稳定缓存前缀、统一预算、结构化摘要、按需工具 Schema、Memory 来源冻结/反馈、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–26、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–27、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- Agent 评测多 Trial、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 Starter Pack 完整性和幂等安装。
+- Agent 评测多 Trial、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 6 套件/25 Case Starter Pack 完整性和幂等安装。
 
 此外已完成：
 
@@ -723,6 +772,23 @@ POST                        /v1/evaluations/trials/{trialId}/baseline
 - [Docker Sandbox](docs/docker-sandbox.md)
 - [在线产品站](https://paicli-platform-lite.fuermalin2002.chatgpt.site)
 - 产品站源码：`paicli-site/`
+
+### 文档同步门禁
+
+仓库修改必须把文档同步作为交付条件。任何代码、脚本、配置、测试、文档、静态资源或产品站变更，都要在同一工作项和同一次提交中更新根目录 `changeLog.md`，写明变更、思路与验证。
+
+还必须按影响范围同步对应资料：
+
+| 变更类型 | 必须同步 |
+|---|---|
+| Runtime 行为、状态机、上下文、Memory、Plan、架构边界 | `README.md`、`docs/architecture.md` |
+| 阶段完成度、后续范围 | `docs/phases.md` |
+| API 路径、请求、响应、错误语义 | OpenAPI 注解、README API 说明 |
+| 配置、环境变量、启动或维护脚本 | README 配置与运行说明 |
+| Sandbox 镜像、隔离、命令执行 | `docs/docker-sandbox.md` |
+| 产品站能力或展示 | `paicli-site/README.md` 和相关产品说明 |
+
+交付前通过 `git diff --name-only` 核对实际修改文件，再执行 `git diff --check`。遗漏受影响文档时任务不算完成；确实不适用的文档必须在 `changeLog.md` 中说明理由。完整强制规则以 [AGENTS.md](AGENTS.md) 为准。
 
 本地运行产品站：
 

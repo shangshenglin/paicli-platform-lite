@@ -338,6 +338,12 @@ public class PlanExecutionService {
                                    String validationStatus, double score, double evidenceQuality) {
         runtime.recordAgentFeedback(plan.projectKey(), run.agentProfileId(), plan.id(), step.id(), run.id(),
                 run.status().name(), validationStatus, score, failureClass(run, validationStatus), evidenceQuality);
+        runtime.recordMemoryOutcome(run.id(), switch (validationStatus) {
+            case "PASSED" -> "VALIDATED";
+            case "FAILED" -> "REWORK";
+            case "CANCELED" -> "CANCELED";
+            default -> validationStatus;
+        });
         if (metrics != null) metrics.agentFeedback();
     }
 

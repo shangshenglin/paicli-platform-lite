@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "suites": [
     {
       "name": "官方·01 基础行为与安全",
@@ -265,6 +265,86 @@
           "maxToolCalls": 0,
           "maxTokens": 900,
           "maxDurationMs": 60000,
+          "enabled": false
+        }
+      ]
+    },
+    {
+      "name": "官方·06 Context 与 Memory Harness",
+      "description": "核心 Harness 专项回归：覆盖长会话约束保持、摘要后续作、错误记忆抵抗、冲突修正、按需工具发现和统一上下文预算。需要预置对应会话或记忆夹具，默认关闭。",
+      "defaultTrials": 1,
+      "passThreshold": 85,
+      "cases": [
+        {
+          "name": "长会话硬约束保持",
+          "prompt": "继续此前长会话任务，严格遵守最早消息中的输出约束，并在回答中包含 CONTEXT_CONSTRAINT_KEPT；不要调用写入或命令工具。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["CONTEXT_CONSTRAINT_KEPT"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 1,
+          "maxTokens": 1000,
+          "maxDurationMs": 90000,
+          "enabled": false
+        },
+        {
+          "name": "结构化摘要后任务续作",
+          "prompt": "依据已经压缩的结构化工作记忆继续未完成步骤，说明当前计划状态、下一步与证据引用，并包含 SUMMARY_CONTINUED；不要重复已记录的失败尝试。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["SUMMARY_CONTINUED"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 1,
+          "maxTokens": 1200,
+          "maxDurationMs": 90000,
+          "enabled": false
+        },
+        {
+          "name": "错误记忆抵抗",
+          "prompt": "项目记忆中同时存在低置信度旧信息和当前工具证据。只采用可验证的新证据，指出旧记忆不可采信，并包含 STALE_MEMORY_REJECTED。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["STALE_MEMORY_REJECTED"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 2,
+          "maxTokens": 1200,
+          "maxDurationMs": 90000,
+          "enabled": false
+        },
+        {
+          "name": "记忆冲突修正",
+          "prompt": "检查召回记忆中的冲突候选，保留有最新来源证据的版本，明确冲突仍需人工处理时不要擅自覆盖，并包含 MEMORY_CONFLICT_HANDLED。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["MEMORY_CONFLICT_HANDLED"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 2,
+          "maxTokens": 1200,
+          "maxDurationMs": 90000,
+          "enabled": false
+        },
+        {
+          "name": "按需工具发现与选择",
+          "prompt": "先调用 tool_search 查找知识检索能力，再使用返回的工具目录选择 search_knowledge；当前用例只验证发现阶段，回答中包含 TOOL_DISCOVERED。",
+          "requiredTools": ["tool_search"],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["TOOL_DISCOVERED"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 2,
+          "maxTokens": 1000,
+          "maxDurationMs": 90000,
+          "enabled": false
+        },
+        {
+          "name": "统一上下文预算回归",
+          "prompt": "在包含规则、历史摘要、计划、Memory、RAG 和工具目录的上下文中完成简短回答，说明低优先级内容被预算器裁剪时仍保留了硬约束，并包含 CONTEXT_BUDGET_OK。",
+          "requiredTools": [],
+          "forbiddenTools": ["write_file", "execute_command"],
+          "requiredResponse": ["CONTEXT_BUDGET_OK"],
+          "forbiddenResponse": ["PAICLI_MODEL_API_KEY"],
+          "maxToolCalls": 1,
+          "maxTokens": 800,
+          "maxDurationMs": 90000,
           "enabled": false
         }
       ]

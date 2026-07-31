@@ -4,6 +4,32 @@
 
 ## 2026-07-31
 
+### Context / Memory Harness 核心能力补齐
+
+- 变更：Schema 迁移 27 为 `memory_extractions` 增加不可变 `source_snapshot_json`，job 创建时冻结所属 Run 的 Message id、sequence、role、content 和 tool call 引用；`memory_sources` 增加证据 Message id 列表与起止 sequence。自动提取只能读快照，提取结果保存模型引用的真实证据范围；`GET /v1/memories/{memoryId}/sources` 的 OpenAPI 说明同步公开新增来源字段。
+- 变更：Context Manifest 从缓存观测扩展为统一上下文决策记录，新增各区块 Token、PlanState、RAG citation、Memory id/选择理由、动态工具与丢弃来源。Conversation Summary 固定为目标约束、计划、已验证事实、未验证假设、决策、失败尝试、待办和证据八节，模型摘要缺节、乱序或超预算时回退到同 Schema 的确定性摘要。
+- 变更：Tool Catalog 默认只向模型常驻核心文件/命令/Artifact 与 `tool_search` Schema；Knowledge、Skill、Web、MCP 和 Multi-Agent Provider 作为延迟目录，模型搜索命中后才在下一轮加载完整 Schema。显式 Agent Profile 白名单继续作为能力上限。
+- 变更：Memory Worker 对高相似候选归并 canonical key，中相似候选写入 OPEN conflict，定期把长期未访问的 L1 标记为 STALE；召回增加类型配额和 `memory_usage_feedback`，记录每个 Run 选入的 Memory，并由 Run 终态及 Plan 验证结果回写完成、失败、验证通过或返工结果。
+- 变更：官方 Evaluation Starter Pack 升级到 `1.1.0`、6 个 Suite/25 个 Case，新增默认关闭的 Context/Memory Harness 专项套件，覆盖长会话约束、摘要续作、错误记忆抵抗、冲突修正、工具发现和统一预算。README、架构与阶段文档同步说明六项能力、迁移 27、来源 API 和专项评测。
+- 思路：执行层可靠之后，Context 与 Memory 必须具有明确的快照边界、总预算、选择清单、证据引用和效果反馈，才能在长会话中稳定续作并可解释地调优。按需工具加载同时减少无关 Schema Token 和缓存前缀抖动，但不会扩大 Agent Profile 已授权工具范围。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am '-Dtest=MemoryStoreTest,ContextManagerTest,ExtractiveSummarizerTest,ToolCatalogTest,EvaluationStarterPackServiceTest' '-Dsurefire.failIfNoSpecifiedTests=false' test`，14 项专项测试通过；随后运行 `.\mvnw.cmd test`，完整 Reactor 146 项测试通过，覆盖快照冻结、source span、Memory 反馈、八节摘要、按需工具发现/跨摘要激活、统一预算、迁移 27 和 Starter Pack 幂等安装，并执行 `git diff --check`。本次未改变 Sandbox 镜像、启动配置或产品站，因此 `docs/docker-sandbox.md`、配置说明和 `paicli-site/README.md` 不适用。
+
+### 强制文档同步交付门禁
+
+- 变更：强化根目录 `AGENTS.md` 的文档硬规则：任何仓库写入都必须在同一工作项和同一次提交更新 `changeLog.md`；并按影响范围强制同步 README、架构、阶段、OpenAPI、配置运行、Sandbox 和产品站文档。新增交付前文件清单与格式检查，遗漏对应文档时不得宣告任务完成。
+- 变更：README 新增“文档同步门禁”章节，以变更类型到必更文档的矩阵公开同一规则，避免规则只存在于 Agent 入口文件。
+- 思路：`changeLog.md` 负责记录演进，但不能替代当前能力、接口和运行方式文档。将影响映射和“不适用必须说明理由”写成硬门禁，才能避免代码已变化而 README、架构或 API 说明继续陈旧；纯问答和只读诊断没有仓库修改，不制造无意义日志。
+- 验证：核对 `AGENTS.md` 与 README 的文档矩阵一致，确认本次规则修改已同步写入 `changeLog.md`；执行 `git diff --check`。本次不改变 Runtime、API、数据库、配置、Sandbox 或阶段完成度，因此 `docs/architecture.md`、`docs/phases.md`、OpenAPI 和 `docs/docker-sandbox.md` 不适用。
+
+### 缓存友好的上下文模板、统一输入预算与 Memory 来源隔离
+
+- 变更：ContextManager 将基础 Prompt、专家配置、项目规则和 Skill 索引组织为稳定系统前缀，将既有摘要和当前 Run 之前的会话历史移到 Run 动态块之前，再追加持久化 Run 基准时间、工作区、RAG、Memory 与当前 Run 消息；同一 Run 的多轮模型调用不再因 `Instant.now()` 改写早期 Prompt，跨 Run 也能在动态检索内容变化前复用既有长会话前缀。
+- 变更：统一输入预算新增 Tool Definition Token 估算；必需指令、历史、当前 Run 消息和工具 Schema 先占预算，RAG 与 Memory 在剩余预算中分配并有界裁剪，避免压缩成功后因后置检索块或全量工具 Schema 再次超窗。每轮新增 `context.prepared` Event，记录可复用前缀 Token/SHA-256、工具 Token、消息分区以及 RAG/Memory 纳入和裁剪状态。
+- 变更：自动 Memory Worker 改为只读取 extraction job 对应 Run 的持久化消息窗口，不再读取处理时整个 Session 的最新消息，避免快速连续提交多个 Run 时后续内容被错误归因到较早 Run。
+- 变更：README 与 `docs/architecture.md` 新增独立“Prompt Cache 命中率优化”章节，记录优化前约 6.25% 的观测基线、旧前缀失效原因、新消息分层顺序、统一预算和 Context Manifest，并明确使用部署后的增量窗口评估效果及供应商侧限制。
+- 思路：Prompt Cache 按共同前缀复用；任何位于长历史之前的时间戳、检索结果或 Memory 变化都会让后续缓存失效。因此稳定规则和既有历史必须前置，任务动态材料后置，同时所有实际发送给模型的 Message 与 Tool Schema 必须进入同一个预算。Context Manifest 只保存结构化选择元数据和哈希，不重复保存敏感完整 Prompt。
+- 验证：运行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=ContextManagerTest,MemoryStoreTest,RunProcessorTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，14 项定向测试通过；随后运行 `.\mvnw.cmd test`，全模块 141 项测试通过，覆盖稳定前缀顺序及哈希、Run 基准时间稳定性、工具 Schema 计入估算、Memory 超限裁剪、按 Run 隔离提取来源及既有审批/恢复/Plan/Sandbox 回归。`clean test` 因正在运行的 Server 锁定既有 JAR 无法清理而停止，未擅自终止服务。
+
 ### 定时任务固定模型、专家与小队
 
 - 变更：定时任务新增持久化的模型方案、执行专家和执行小队选择。模型选择直接写入 Run；专家作为 Run 的 Agent Profile；小队使用其 Leader 并将成员、并发和审查要求保存为协作策略与可恢复 Plan。旧任务的新增字段均为空，继续保留原有模板/服务端默认回退行为。

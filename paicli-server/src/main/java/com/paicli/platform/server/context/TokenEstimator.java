@@ -1,6 +1,7 @@
 package com.paicli.platform.server.context;
 
 import com.paicli.platform.server.model.ModelMessage;
+import com.paicli.platform.server.model.ModelToolDefinition;
 
 import java.util.List;
 
@@ -19,6 +20,15 @@ public final class TokenEstimator {
             for (var call : message.toolCalls()) {
                 total += 12 + estimateText(call.name()) + estimateText(String.valueOf(call.arguments()));
             }
+        }
+        return total;
+    }
+
+    public static int estimateTools(List<ModelToolDefinition> tools) {
+        int total = 0;
+        for (ModelToolDefinition tool : tools) {
+            total += 16 + estimateText(tool.name()) + estimateText(tool.description())
+                    + estimateText(String.valueOf(tool.parameters()));
         }
         return total;
     }

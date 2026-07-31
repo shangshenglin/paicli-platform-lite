@@ -1,5 +1,6 @@
 package com.paicli.platform.server.tool;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.SandboxDriver;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
@@ -18,33 +19,58 @@ public class ToolRouter {
     private final SandboxDriver sandboxDriver;
     private final ArtifactStore artifactStore;
     private final List<ServerToolProvider> providers;
+    private final ToolCatalog toolCatalog;
+    private final ObjectMapper mapper = new ObjectMapper();
     private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("execute_command");
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
             "list_dir", "read_file", "read_artifact", "load_skill", "read_skill_resource",
             "search_knowledge", "web_search", "web_fetch", "github_repo_fetch", "session_search",
-            "get_agent_result", "list_agents", "list_agent_profiles");
+            "get_agent_result", "list_agents", "list_agent_profiles", "tool_search");
 
     @Autowired
     public ToolRouter(SandboxDriver sandboxDriver, ArtifactStore artifactStore,
-                      List<ServerToolProvider> providers) {
+                      List<ServerToolProvider> providers, ToolCatalog toolCatalog) {
         this.sandboxDriver = sandboxDriver;
         this.artifactStore = artifactStore;
         this.providers = providers.stream()
                 .sorted(Comparator.comparing(ServerToolProvider::id))
                 .toList();
+        this.toolCatalog = toolCatalog;
     }
 
     public ToolRouter(SandboxDriver sandboxDriver) {
         this.sandboxDriver = sandboxDriver;
         this.artifactStore = null;
         this.providers = List.of();
+        this.toolCatalog = new ToolCatalog();
     }
 
     public ToolRouter(SandboxDriver sandboxDriver, ArtifactStore artifactStore) {
-        this(sandboxDriver, artifactStore, List.of());
+        this.sandboxDriver = sandboxDriver;
+        this.artifactStore = artifactStore;
+        this.providers = List.of();
+        this.toolCatalog = new ToolCatalog();
     }
 
     public ToolResult execute(ToolRequest request) {
+        if ("tool_search".equals(request.name())) {
+            long start = System.nanoTime();
+            try {
+                String query = String.valueOf(request.arguments().getOrDefault("query", ""));
+                int limit = integer(request.arguments(), "limit", 8);
+                var entries = toolCatalog.search(query, limit, Set.of());
+                String content = mapper.writeValueAsString(Map.of(
+                        "query", query,
+                        "activatedTools", entries.stream().map(ToolCatalog.ToolDirectoryEntry::name).toList(),
+                        "tools", entries,
+                        "guidance", "Matching full schemas will be available on the next model turn."));
+                return ToolResult.success(request.toolCallId(), content,
+                        (System.nanoTime() - start) / 1_000_000);
+            } catch (Exception e) {
+                return ToolResult.failure(request.toolCallId(), e.getMessage(),
+                        (System.nanoTime() - start) / 1_000_000);
+            }
+        }
         for (ServerToolProvider provider : providers) {
             if (provider.supports(request.name())) {
                 return provider.execute(request);

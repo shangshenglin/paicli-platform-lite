@@ -110,7 +110,13 @@ Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`r
 
 ## Memory 与上下文
 
-Run 完成后先创建持久化 `memory_extractions` 任务，再由 Worker 提取带类型、层级、置信度和来源的 L1/L2/L3 Memory。同 key 变化和人工编辑都先写入 `memory_revisions`。当前 Memory 还保存结构化 payload、生命周期状态、来源类型/ID/修订、有效期、supersedes 和 checksum；自动提取写入 `memory_sources`，同 canonical key 内容变化记录 `memory_conflicts` 供人工审计。召回综合词法/语义相关性、置信度、时间衰减、置顶和稳定 L3 偏好；显式 REST CRUD 是人工纠错边界。
+ContextManager 把缓存稳定性与输入预算作为同一个组装边界处理。基础指令、专家配置、项目规则和 Skill 索引是稳定系统前缀；摘要及当前 Run 之前的历史位于 Run 动态块之前，使新 Run 可以复用已有长会话前缀；运行基准时间、工作区、RAG、Memory 和当前 Run 消息位于动态尾部。同一 Run 始终使用其持久化创建时间，不在每轮写入变化的墙钟时间。输入估算同时计算 Message 与 Tool Definition，RAG 和 Memory 只使用必需上下文之后的剩余预算，必要时保留 XML 关闭标签并写入明确裁剪标记。
+
+每次模型调用前持久化 `context.prepared` Event，形成轻量 Context Manifest：包含上下文/输出/硬输入上限、总估算 Token、Tool Definition Token、各区块 Token、可复用前缀 Token 与 SHA-256、稳定/摘要/历史/当前 Run 消息数、PlanState 是否注入、RAG citation/命中理由、被选 Memory id/选择理由、完整工具名/选择理由、按需激活工具，以及 RAG/Memory 是否纳入、裁剪或丢弃。它不重复保存完整 Prompt，但可以解释缓存命中、上下文淘汰和 Memory 召回行为。
+
+Run 完成后先创建持久化 `memory_extractions` 任务，并在创建时冻结该 Run 的 Message id、sequence、role、content 和 tool call 引用；Worker 只能读取 `source_snapshot_json`，不能读取稍后变化的 Session。每条提取结果把实际证据 Message id、起止 sequence 和摘录写入 `memory_sources`，API 可将 Memory 回跳到具体消息或工具结果。旧任务的空快照保留兼容读取路径。
+
+Worker 提取带类型、层级和置信度的 L1/L2/L3 Memory。同 key 变化和人工编辑先写 `memory_revisions`；高相似候选复用 canonical key，中等相似候选进入 `memory_conflicts`，长期未访问且未置顶的 L1 进入 `STALE`。召回综合词法/语义相关性、置信度、时间衰减、类型配额、置顶、稳定 L3 偏好和历史反馈。`memory_usage_feedback` 保存每个 Run 实际选入上下文的 Memory；Run 终态以及 Plan 验证通过/返工更新 outcome，形成后续排序信号。显式 REST CRUD 仍是人工纠错边界。
 
 Memory Wiki 不是第二份知识库，也不迁移或改写旧 Memory。它从同一项目的现有 Memory 派生页面视图：页面标题从内容首句生成，内部 key 只作为稳定链接标识；LLM 在确有依赖时以 `[[canonical-key]]` 写入明确关联，系统再补充同标签关联和反向引用。Console 以 L1/L2/L3 分栏地图渲染这些关系，并限制单层节点数以保持可读性。页面继续复用原有来源、修订、置信度、启停和确认状态，因此人工可以从 Wiki 直接回到可审计的 Memory 记录。
 
@@ -118,9 +124,38 @@ DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工�
 
 项目规则属于受控上下文，不是自治 Memory。系统只从全局、项目和 Run 工作区的数据根目录读取 `AGENTS.md` / `PAI.md`，更具体层覆盖通用层，并受总字符预算约束。
 
+扩展工具使用两段式发现。默认模型请求只带文件/命令/Artifact 和 `tool_search` 等核心 Schema；Knowledge、Skill、Web、MCP 与 Multi-Agent Provider 仍在 Server 目录注册，但只有模型调用 `tool_search` 命中后才在下一轮注入完整 Schema。显式 Agent Profile 工具白名单仍定义能力上限，发现结果不能扩大权限。这样既降低工具 Schema Token，也避免未使用 Provider 的 Schema 变化破坏缓存前缀。
+
+ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计划状态、已验证事实、未验证假设、技术决策、失败尝试、待办与下一步、证据引用。模型摘要必须通过节名、顺序和字符预算校验；否则使用同 Schema 的确定性降级摘要。证据引用包含 message id/sequence/tool call id，使摘要后的续作仍能区分证据和假设。
+
+## Prompt Cache 命中率优化
+
+优化前观测样本为 `8,714,118` 输入 Token、`544,640` 缓存命中 Token，累计命中率约 `6.25%`。旧组装顺序在历史消息之前注入每轮变化的 `Instant.now()`、运行工作区、RAG 和 Memory；Prompt Cache 按共同前缀复用，因此任一早期动态值变化都会让其后的长会话失去复用机会。
+
+新的上下文顺序固定为：
+
+```text
+base/safety/agent Prompt
+→ Agent Profile / Project Rules / Skill Index
+→ Conversation Summary
+→ Prior Runs' Conversation
+→ Run Started Time / Workspace / RAG / Memory
+→ Current Run Conversation
+```
+
+该顺序有三个缓存边界：
+
+1. **静态能力边界**：基础指令、专家、项目规则和 Skill 索引稳定排序；只有配置或受控文件真实变化才失效。
+2. **会话复用边界**：已完成历史位于当前 Run 动态块之前；创建下一 Run 时，新查询引起的 RAG/Memory 变化不会破坏已有历史前缀。
+3. **Run 内复用边界**：动态块使用持久化 Run 创建时间和稳定工作区；同一 Run 后续 ReAct 轮次只在尾部追加 assistant/tool 消息。
+
+输入预算同时包含 Tool Definition Token。ContextManager 先计算稳定指令、摘要、历史、Runtime、PlanState、当前 Run 和工具 Schema 的必需成本，再把剩余预算分配给 RAG 与 Memory；裁剪不会突破硬输入上限。默认只常驻核心 Tool Schema，扩展 Schema 通过 `tool_search` 按需加载。`context.prepared` Event 保存轻量 Context Manifest，包括输入/输出上限、估算输入、各区块/工具 Token、可复用前缀 Token/SHA-256、检索引用、Memory 选择、工具激活及裁剪状态，支持把供应商返回的 `cachedInputTokens` 与实际上下文结构关联分析。
+
+验证缓存效果时必须使用新版本部署后的增量 `cachedInputTokens / inputTokens`，不能直接用历史累计比率。模型切换、工具白名单变化、项目规则变化、摘要重写和供应商最小可缓存前缀仍会造成合理失效；供应商不支持或未开启 Prompt Cache 时，结构优化不会凭空产生缓存命中。
+
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 25，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环，22 为专家思考配置和 Session 工作空间归属继承，23 为类型化 Plan Graph Edge 与确定性路由，24 为可复用执行小队，25 为 Delegation Graph 依赖、资源与终态传播。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 27，其中 12 为 Agent 评测，13 为生产级 Run 状态机，14 为评测输出 Token 口径与 SQLite 并发加固，15 为 Plan Runtime 基础表，16 为 Plan 调度、Async Job 与 Validation Check，17–18 为专家 Profile 与 delegated child Run 派发，19 为 Plan Step 领取租约与恢复元数据，20 为类型化 Memory、RAG 查询规划和 Plan 绑定 Agent 委派元数据，21 为受控并行 Plan Step 与 Agent Feedback 闭环，22 为专家思考配置和 Session 工作空间归属继承，23 为类型化 Plan Graph Edge 与确定性路由，24 为可复用执行小队，25 为 Delegation Graph 依赖、资源与终态传播，26 为 Run/Agent Profile 默认 Shell，27 为不可变 Memory 来源快照、source span 与使用效果反馈。
 
 连接策略和迁移目录与领域 Store 分离。定时维护执行被动 WAL checkpoint，并按显式配置清理过期 Event/Audit、孤儿 Artifact 和临时文件。Knowledge、Attachment 和 Artifact 采用临时文件、fsync、原子替换；索引中断后可按正文元数据重建。
 

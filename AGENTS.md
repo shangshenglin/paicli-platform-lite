@@ -19,7 +19,10 @@
 - 数据库行为修改必须补迁移兼容和 Store 测试；API 行为修改必须同步 README/OpenAPI。
 - 项目规则只从受控 data/workspace 根目录读取，并受总字符预算限制。
 - 不提交 `.env`、`data/`、`backups/`、`target/`。
-- 任意会话、任意工作区、任意分支只要修改代码、脚本、配置、测试、文档、静态资源或产品站点，都必须同步更新根目录 `changeLog.md`，并在同一次提交中说明变更、思路和验证。
+- 任意会话、任意工作区、任意分支只要修改代码、脚本、配置、测试、文档、静态资源或产品站点，都必须在同一工作项、同一次提交中同步更新根目录 `changeLog.md`。日志必须明确写出变更、思路和验证；没有验证必须说明原因，不能省略。
+- 文档同步是完成条件，不是可选收尾。除 `changeLog.md` 外，必须按变更影响同步对应文档：运行行为/架构边界更新 `README.md` 和 `docs/architecture.md`；阶段完成度或后续范围更新 `docs/phases.md`；API 路径、请求、响应或错误语义更新 OpenAPI 注解和 README API 说明；配置、脚本、启动方式更新 README 配置/运行说明；Sandbox 行为更新 `docs/docker-sandbox.md`；产品站能力或展示更新 `paicli-site/README.md` 及相关产品说明。
+- 交付前必须检查实际修改文件与文档覆盖关系。只更新代码和 `changeLog.md`、但遗漏受影响的 README/架构/API/配置/阶段文档，视为任务未完成；如果某类文档确实不适用，必须在 `changeLog.md` 的思路或验证中明确说明“不适用”及理由。
+- 纯问答、只读诊断且没有修改仓库文件时，不要求制造文档变更；一旦产生仓库修改，上述文档门禁立即生效。更新 `changeLog.md` 本身不递归要求再新增一条日志。
 - 模型 content/reasoning delta 必须批量持久化，不能在网络流回调中对每个 token 同步写 SQLite。
 - Console 的 `.app -> .workspace -> .chat/.detail -> .messages/.events` 高度链必须保持 `min-height: 0` 和受控 Grid 行，避免内容撑高视口后让内层滚动失效。
 - 删除 Session 必须先拒绝存在活跃 Run 的会话，再于同一事务删除 Approval / ToolCall / Event / Artifact / ModelUsage / MemoryExtraction / Message / Run；删除分组只将会话移到未分组。
@@ -31,5 +34,14 @@
 .\mvnw.cmd clean package
 .\scripts\start-local.ps1
 ```
+
+交付前还必须执行文档门禁检查：
+
+```powershell
+git diff --name-only
+git diff --check
+```
+
+根据文件清单逐项确认 `changeLog.md` 和受影响文档已经同步；不能仅凭测试通过判定完成。
 
 架构与阶段状态见 `docs/architecture.md`、`docs/phases.md`；完整演进记录和后续修改规范见 `changeLog.md`。

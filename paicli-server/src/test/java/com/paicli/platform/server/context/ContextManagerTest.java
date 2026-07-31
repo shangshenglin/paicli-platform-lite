@@ -3,6 +3,7 @@ package com.paicli.platform.server.context;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
+import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.model.ModelToolDefinition;
@@ -137,6 +138,119 @@ class ContextManagerTest {
         assertThat(prepared.compaction().beforeTokens()).isLessThan(128_000);
         assertThat(store.activeMessages(session.id()))
                 .anyMatch(message -> "summary".equals(message.role()))
-                .anyMatch(message -> message.content().contains("Conversation summary"));
+                .anyMatch(message -> message.content().contains("## 目标与硬约束"));
+    }
+
+    @Test
+    void keepsReusableHistoryBeforeRunDynamicContextAndReportsItsManifest() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("cacheable", "alpha");
+        var previous = store.createRun(session.id(), "previous question");
+        store.appendMessage(session.id(), previous.id(), "assistant", "previous answer");
+        store.markRunStatus(previous.id(), RunStatus.COMPLETED);
+        var current = store.createRun(session.id(), "current question");
+
+        var first = manager.prepare(session.id(), current.id());
+        var second = manager.prepare(session.id(), current.id());
+        List<String> contents = first.request().messages().stream().map(message -> message.content()).toList();
+        int previousAnswer = contents.indexOf("previous answer");
+        int runtime = java.util.stream.IntStream.range(0, contents.size())
+                .filter(index -> contents.get(index).contains("<runtime_context>")).findFirst().orElseThrow();
+        int currentQuestion = contents.indexOf("current question");
+
+        assertThat(previousAnswer).isLessThan(runtime);
+        assertThat(runtime).isLessThan(currentQuestion);
+        assertThat(first.manifest().priorConversationMessageCount()).isEqualTo(2);
+        assertThat(first.manifest().currentRunMessageCount()).isEqualTo(1);
+        assertThat(first.manifest().toolDefinitionTokens()).isPositive();
+        assertThat(first.manifest().reusablePrefixTokens()).isPositive();
+        assertThat(first.manifest().reusablePrefixSha256()).isEqualTo(second.manifest().reusablePrefixSha256());
+        assertThat(first.estimatedInputTokens()).isEqualTo(
+                TokenEstimator.estimateMessages(first.request().messages())
+                        + TokenEstimator.estimateTools(first.request().tools()));
+    }
+
+    @Test
+    void trimsOptionalMemoryWithinTheUnifiedInputBudget() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 3_000, 256,
+                0.80, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("bounded", "alpha");
+        for (int index = 0; index < 20; index++) {
+            store.createMemory("alpha", "memory-" + index, "project fact " + index + " " + "x".repeat(800), "fact");
+        }
+        var run = store.createRun(session.id(), "use relevant project memory");
+
+        var prepared = manager.prepare(session.id(), run.id());
+
+        assertThat(prepared.manifest().memoryIncluded()).isTrue();
+        assertThat(prepared.manifest().memoryTruncated()).isTrue();
+        assertThat(prepared.estimatedInputTokens()).isLessThanOrEqualTo(prepared.manifest().hardInputLimit());
+        assertThat(prepared.request().messages()).anyMatch(message ->
+                message.content().contains("[context truncated to fit the model input budget]"));
+    }
+
+    @Test
+    void activatesDeferredToolSchemaOnlyAfterToolSearchResult() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), deferredToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("deferred tools", "alpha");
+        var run = store.createRun(session.id(), "find project knowledge");
+
+        var before = manager.prepare(session.id(), run.id());
+        assertThat(before.request().tools()).extracting("name")
+                .contains("tool_search")
+                .doesNotContain("search_knowledge");
+
+        var search = new com.paicli.platform.server.model.ModelResponse.ToolPlan(
+                "call_search", "tool_search", Map.of("query", "knowledge"));
+        var searchMessage = store.appendAssistantToolCall(session.id(), run.id(), "", null,
+                mapper.writeValueAsString(List.of(search)));
+        var searchResult = store.appendToolResult(session.id(), run.id(), "call_search",
+                "{\"activatedTools\":[\"search_knowledge\"]}");
+        store.archiveAndAddSummary(session.id(), run.id(),
+                List.of(searchMessage.id(), searchResult.id()), "tool directory was searched");
+
+        var after = manager.prepare(session.id(), run.id());
+        assertThat(after.request().tools()).extracting("name").contains("search_knowledge");
+        assertThat(after.manifest().activatedToolNames()).containsExactly("search_knowledge");
+        assertThat(after.manifest().toolNames()).contains("tool_search", "search_knowledge");
+        assertThat(after.manifest().toolSelectionReasons())
+                .containsEntry("tool_search", "core-context-tool")
+                .containsEntry("search_knowledge", "tool-search-activation");
+        assertThat(after.manifest().sectionTokens()).containsKeys(
+                "stable", "priorConversation", "currentRun", "tools");
+    }
+
+    private static ToolCatalog deferredToolCatalog() {
+        ServerToolProvider deferred = new ServerToolProvider() {
+            @Override public String id() { return "knowledge-test"; }
+            @Override public List<ModelToolDefinition> definitions() {
+                return List.of(new ModelToolDefinition(
+                        "search_knowledge", "Search indexed project knowledge",
+                        Map.of("type", "object", "properties", Map.of("query", Map.of("type", "string")))));
+            }
+            @Override public boolean supports(String toolName) { return "search_knowledge".equals(toolName); }
+            @Override public ToolResult execute(ToolRequest request) { return null; }
+        };
+        return new ToolCatalog(List.of(deferred));
     }
 }

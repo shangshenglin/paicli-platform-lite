@@ -70,7 +70,10 @@ public class MemoryController {
     }
 
     @GetMapping("/{memoryId}/sources")
-    @Operation(summary = "List auditable sources behind one Memory wiki page")
+    @Operation(
+            summary = "List auditable sources behind one Memory wiki page",
+            description = "Automatic Memory sources include the frozen source message ids, inclusive message "
+                    + "sequence span, source excerpt, Run id and source revision.")
     public List<SqliteRuntimeStore.MemorySource> sources(@PathVariable String memoryId) {
         if (store.findMemoryUnit(memoryId).isEmpty()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "memory not found");

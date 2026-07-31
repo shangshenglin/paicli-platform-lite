@@ -127,6 +127,7 @@ public class RunProcessor {
                             agentProfile.orElse(null)));
             var request = profile.map(value -> context.request().withRoute(productivity.route(value)))
                     .orElse(context.request());
+            store.appendEvent(run.id(), "context.prepared", json(context.manifest()));
             if (productivity != null) {
                 budgetReservationKey = run.id() + ":" + run.currentStep();
                 long reservedTokens = (long) context.estimatedInputTokens() + request.maxOutputTokens();
@@ -165,6 +166,7 @@ public class RunProcessor {
                     return;
                 }
                 notify(run, "COMPLETED", "任务已完成");
+                store.recordMemoryOutcome(run.id(), "RUN_COMPLETED");
                 if (memoryService != null) {
                     try { memoryService.enqueue(run.id()); }
                     catch (Exception e) { store.appendEvent(run.id(), "memory.enqueue_failed", json(Map.of(
@@ -216,6 +218,7 @@ public class RunProcessor {
                 return;
             }
             store.failRun(run.id(), e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            store.recordMemoryOutcome(run.id(), "RUN_FAILED");
             store.requeueWaitingParentRuns(run.id());
             notify(run, "FAILED", e.getMessage());
             if (metrics != null) metrics.failed(System.nanoTime() - processStarted);
@@ -241,6 +244,7 @@ public class RunProcessor {
             if (status == ApprovalStatus.DENIED) {
                 store.failTool(call.id(), "Tool call denied by user");
                 store.failRun(run.id(), "Tool call denied by user");
+                store.recordMemoryOutcome(run.id(), "RUN_FAILED");
                 store.requeueWaitingParentRuns(run.id());
                 notify(run, "FAILED", "工具调用被拒绝");
                 toolRouter.release(run.id());
@@ -273,6 +277,7 @@ public class RunProcessor {
                         "toolCalls", budget.toolCalls(), "maxToolCalls", budget.maxToolCalls(),
                         "elapsedSeconds", budget.elapsedSeconds(), "maxElapsedSeconds", budget.maxElapsedSeconds())));
         if (!completed) return false;
+        store.recordMemoryOutcome(run.id(), "RUN_COMPLETED");
         store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
                 "message", budget.message(),
                 "tokens", budget.tokens(),
