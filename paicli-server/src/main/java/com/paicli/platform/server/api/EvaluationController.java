@@ -6,6 +6,7 @@ import com.paicli.platform.server.evaluation.EvaluationService;
 import com.paicli.platform.server.evaluation.EvaluationStarterPackService;
 import com.paicli.platform.server.store.EvaluationStore;
 import jakarta.validation.Valid;
+import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -102,9 +103,12 @@ public class EvaluationController {
     }
 
     @PostMapping("/suites/{suiteId}/executions") @ResponseStatus(HttpStatus.ACCEPTED)
+    @Operation(summary = "Start single-Agent or AgentTeam evaluation trials",
+            description = "Set agentTeamId to run every trial with that team's Leader and collaboration policy.")
     public EvaluationStore.EvaluationExecution start(@PathVariable String suiteId,
             @RequestBody(required = false) ApiDtos.EvaluationStartRequest request) {
         return service.start(suiteId, request == null ? null : request.modelProfileId(),
+                request == null ? null : request.agentTeamId(),
                 request == null ? null : request.trialCount(),
                 request == null ? null : request.passThreshold());
     }

@@ -279,18 +279,39 @@ public class ProductivityStore {
                                    String leaderAgentProfileId, String memberAgentProfileIdsJson,
                                    int maxExperts, int maxDepth, boolean requireReviewer,
                                    boolean requireRunner, boolean enabled) {
+        return saveAgentTeam(id, projectKey, name, description, leaderAgentProfileId,
+                memberAgentProfileIdsJson, maxExperts, maxDepth, requireReviewer, requireRunner,
+                "", "{}", "[]", "CAPABILITY_MATCH", "VALIDATED_REVIEW", null,
+                Math.max(1, Math.min(maxExperts, 20)), enabled);
+    }
+
+    public AgentTeam saveAgentTeam(String id, String projectKey, String name, String description,
+                                   String leaderAgentProfileId, String memberAgentProfileIdsJson,
+                                   int maxExperts, int maxDepth, boolean requireReviewer,
+                                   boolean requireRunner, String teamInstructions,
+                                   String memberRolesJson, String capabilityTagsJson,
+                                   String routingPolicy, String completionPolicy,
+                                   String fallbackAgentProfileId, int maxConcurrency,
+                                   boolean enabled) {
         String key = project(projectKey);
         String resolvedId = blank(id) ? id("team") : id.trim();
         Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO agent_teams(id,project_key,name,description,leader_agent_profile_id," +
                         "member_agent_profile_ids_json,max_experts,max_depth,require_reviewer,require_runner," +
-                        "enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+                        "team_instructions,member_roles_json,capability_tags_json,routing_policy,completion_policy," +
+                        "fallback_agent_profile_id,max_concurrency,enabled,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
                         "ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description," +
                         "leader_agent_profile_id=excluded.leader_agent_profile_id," +
                         "member_agent_profile_ids_json=excluded.member_agent_profile_ids_json," +
                         "max_experts=excluded.max_experts,max_depth=excluded.max_depth," +
                         "require_reviewer=excluded.require_reviewer,require_runner=excluded.require_runner," +
+                        "team_instructions=excluded.team_instructions,member_roles_json=excluded.member_roles_json," +
+                        "capability_tags_json=excluded.capability_tags_json,routing_policy=excluded.routing_policy," +
+                        "completion_policy=excluded.completion_policy," +
+                        "fallback_agent_profile_id=excluded.fallback_agent_profile_id," +
+                        "max_concurrency=excluded.max_concurrency," +
                         "enabled=excluded.enabled,updated_at=excluded.updated_at")) {
             int i = 1;
             ps.setString(i++, resolvedId);
@@ -303,6 +324,15 @@ public class ProductivityStore {
             ps.setInt(i++, Math.max(1, Math.min(maxDepth, 3)));
             ps.setInt(i++, requireReviewer ? 1 : 0);
             ps.setInt(i++, requireRunner ? 1 : 0);
+            ps.setString(i++, value(teamInstructions, 16_000));
+            ps.setString(i++, json(memberRolesJson));
+            ps.setString(i++, json(capabilityTagsJson));
+            ps.setString(i++, value(routingPolicy, 40).isBlank()
+                    ? "CAPABILITY_MATCH" : value(routingPolicy, 40).toUpperCase());
+            ps.setString(i++, value(completionPolicy, 40).isBlank()
+                    ? "VALIDATED_REVIEW" : value(completionPolicy, 40).toUpperCase());
+            ps.setString(i++, nullable(fallbackAgentProfileId));
+            ps.setInt(i++, Math.max(1, Math.min(maxConcurrency, 20)));
             ps.setInt(i++, enabled ? 1 : 0);
             ps.setString(i++, now.toString());
             ps.setString(i, now.toString());
@@ -597,7 +627,7 @@ public class ProductivityStore {
     private static TaskTemplate template(ResultSet r)throws SQLException{return new TaskTemplate(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("shortcut"),r.getString("prompt"),r.getString("variables_json"),r.getString("attachment_requirements"),r.getString("allowed_tools"),r.getString("model_profile_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")),instant(r.getString("last_used_at")),r.getInt("use_count"));}
     private static ModelProfile profile(ResultSet r)throws SQLException{return new ModelProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("base_url"),r.getString("api_key_env"),r.getString("model"),r.getString("fallback_model"),r.getInt("max_context_tokens"),r.getInt("max_output_tokens"),r.getDouble("input_price"),r.getDouble("output_price"),r.getInt("local_model")!=0,r.getInt("is_default")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static AgentProfile agentProfile(ResultSet r)throws SQLException{return new AgentProfile(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("system_prompt"),r.getString("model_profile_id"),r.getString("thinking_mode"),r.getString("reasoning_effort"),r.getString("execution_shell"),r.getString("tool_names_json"),r.getString("skill_names_json"),r.getString("output_schema"),r.getString("collaboration_role"),r.getString("handoff_policy"),r.getString("workspace_scope"),r.getString("approval_policy"),r.getString("template_key"),r.getInt("template_version"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
-    private static AgentTeam agentTeam(ResultSet r)throws SQLException{return new AgentTeam(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("leader_agent_profile_id"),r.getString("member_agent_profile_ids_json"),r.getInt("max_experts"),r.getInt("max_depth"),r.getInt("require_reviewer")!=0,r.getInt("require_runner")!=0,r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
+    private static AgentTeam agentTeam(ResultSet r)throws SQLException{return new AgentTeam(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("description"),r.getString("leader_agent_profile_id"),r.getString("member_agent_profile_ids_json"),r.getInt("max_experts"),r.getInt("max_depth"),r.getInt("require_reviewer")!=0,r.getInt("require_runner")!=0,r.getString("team_instructions"),r.getString("member_roles_json"),r.getString("capability_tags_json"),r.getString("routing_policy"),r.getString("completion_policy"),r.getString("fallback_agent_profile_id"),r.getInt("max_concurrency"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static ScheduledTask schedule(ResultSet r)throws SQLException{return new ScheduledTask(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("template_id"),r.getString("schedule_type"),r.getString("schedule_value"),r.getString("variables_json"),r.getString("model_profile_id"),r.getString("agent_profile_id"),r.getString("agent_team_id"),r.getInt("enabled")!=0,instant(r.getString("next_run_at")),instant(r.getString("last_run_at")),r.getString("last_run_id"),instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationChannel channel(ResultSet r)throws SQLException{return new NotificationChannel(r.getString("id"),r.getString("project_key"),r.getString("name"),r.getString("type"),r.getString("endpoint"),r.getString("secret_env"),r.getString("events"),r.getInt("enabled")!=0,instant(r.getString("created_at")),instant(r.getString("updated_at")));}
     private static NotificationDelivery delivery(ResultSet r)throws SQLException{
@@ -649,6 +679,9 @@ public class ProductivityStore {
     public record AgentTeam(String id,String projectKey,String name,String description,
                             String leaderAgentProfileId,String memberAgentProfileIdsJson,
                             int maxExperts,int maxDepth,boolean requireReviewer,boolean requireRunner,
+                            String teamInstructions,String memberRolesJson,String capabilityTagsJson,
+                            String routingPolicy,String completionPolicy,String fallbackAgentProfileId,
+                            int maxConcurrency,
                             boolean enabled,Instant createdAt,Instant updatedAt){}
     public record BudgetPolicy(String projectKey,long dailyTokens,long monthlyTokens,double dailyCost,double monthlyCost,
                                double warnRatio,int maxConcurrentRuns,Instant updatedAt){}

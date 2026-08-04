@@ -100,6 +100,12 @@ public class ApprovalService {
         return store.pendingApprovals();
     }
 
+    public List<ApprovalRecord> pendingForProject(String projectKey) {
+        return store.pendingApprovals().stream().filter(approval -> store.findRun(approval.runId())
+                .flatMap(run -> store.findSession(run.sessionId()))
+                .map(session -> session.projectKey().equals(projectKey)).orElse(false)).toList();
+    }
+
     public List<ApprovalRecord> pendingForRunTree(String runId) {
         String rootRunId = store.delegationRootRunId(runId);
         Set<String> visibleRuns = Set.copyOf(store.delegatedRunTree(rootRunId));
@@ -114,6 +120,10 @@ public class ApprovalService {
 
     public boolean deletePolicy(String policyId) {
         return store.deleteApprovalPolicy(policyId);
+    }
+
+    public List<String> deletePolicies(List<String> policyIds) {
+        return store.deleteApprovalPolicies(policyIds);
     }
 
     public ApprovalStatus statusForTool(String toolCallId) {

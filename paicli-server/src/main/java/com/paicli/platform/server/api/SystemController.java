@@ -23,7 +23,7 @@ public class SystemController {
     public Map<String, Object> info() {
         return Map.of(
                 "name", "paicli-platform-lite",
-                "phase", 10,
+                "phase", 24,
                 "sandboxMode", toolRouter.mode(),
                 "database", store.databasePath().toString());
     }

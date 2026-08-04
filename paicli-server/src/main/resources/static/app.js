@@ -1,4 +1,18 @@
 const $ = id => document.getElementById(id);
+
+function storedCollaborationTaskReturn() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem('paicli_collaboration_task_return') || 'null');
+    if (!value?.taskId || !value?.sessionId) return null;
+    return {
+      taskId: String(value.taskId),
+      taskTitle: String(value.taskTitle || '协作任务'),
+      sessionId: String(value.sessionId),
+      view: ['task', 'collaboration', 'execution'].includes(value.view) ? value.view : 'execution'
+    };
+  } catch (_) { return null; }
+}
+
 const state = {
   sessions: [],
   groups: [],
@@ -19,7 +33,20 @@ const state = {
   modelProfiles: [],
   agentProfiles: [],
   agentTeams: [],
+  collaborationTasks: [],
+  collaborationTaskHistory: [],
+  selectedCollaborationTaskId: '',
+  collaborationTaskView: 'task',
+  collaborationTaskNotice: '',
+  collaborationReplyToId: '',
+  collaborationTaskSignature: '',
+  collaborationTaskListSignature: '',
+  collaborationTaskRefreshTimer: 0,
+  collaborationTaskRefreshPending: false,
+  collaborationTaskReturn: storedCollaborationTaskReturn(),
   availableSkills: [],
+  managedMemories: [],
+  toolCallNames: new Map(),
   editingAgentProfileId: '',
   editingAgentTeamId: '',
   selectedAgentTeamId: '',
@@ -32,6 +59,7 @@ const state = {
   planRefreshTimer: 0,
   planRefreshPending: false,
   approvalRefreshTimer: 0,
+  approvalInboxRefreshTimer: 0,
   eventCursors: new Map(),
   detailOpen: innerWidth > 1000,
   messageScroll: new Map()
@@ -62,6 +90,10 @@ const agentToolOptions = [
   ['list_agents', '查看子任务状态'],
   ['get_agent_result', '读取子任务结果'],
   ['cancel_agent', '取消子任务'],
+  ['get_collaboration_task', '读取当前协作任务'],
+  ['post_task_comment', '发布任务评论或结论'],
+  ['update_collaboration_task', '更新协作任务状态'],
+  ['create_collaboration_subtask', '创建协作子任务'],
   ['list_dir', '列目录'],
   ['read_file', '读文件'],
   ['write_file', '写文件'],
@@ -74,6 +106,7 @@ const agentToolOptions = [
   ['github_repo_fetch', 'GitHub 仓库读取'],
   ['mcp__github__*', 'GitHub MCP 全部工具']
 ];
+const agentToolNames = new Map(agentToolOptions);
 const expertPlanTools = ['list_plans','get_plan','create_plan','replan_plan','start_plan','cancel_plan'];
 const agentRoleHelp = {
   LEADER: 'Leader：协作入口会优先选择；通常允许 list_agent_profiles / spawn_agent 来拆分和汇总任务。',
@@ -81,6 +114,95 @@ const agentRoleHelp = {
   REVIEWER: 'Reviewer：审查者；建议搭配只读工具和 READ_ONLY 审批策略，用于风险、回归和缺失测试检查。',
   RUNNER: 'Runner：验证执行者；通常允许 execute_command，用于运行测试、构建或检查命令。'
 };
+
+function agentProfileName(id, fallback = '未知专家') {
+  return state.agentProfiles.find(value => value.id === id)?.name || fallback;
+}
+
+function agentTeamName(id, fallback = '未知团队') {
+  return state.agentTeams.find(value => value.id === id)?.name || fallback;
+}
+
+function modelProfileName(id, fallback = '项目默认模型') {
+  const profile = state.modelProfiles.find(value => value.id === id)
+    || (!id ? state.modelProfiles.find(value => value.defaultProfile) : null);
+  return profile ? `${profile.name} · ${profile.model}` : fallback;
+}
+
+function collaborationEntityName(type, id) {
+  if (type === 'USER' || type === 'HUMAN') return '用户';
+  if (type === 'AGENT') return agentProfileName(id);
+  if (type === 'TEAM') return agentTeamName(id);
+  if (type === 'SYSTEM') return '系统';
+  return '协作成员';
+}
+
+function toolDisplayName(name) {
+  if (!name) return '工具';
+  if (agentToolNames.has(name)) return agentToolNames.get(name);
+  if (name.startsWith('mcp__')) {
+    const parts = name.split('__');
+    return parts.length >= 3 ? `${parts[1]} · ${parts.slice(2).join(' ')}` : 'MCP 工具';
+  }
+  return name.replaceAll('_', ' ');
+}
+
+function indexMessageToolCalls(messages) {
+  state.toolCallNames.clear();
+  messages.forEach(message => {
+    if (!message.toolCallsJson) return;
+    let calls = [];
+    try { calls = JSON.parse(message.toolCallsJson) || []; }
+    catch (_) { return; }
+    if (!Array.isArray(calls)) return;
+    calls.forEach(call => {
+      const id = call.id || call.callId || call.providerCallId;
+      const name = call.name || call.toolName || call.function?.name;
+      if (id && name) state.toolCallNames.set(id, name);
+    });
+  });
+}
+
+function toolCallDisplayName(id) {
+  return toolDisplayName(state.toolCallNames.get(id));
+}
+
+function replaceEntityReferences(value) {
+  let text = String(value ?? '');
+  const named = [
+    ...state.agentProfiles.map(item => [item.id, item.name]),
+    ...state.agentTeams.map(item => [item.id, item.name]),
+    ...state.modelProfiles.map(item => [item.id, `${item.name} · ${item.model}`]),
+    ...state.collaborationTasks.map(item => [item.id, item.title]),
+    ...state.collaborationTaskHistory.map(item => [item.task.id, item.task.title]),
+    ...state.managedMemories.map(item => [item.id, memoryDisplayTitle(item)]),
+    ...[...state.toolCallNames].map(([id, name]) => [id, toolDisplayName(name)])
+  ];
+  named.forEach(([id, name]) => {
+    if (id && name) text = text.split(id).join(name);
+  });
+  return text
+    .replace(/\brun_[A-Za-z0-9_-]+\b/g, token => token === state.runId ? '当前执行' : '关联执行')
+    .replace(/\btask_[A-Za-z0-9_-]+\b/g, '协作任务')
+    .replace(/\bagent_[A-Za-z0-9_-]+\b/g, '未知专家')
+    .replace(/\bteam_[A-Za-z0-9_-]+\b/g, '未知团队')
+    .replace(/\b(?:tool|call)_[A-Za-z0-9_-]+\b/g, '工具调用')
+    .replace(/\bmemory_[A-Za-z0-9_-]+\b/g, '记忆条目')
+    .replace(/\btask_id\b/gi, '任务')
+    .replace(/\bagent_profile_id\b/gi, '专家');
+}
+
+function runMetaLabel(run) {
+  if (!run) return '尚未开始';
+  return `${statusNames[run.status] || run.status} · ${agentProfileName(run.agentProfileId, '默认专家')} · ${modelProfileName(run.modelProfileId)}`;
+}
+
+function taskRunModelName(run) {
+  if (run.modelName) return run.modelProfileName
+    ? `${run.modelProfileName} · ${run.modelName}`
+    : run.modelName;
+  return modelProfileName(run.modelProfileId, '服务端默认模型');
+}
 
 function headers(json = true) {
   const value = json ? {'Content-Type': 'application/json'} : {};
@@ -205,7 +327,7 @@ function configureApprovalPolling(enabled) {
 }
 
 function updateComposerVisibility() {
-  const hidden = !state.sessionId && state.homeMode === 'collaboration';
+  const hidden = !state.sessionId && ['collaboration', 'tasks'].includes(state.homeMode);
   $('compose').hidden = hidden;
 }
 
@@ -300,6 +422,49 @@ function renderHomeModelPicker() {
   return picker;
 }
 
+async function refreshApprovalInbox() {
+  const button = $('approvalInbox');
+  if (!button) return [];
+  try {
+    const values = await api(`/v1/approvals?projectKey=${encodeURIComponent(currentProjectKey())}`);
+    button.hidden = !values.length;
+    $('approvalInboxCount').textContent = String(values.length);
+    if ($('approvalInboxDialog').open) renderApprovalInbox(values);
+    for (const approval of values) {
+      if (!state.notifiedApprovalIds.has(approval.id)) {
+        state.notifiedApprovalIds.add(approval.id);
+        if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          new Notification('PaiCLI · 待审批', {body: approval.reason || '专家操作正在等待确认'});
+        }
+      }
+    }
+    return values;
+  } catch (_) {
+    return [];
+  }
+}
+
+function renderApprovalInbox(values) {
+  const list = $('approvalInboxList');
+  const cards = values.map(approval => {
+    const item = element('article', 'managed-item approval');
+    item.append(
+      element('strong', '', approval.runId === state.runId ? '当前执行等待确认' : '协作执行等待确认'),
+      element('div', 'hint', approval.reason || '需要人工确认后继续')
+    );
+    const actions = element('div', 'actions');
+    const approve = element('button', 'primary', '仅本次允许');
+    const deny = element('button', 'primary deny', '拒绝');
+    approve.onclick = () => resolveApproval(approval.id, 'APPROVED');
+    deny.onclick = () => resolveApproval(approval.id, 'DENIED');
+    actions.append(approve, deny);
+    item.append(actions);
+    return item;
+  });
+  list.replaceChildren(...cards);
+  if (!cards.length) list.append(element('div', 'hint', '当前项目没有待审批操作'));
+}
+
 function renderHomeExecutionPicker() {
   const picker = element('section', 'home-execution-picker');
   const copy = element('div', 'home-execution-copy');
@@ -334,16 +499,12 @@ function selectExecutionShell(shell) {
 
 function renderEmpty() {
   updateComposerVisibility();
+  $('stack').classList.toggle('task-stack', state.homeMode === 'tasks');
   const empty = element('div', 'empty');
   const content = element('div');
-  const switcher = element('div', 'home-mode-switch');
-  const chatMode = element('button', state.homeMode === 'chat' ? 'primary' : 'secondary', '普通对话');
-  const collaborationMode = element('button', state.homeMode === 'collaboration' ? 'primary' : 'secondary', '专家协作');
-  chatMode.onclick = () => setHomeMode('chat');
-  collaborationMode.onclick = () => setHomeMode('collaboration');
-  switcher.append(chatMode, collaborationMode);
-  content.append(switcher);
+  if (state.homeMode === 'tasks') content.className = 'task-home-content';
   if (state.homeMode === 'collaboration') content.append(renderHomeCollaboration());
+  else if (state.homeMode === 'tasks') content.append(renderCollaborationTaskWorkspace());
   else {
     const actions = element('div', 'home-actions');
     const productivity = element('button', 'secondary home-action');
@@ -364,12 +525,700 @@ function renderEmpty() {
   }
   empty.append(content);
   $('stack').replaceChildren(empty);
+  syncGlobalModeSwitch();
+  configureCollaborationTaskPolling(state.homeMode === 'tasks');
+}
+
+function syncGlobalModeSwitch() {
+  document.querySelectorAll('[data-home-mode]').forEach(button => {
+    const active = button.dataset.homeMode === state.homeMode;
+    button.className = active ? 'primary' : 'secondary';
+    button.setAttribute('aria-pressed', String(active));
+  });
 }
 
 function setHomeMode(mode) {
+  if (!['chat', 'collaboration', 'tasks'].includes(mode)) return;
   state.homeMode = mode;
   localStorage.setItem('paicli_home_mode', mode);
-  renderEmpty();
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  showHome();
+}
+
+const collaborationStatusNames = {
+  BACKLOG: '待规划', TODO: '待处理', IN_PROGRESS: '进行中', BLOCKED: '阻塞',
+  IN_REVIEW: '待验收', DONE: '已完成', CANCELED: '已取消'
+};
+
+function renderCollaborationTaskWorkspace() {
+  const workspace = element('section', 'task-workspace');
+  workspace.id = 'collaborationTaskWorkspace';
+  const toolbar = element('div', 'task-workspace-toolbar');
+  const heading = element('div');
+  heading.append(element('h1', '', '协作任务'),
+    element('p', '', '任务长期存在；Agent Run 是一次次可追踪的执行。'));
+  const actions = element('div', 'managed-actions');
+  const refresh = element('button', 'secondary', '刷新');
+  refresh.onclick = refreshCollaborationTaskWorkspace;
+  const create = element('button', 'primary', '新建任务');
+  create.onclick = () => $('collaborationTaskCreate')?.toggleAttribute('open');
+  actions.append(refresh, create);
+  toolbar.append(heading, actions);
+  const createPanel = renderCollaborationTaskCreate();
+  const layout = element('div', 'task-workspace-layout');
+  const listPane = element('aside', 'task-list-pane');
+  const filter = element('select', 'control-select');
+  filter.id = 'collaborationTaskStatusFilter';
+  filter.append(new Option('全部状态', ''));
+  Object.entries(collaborationStatusNames).forEach(([id, label]) => filter.append(new Option(label, id)));
+  filter.onchange = refreshCollaborationTaskWorkspace;
+  const list = element('div', 'task-master-list');
+  list.id = 'collaborationTaskList';
+  listPane.append(filter, list);
+  const detail = element('main', 'task-detail-pane');
+  detail.id = 'collaborationTaskDetail';
+  layout.append(listPane, detail);
+  workspace.append(toolbar, createPanel, layout);
+  requestAnimationFrame(refreshCollaborationTaskWorkspace);
+  return workspace;
+}
+
+function renderCollaborationTaskCreate() {
+  const details = element('details', 'task-create-panel');
+  details.id = 'collaborationTaskCreate';
+  details.append(element('summary', '', '新建协作任务'));
+  const form = element('form', 'task-create-form');
+  form.onsubmit = createCollaborationTask;
+  const quick = element('div', 'task-create-quick');
+  const titleField = element('label', 'form-field');
+  titleField.append(element('span', '', '任务标题'));
+  const title = element('input');
+  title.id = 'collaborationTaskTitle';
+  title.required = true;
+  title.maxLength = 180;
+  title.placeholder = '例如：完成支付链路回归测试';
+  titleField.append(title);
+  const typeField = element('label', 'form-field');
+  typeField.append(element('span', '', '负责人类型'));
+  const type = element('select');
+  type.id = 'collaborationTaskAssigneeType';
+  [['TEAM', 'AgentTeam'], ['AGENT', 'Agent']].forEach(([id, label]) => type.append(new Option(label, id)));
+  typeField.append(type);
+  const assigneeField = element('label', 'form-field');
+  assigneeField.append(element('span', '', '负责人'));
+  const assignee = element('select');
+  assignee.id = 'collaborationTaskAssignee';
+  assignee.required = true;
+  assigneeField.append(assignee);
+  const submit = element('button', 'primary', '创建任务');
+  submit.type = 'submit';
+  const fillAssignees = () => fillCollaborationAssignees(assignee, type.value);
+  type.onchange = fillAssignees;
+  fillAssignees();
+  quick.append(titleField, typeField, assigneeField, submit);
+
+  const advanced = element('details', 'task-create-advanced');
+  advanced.append(element('summary', '', '更多设置'));
+  const advancedGrid = element('div', 'task-create-advanced-grid');
+  const descriptionField = element('label', 'form-field');
+  descriptionField.append(element('span', '', '任务说明（可选）'));
+  const description = element('textarea');
+  description.id = 'collaborationTaskDescription';
+  description.rows = 3;
+  description.placeholder = '背景、范围和约束';
+  descriptionField.append(description);
+  const acceptanceField = element('label', 'form-field');
+  acceptanceField.append(element('span', '', '完成条件（可选）'));
+  const acceptance = element('textarea');
+  acceptance.id = 'collaborationTaskAcceptance';
+  acceptance.rows = 2;
+  acceptance.placeholder = '用于 Agent 或 Team Leader 判断何时提交人工验收';
+  acceptanceField.append(acceptance,
+    element('small', 'hint', '负责人据此提交待验收，最终由人工确认是否完成。'));
+  advancedGrid.append(descriptionField, acceptanceField);
+  advanced.append(advancedGrid);
+  const error = element('div', 'form-error');
+  error.id = 'collaborationTaskCreateError';
+  form.append(quick, advanced, error);
+  details.append(form);
+  return details;
+}
+
+function fillCollaborationAssignees(select, type, selected = '') {
+  let values = [];
+  if (type === 'TEAM') values = state.agentTeams.filter(value => value.enabled);
+  if (type === 'AGENT') values = state.agentProfiles.filter(value => value.enabled);
+  const options = [new Option(type === 'TEAM' ? '选择 AgentTeam' : '选择 Agent', ''),
+    ...values.map(value => new Option(value.name, value.id))];
+  select.replaceChildren(...options);
+  select.value = selected;
+}
+
+async function createCollaborationTask(event) {
+  event.preventDefault();
+  setFormError('collaborationTaskCreateError');
+  const type = $('collaborationTaskAssigneeType').value;
+  const assigneeId = $('collaborationTaskAssignee').value;
+  if (!assigneeId) return setFormError('collaborationTaskCreateError', '请选择任务负责人');
+  try {
+    const task = await api('/v1/collaboration/tasks', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(),
+      title: $('collaborationTaskTitle').value.trim(),
+      description: $('collaborationTaskDescription').value.trim(),
+      acceptanceCriteria: $('collaborationTaskAcceptance').value.trim(),
+      status: 'TODO', priority: 0, assigneeType: type, assigneeId: assigneeId || null, stage: 0
+    })});
+    state.selectedCollaborationTaskId = task.id;
+    state.collaborationTaskNotice = '';
+    event.target.reset();
+    fillCollaborationAssignees($('collaborationTaskAssignee'), $('collaborationTaskAssigneeType').value);
+    $('collaborationTaskCreate').open = false;
+    await refreshCollaborationTaskWorkspace();
+    await loadSidebarHistory();
+  } catch (error) { setFormError('collaborationTaskCreateError', error.message); }
+}
+
+function configureCollaborationTaskPolling(enabled) {
+  clearInterval(state.collaborationTaskRefreshTimer);
+  state.collaborationTaskRefreshTimer = 0;
+  if (!enabled) return;
+  state.collaborationTaskRefreshTimer = setInterval(async () => {
+    if (document.hidden || state.collaborationTaskRefreshPending || !$('collaborationTaskWorkspace')) return;
+    state.collaborationTaskRefreshPending = true;
+    try {
+      await refreshCollaborationTaskWorkspace({background: true});
+    } finally {
+      state.collaborationTaskRefreshPending = false;
+    }
+  }, 3000);
+}
+
+function collaborationTaskListSignature(tasks) {
+  return JSON.stringify(tasks.map(task => [task.id, task.status, task.updatedAt, task.assigneeType, task.assigneeId]));
+}
+
+function collaborationTaskDetailSignature(detail) {
+  return JSON.stringify({
+    task: [detail.task.status, detail.task.updatedAt, detail.task.assigneeType, detail.task.assigneeId],
+    children: detail.children.map(child => [child.id, child.status, child.stage, child.updatedAt]),
+    comments: detail.comments.map(view => [view.comment.id, view.comment.content, view.comment.resolved,
+      view.comment.conclusion, view.comment.createdAt, (view.mentions || []).map(value => `${value.type}:${value.id}`)]),
+    activities: detail.activities.map(activity => [activity.id, activity.activityType, activity.payloadJson]),
+    runs: detail.runs.map(run => [run.runId, run.taskId, run.status, run.modelName, run.createdAt, run.finishedAt]),
+    deliverables: [Boolean(detail.finalDeliveryReady),
+      (detail.workspaceFiles || []).map(file => [file.runId, file.path, file.updatedAt || ''])]
+  });
+}
+
+function collaborationTaskInteractionActive(pane) {
+  const active = document.activeElement;
+  return Boolean(active && pane.contains(active) && active.matches('textarea, input, select'));
+}
+
+function collaborationTaskFormDraft() {
+  if (!$('collaborationCommentContent')) return null;
+  return {
+    content: $('collaborationCommentContent').value,
+    mention: $('collaborationCommentMention')?.value || '',
+    conclusion: Boolean($('collaborationCommentConclusion')?.checked)
+  };
+}
+
+function restoreCollaborationTaskFormDraft(draft) {
+  if (!draft || !$('collaborationCommentContent')) return;
+  $('collaborationCommentContent').value = draft.content;
+  if ($('collaborationCommentMention')) $('collaborationCommentMention').value = draft.mention;
+  if ($('collaborationCommentConclusion')) $('collaborationCommentConclusion').checked = draft.conclusion;
+}
+
+async function refreshCollaborationTaskWorkspace(options = {}) {
+  if (state.homeMode !== 'tasks' || !$('collaborationTaskList')) return;
+  const background = options?.background === true;
+  const filter = $('collaborationTaskStatusFilter')?.value || '';
+  const query = new URLSearchParams({projectKey: currentProjectKey(), limit: '200'});
+  if (filter) query.set('status', filter);
+  try {
+    state.collaborationTasks = await api(`/v1/collaboration/tasks?${query}`);
+    const currentTasks = new Map(state.collaborationTasks.map(task => [task.id, task]));
+    let historyChanged = false;
+    state.collaborationTaskHistory = state.collaborationTaskHistory.map(history => {
+      const task = currentTasks.get(history.task.id);
+      if (!task || collaborationTaskListSignature([task]) === collaborationTaskListSignature([history.task])) return history;
+      historyChanged = true;
+      return {...history, task};
+    });
+    if (historyChanged) renderSessions();
+    if (!state.collaborationTasks.some(value => value.id === state.selectedCollaborationTaskId)) {
+      state.selectedCollaborationTaskId = state.collaborationTasks[0]?.id || '';
+      state.collaborationTaskNotice = '';
+      state.collaborationTaskSignature = '';
+    }
+    const listSignature = collaborationTaskListSignature(state.collaborationTasks);
+    if (!background || listSignature !== state.collaborationTaskListSignature) renderCollaborationTaskList();
+    state.collaborationTaskListSignature = listSignature;
+    await renderCollaborationTaskDetail({background});
+  } catch (error) {
+    if (!background) $('collaborationTaskList').replaceChildren(element('div', 'form-error', error.message));
+  }
+}
+
+function renderCollaborationTaskList() {
+  const list = $('collaborationTaskList');
+  list.replaceChildren(...state.collaborationTasks.map(task => {
+    const item = element('button', `task-master-item${task.id === state.selectedCollaborationTaskId ? ' selected' : ''}`);
+    item.type = 'button';
+    item.append(element('strong', '', task.title),
+      element('small', '', `${collaborationStatusNames[task.status] || task.status} · ${collaborationAssigneeName(task)}`));
+    item.onclick = async () => {
+      state.selectedCollaborationTaskId = task.id;
+      state.collaborationTaskView = 'task';
+      state.collaborationTaskNotice = '';
+      state.collaborationTaskSignature = '';
+      renderCollaborationTaskList();
+      await renderCollaborationTaskDetail();
+    };
+    return item;
+  }));
+  if (!state.collaborationTasks.length) list.append(element('div', 'task-empty', '当前筛选下没有协作任务'));
+}
+
+function collaborationAssigneeName(task) {
+  if (task.assigneeType === 'TEAM') return agentTeamName(task.assigneeId);
+  if (task.assigneeType === 'AGENT') return agentProfileName(task.assigneeId);
+  return '历史手动任务';
+}
+
+async function renderCollaborationTaskDetail(options = {}) {
+  const pane = $('collaborationTaskDetail');
+  if (!pane) return;
+  const background = options?.background === true;
+  if (!state.selectedCollaborationTaskId) {
+    pane.replaceChildren(element('div', 'task-empty', '选择任务查看详情'));
+    return;
+  }
+  try {
+    const detail = await api(`/v1/collaboration/tasks/${state.selectedCollaborationTaskId}`);
+    if (state.selectedCollaborationTaskId !== detail.task.id) return;
+    const signature = collaborationTaskDetailSignature(detail);
+    if (background && signature === state.collaborationTaskSignature) return;
+    if (background && collaborationTaskInteractionActive(pane)) return;
+    const previousScrollTop = $('messages').scrollTop;
+    const formDraft = background ? collaborationTaskFormDraft() : null;
+    const head = element('div', 'task-detail-head');
+    const copy = element('div');
+    copy.append(element('h2', '', detail.task.title),
+      element('small', '', `${collaborationStatusNames[detail.task.status] || detail.task.status} · ${collaborationAssigneeName(detail.task)} · 更新于 ${new Date(detail.task.updatedAt).toLocaleString()}`));
+    const status = element('span', `task-status task-status-${detail.task.status.toLowerCase()}`,
+      collaborationStatusNames[detail.task.status] || detail.task.status);
+    const headActions = element('div', 'task-detail-head-actions');
+    const removeTask = element('button', 'secondary task-delete-button', '删除任务');
+    removeTask.type = 'button';
+    removeTask.title = (detail.runs || []).some(run => !['COMPLETED', 'FAILED', 'CANCELED'].includes(run.status))
+      ? '请先取消仍在执行的任务，再删除协作任务记录'
+      : '删除协作任务记录，保留已结束的执行与会话';
+    removeTask.onclick = () => deleteCollaborationTask(detail.task);
+    headActions.append(status, removeTask);
+    head.append(copy, headActions);
+    const tabs = element('div', 'task-detail-tabs');
+    [['task', '任务'], ['collaboration', '协作'], ['execution', '执行']].forEach(([id, label]) => {
+      const button = element('button', state.collaborationTaskView === id ? 'primary' : 'secondary', label);
+      button.onclick = () => { state.collaborationTaskView = id; renderCollaborationTaskDetail(); };
+      tabs.append(button);
+    });
+    const body = element('div', 'task-detail-body');
+    if (state.collaborationTaskView === 'collaboration') body.append(renderTaskCollaborationLayer(detail));
+    else if (state.collaborationTaskView === 'execution') body.append(renderTaskExecutionLayer(detail));
+    else body.append(renderTaskDefinitionLayer(detail));
+    const nodes = [head];
+    if (state.collaborationTaskNotice) {
+      nodes.push(element('div', 'task-inline-notice', state.collaborationTaskNotice));
+    }
+    nodes.push(tabs, body);
+    pane.replaceChildren(...nodes);
+    state.collaborationTaskSignature = signature;
+    restoreCollaborationTaskFormDraft(formDraft);
+    if (background) requestAnimationFrame(() => { $('messages').scrollTop = previousScrollTop; });
+  } catch (error) { pane.replaceChildren(element('div', 'form-error', error.message)); }
+}
+
+function renderTaskDefinitionLayer(detail) {
+  const task = detail.task;
+  const root = element('div', 'task-definition-layer');
+  root.append(taskTextSection('任务说明', task.description || '未填写'),
+    taskTextSection('完成条件', task.acceptanceCriteria || '未设置，由负责人结合执行结果提交人工验收。'));
+  if (detail.children.length) {
+    const children = element('div', 'task-section');
+    children.append(element('h3', '', '子任务与阶段'));
+    detail.children.forEach(child => {
+      const row = element('div', 'task-child-row');
+      const status = child.status === 'IN_REVIEW' ? '已交付，等待负责人汇总'
+        : (collaborationStatusNames[child.status] || child.status);
+      const run = (detail.runs || []).find(value => value.taskId === child.id);
+      row.append(element('strong', '', `${child.stage ? `阶段 ${child.stage}` : '子任务'} · ${child.title}`),
+        element('small', '', `${status} · ${collaborationAssigneeName(child)}${run ? ` · ${run.status}` : ''}`));
+      children.append(row);
+    });
+    root.append(children);
+  }
+  const route = element('div', 'task-route-preview');
+  route.id = 'taskRoutePreview';
+  root.append(renderTaskHumanActions(detail), route);
+  return root;
+}
+
+function renderTaskHumanActions(detail) {
+  const task = detail.task;
+  const root = element('section', 'task-action-panel');
+  root.append(element('h3', '', '人工操作'));
+  const activeRun = (detail.runs || []).some(run => !['COMPLETED', 'FAILED', 'CANCELED'].includes(run.status));
+  const hint = activeRun
+    ? '当前 Run 正在执行。可在“协作”中追加评论或提及负责人，Run 结束后可继续推进。'
+    : humanActionHint(task.status);
+  root.append(element('p', 'hint', hint));
+  const reasonField = element('label', 'form-field');
+  reasonField.append(element('span', '', task.status === 'IN_REVIEW' ? '审核意见或补充要求' : '补充指令或操作原因'));
+  const reason = element('textarea');
+  reason.id = 'collaborationTaskActionReason';
+  reason.rows = 2;
+  reason.placeholder = task.status === 'IN_REVIEW' ? '验收通过可不填；要求返工时必须说明原因' : '可选；阻塞任务时必须说明原因';
+  reasonField.append(reason);
+  root.append(reasonField);
+
+  const actions = element('div', 'managed-actions task-action-buttons');
+  if (task.assigneeType !== 'HUMAN' && task.assigneeId) {
+    const preview = element('button', 'secondary', '预览路由');
+    preview.type = 'button';
+    preview.onclick = () => previewCollaborationTaskRoute(task);
+    actions.append(preview);
+  }
+  if (!activeRun && task.assigneeType !== 'HUMAN') appendTaskStateActions(actions, task);
+  if (!activeRun && task.assigneeType === 'HUMAN') {
+    if (['DONE', 'CANCELED'].includes(task.status)) appendTaskActionButton(actions, task, 'REOPEN', '重新打开');
+    else appendTaskActionButton(actions, task, 'CANCEL', '取消历史任务');
+  }
+  if (activeRun) {
+    const collaboration = element('button', 'secondary', '前往协作');
+    collaboration.type = 'button';
+    collaboration.onclick = () => { state.collaborationTaskView = 'collaboration'; renderCollaborationTaskDetail(); };
+    actions.append(collaboration);
+    if (!['DONE', 'CANCELED'].includes(task.status)) {
+      appendTaskActionButton(actions, task, 'CANCEL', '取消任务');
+    }
+  }
+  root.append(actions);
+  return root;
+}
+
+function humanActionHint(status) {
+  if (status === 'IN_REVIEW') return '负责人已判断执行完成并提交验收。人工审核后确认完成，或带意见要求返工。';
+  if (status === 'BLOCKED') return '任务处于阻塞状态，人工可补充指令并恢复执行。';
+  if (status === 'DONE') return '任务已通过人工验收；需要继续处理时可重新打开。';
+  if (status === 'CANCELED') return '任务已取消；需要继续处理时可重新打开。';
+  if (status === 'IN_PROGRESS') return '当前没有活跃 Run，可继续执行、标记阻塞或取消任务。';
+  return '人工可启动任务，也可在开始前取消。';
+}
+
+function appendTaskStateActions(actions, task) {
+  const add = (action, label, primary = false) => appendTaskActionButton(actions, task, action, label, primary);
+  if (['BACKLOG', 'TODO'].includes(task.status)) add('START', '启动执行', true);
+  if (task.status === 'IN_PROGRESS') {
+    add('CONTINUE', '继续执行', true);
+    add('BLOCK', '标记阻塞');
+  }
+  if (task.status === 'BLOCKED') add('RESUME', '解除阻塞并继续', true);
+  if (task.status === 'IN_REVIEW') {
+    add('ACCEPT', '验收通过', true);
+    add('REQUEST_REWORK', '要求返工');
+  }
+  if (['DONE', 'CANCELED'].includes(task.status)) add('REOPEN', '重新打开');
+  if (!['DONE', 'CANCELED'].includes(task.status)) add('CANCEL', '取消任务');
+}
+
+function appendTaskActionButton(actions, task, action, label, primary = false) {
+  const button = element('button', primary ? 'primary' : 'secondary', label);
+  button.type = 'button';
+  button.onclick = () => applyCollaborationTaskAction(task, action);
+  actions.append(button);
+}
+
+function taskTextSection(title, text) {
+  const section = element('section', 'task-section');
+  section.append(element('h3', '', title), element('p', '', text));
+  return section;
+}
+
+async function previewCollaborationTaskRoute(task) {
+  const target = $('taskRoutePreview');
+  try {
+    const preview = await api('/v1/collaboration/routing/preview', {method: 'POST', body: JSON.stringify({
+      projectKey: task.projectKey,
+      input: `${task.title}\n${task.description || ''}\n${task.acceptanceCriteria || ''}`,
+      targetType: task.assigneeType, targetId: task.assigneeId
+    })});
+    const candidates = (preview.candidates || []).map(value => `${value.name}（${value.role}）：${value.reason}`).join('\n');
+    target.replaceChildren(element('strong', '', `建议并发 ${preview.estimatedConcurrency} · ${preview.complexity}/${preview.risk}`),
+      element('pre', '', candidates || '直接由目标 Agent 执行'));
+  } catch (error) { target.replaceChildren(element('div', 'form-error', error.message)); }
+}
+
+async function applyCollaborationTaskAction(task, action) {
+  const reason = $('collaborationTaskActionReason')?.value.trim() || '';
+  if (action === 'CANCEL'
+      && !confirm(`取消任务“${task.title}”并停止所有关联的活跃执行？任务记录和审计历史会保留。`)) return;
+  try {
+    const result = await api(`/v1/collaboration/tasks/${task.id}/actions`, {method: 'POST', body: JSON.stringify({
+      action, reason, idempotencyKey: `console:${task.id}:${task.updatedAt}:${action}`
+    })});
+    if (result.triggerExecution?.run) {
+      state.collaborationTaskView = 'execution';
+      showNotice('协作执行已创建');
+    } else showNotice(taskActionSuccessMessage(action));
+    await refreshCollaborationTaskWorkspace();
+    await loadSidebarHistory();
+  } catch (error) { showNotice(`操作失败：${error.message}`, true); }
+}
+
+function taskActionSuccessMessage(action) {
+  return ({
+    ACCEPT: '任务已验收完成', REQUEST_REWORK: '已要求负责人返工', START: '任务已启动', CONTINUE: '已继续执行',
+    RESUME: '任务已恢复执行', BLOCK: '任务已标记阻塞', CANCEL: '任务已取消', REOPEN: '任务已重新打开'
+  })[action] || '操作已完成';
+}
+
+const collaborationActionNames = {
+  START: '启动任务', CONTINUE: '继续执行', RESUME: '恢复执行', BLOCK: '标记阻塞',
+  REQUEST_REWORK: '要求返工', ACCEPT: '验收通过', CANCEL: '取消任务', REOPEN: '重新打开'
+};
+
+function collaborationActivityPayload(activity) {
+  try { return JSON.parse(activity.payloadJson || '{}'); }
+  catch (_) { return {}; }
+}
+
+function collaborationActivityPresentation(activity, detail) {
+  const payload = collaborationActivityPayload(activity);
+  const actor = collaborationEntityName(activity.actorType, activity.actorId);
+  const run = detail.runs.find(value => value.runId === activity.subjectId);
+  const comment = detail.comments.find(value => value.comment.id === activity.subjectId)?.comment;
+  const runContext = run
+    ? `${agentProfileName(run.agentProfileId, actor)} · ${taskRunModelName(run)}`
+    : '';
+  if (activity.activityType === 'TASK_CREATED') {
+    return {tone: 'task', title: '任务已建立', detail: `${actor} 创建协作任务并等待负责人启动`};
+  }
+  if (activity.activityType === 'HUMAN_ACTION') {
+    const transition = payload.toStatus
+      ? `任务进入“${collaborationStatusNames[payload.toStatus] || payload.toStatus}”`
+      : '';
+    return {tone: 'human', title: collaborationActionNames[payload.action] || '人工推进任务',
+      detail: [transition, payload.reason].filter(Boolean).join(' · ')};
+  }
+  if (activity.activityType === 'RUN_TRIGGERED') {
+    const triggerNames = {HUMAN_ACTION: '人工发起', RUN_EVENT: '执行结果触发', MENTION: '提及触发', REPLY: '回复触发', STAGE_BARRIER: '阶段完成触发'};
+    return {tone: 'run', title: `${actor} 派发协作执行`,
+      detail: [runContext, triggerNames[payload.triggerType] || '事件驱动'].filter(Boolean).join(' · ')};
+  }
+  if (activity.activityType === 'RUN_COMPLETED') {
+    return {tone: 'success', title: `${actor} 完成一次执行`, detail: runContext || '结果已回传任务负责人'};
+  }
+  if (activity.activityType === 'RUN_FAILED') {
+    return {tone: 'error', title: `${actor} 执行失败`, detail: replaceEntityReferences(payload.error || '等待负责人处理')};
+  }
+  if (activity.activityType === 'COMMENT_POSTED') {
+    const summary = replaceEntityReferences(comment?.content || '').replace(/\s+/g, ' ').trim();
+    return {tone: 'comment', title: `${actor} 发布协作评论`, detail: summary.slice(0, 150)};
+  }
+  if (activity.activityType === 'STATUS_CHANGED') {
+    const transition = payload.toStatus
+      ? `从“${collaborationStatusNames[payload.fromStatus] || payload.fromStatus || '原状态'}”调整为“${collaborationStatusNames[payload.toStatus] || payload.toStatus}”`
+      : '';
+    return {tone: 'status', title: `${actor} 更新任务进展`,
+      detail: replaceEntityReferences(payload.reason || transition || '状态已同步')};
+  }
+  if (activity.activityType === 'STAGE_BARRIER_COMPLETED') {
+    return {tone: 'success', title: '阶段任务已汇合', detail: '当前阶段的子任务均已交付，Leader 可以推进下一阶段'};
+  }
+  return {tone: 'status', title: '协作状态已更新', detail: `${actor} 完成了一次任务更新`};
+}
+
+function collaborationVisibleActivities(detail) {
+  return detail.activities.filter(activity => {
+    if (activity.activityType !== 'STATUS_CHANGED' || activity.actorType !== 'SYSTEM') return true;
+    const payload = collaborationActivityPayload(activity);
+    return Boolean(payload.reason || payload.toStatus);
+  });
+}
+
+function renderCollaborationProcessOverview(detail) {
+  const root = element('section', 'task-process-overview');
+  const head = element('div', 'task-process-head');
+  const heading = element('div');
+  heading.append(element('h3', '', '协作进展'), element('small', '', '评论、执行和状态每 3 秒同步'));
+  head.append(heading, element('span', 'task-live-indicator', '自动同步'));
+
+  const status = detail.task.status;
+  const hasRuns = detail.runs.length > 0;
+  const reviewStarted = ['IN_REVIEW', 'DONE'].includes(status);
+  const stages = [
+    {label: '任务建立', state: 'done'},
+    {label: '执行派发', state: hasRuns ? 'done' : 'current'},
+    {label: '专家协作', state: reviewStarted ? 'done' : (hasRuns ? 'current' : 'pending')},
+    {label: '人工验收', state: status === 'DONE' ? 'done' : (status === 'IN_REVIEW' ? 'current' : 'pending')}
+  ];
+  const track = element('div', 'task-process-track');
+  stages.forEach((stage, index) => {
+    const item = element('div', `task-process-step ${stage.state}`);
+    item.append(element('span', 'task-process-marker', stage.state === 'done' ? '✓' : String(index + 1)),
+      element('strong', '', stage.label));
+    track.append(item);
+  });
+
+  const participants = new Set();
+  detail.runs.forEach(run => participants.add(agentProfileName(run.agentProfileId, '执行专家')));
+  detail.comments.forEach(view => {
+    const comment = view.comment;
+    if (!['USER', 'SYSTEM'].includes(comment.authorType)) {
+      participants.add(collaborationEntityName(comment.authorType, comment.authorId));
+    }
+  });
+  const activeRuns = detail.runs.filter(run => !['COMPLETED', 'FAILED', 'CANCELED'].includes(run.status)).length;
+  const metrics = element('div', 'task-process-metrics');
+  [[participants.size, '参与角色'], [detail.runs.length, activeRuns ? `${activeRuns} 个执行中` : '关联执行'],
+    [detail.comments.length, '协作评论']].forEach(([value, label]) => {
+    const metric = element('div', 'task-process-metric');
+    metric.append(element('strong', '', String(value)), element('small', '', label));
+    metrics.append(metric);
+  });
+  root.append(head, track, metrics);
+  return root;
+}
+
+function renderTaskCollaborationLayer(detail) {
+  const root = element('div', 'task-collaboration-layer');
+  root.append(renderCollaborationProcessOverview(detail));
+  const grid = element('div', 'task-collaboration-grid');
+  const discussion = element('section', 'task-discussion-pane');
+  const discussionHead = element('div', 'task-layer-heading');
+  discussionHead.append(element('h3', '', '评论与决策'), element('small', '', `${detail.comments.length} 条`));
+  const form = element('form', 'task-comment-form');
+  form.onsubmit = event => submitCollaborationComment(event, detail.task.id);
+  const reply = element('div', 'hint');
+  reply.id = 'collaborationReplyHint';
+  const replying = detail.comments.find(view => view.comment.id === state.collaborationReplyToId)?.comment;
+  reply.textContent = replying
+    ? `正在回复 ${collaborationEntityName(replying.authorType, replying.authorId)}`
+    : '发布评论或显式提及 Agent/Team';
+  const content = element('textarea');
+  content.id = 'collaborationCommentContent';
+  content.rows = 3;
+  content.required = true;
+  content.placeholder = '记录进展、问题或结论';
+  const mention = element('select', 'control-select');
+  mention.id = 'collaborationCommentMention';
+  mention.append(new Option('不提及', ''));
+  state.agentProfiles.filter(value => value.enabled).forEach(value => mention.append(new Option(`Agent · ${value.name}`, `AGENT:${value.id}`)));
+  state.agentTeams.filter(value => value.enabled).forEach(value => mention.append(new Option(`Team · ${value.name}`, `TEAM:${value.id}`)));
+  const conclusion = checkboxControl('collaborationCommentConclusion', '标记为当前结论');
+  const submit = element('button', 'primary', '发布评论');
+  submit.type = 'submit';
+  form.append(reply, content, mention, conclusion, submit);
+  const comments = element('div', 'task-comment-list');
+  detail.comments.forEach(view => {
+    const comment = view.comment;
+    const item = element('article', `task-comment${comment.conclusion ? ' conclusion' : ''}`);
+    const meta = element('div', 'task-comment-meta');
+    meta.append(element('strong', '', collaborationEntityName(comment.authorType, comment.authorId)),
+      element('small', '', new Date(comment.createdAt).toLocaleString()));
+    item.append(meta);
+    if (comment.parentCommentId) {
+      const parent = detail.comments.find(value => value.comment.id === comment.parentCommentId)?.comment;
+      item.append(element('small', 'task-comment-reply', `回复 ${collaborationEntityName(parent?.authorType, parent?.authorId)}`));
+    }
+    item.append(element('p', '', replaceEntityReferences(comment.content)));
+    if ((view.mentions || []).length) item.append(element('small', 'hint',
+      `提及：${view.mentions.map(value => collaborationEntityName(value.type, value.id)).join('、')}`));
+    const replyButton = element('button', 'secondary', '回复');
+    replyButton.onclick = () => {
+      state.collaborationReplyToId = comment.id;
+      renderCollaborationTaskDetail();
+      requestAnimationFrame(() => $('collaborationCommentContent')?.focus());
+    };
+    item.append(replyButton);
+    comments.append(item);
+  });
+  if (!detail.comments.length) comments.append(element('div', 'task-empty', '暂无评论'));
+  discussion.append(discussionHead, form, comments);
+
+  const flow = element('section', 'task-flow-pane');
+  const flowHead = element('div', 'task-layer-heading');
+  flowHead.append(element('h3', '', '协作动态'), element('small', '', '最新在前'));
+  const timeline = element('div', 'task-activity-list');
+  collaborationVisibleActivities(detail).slice().reverse().forEach(activity => {
+    const presentation = collaborationActivityPresentation(activity, detail);
+    const item = element('article', `task-activity-item ${presentation.tone}`);
+    const marker = element('span', 'task-activity-marker');
+    const copy = element('div', 'task-activity-copy');
+    const itemHead = element('div', 'task-activity-head');
+    itemHead.append(element('strong', '', presentation.title),
+      element('time', '', new Date(activity.createdAt).toLocaleString()));
+    copy.append(itemHead);
+    if (presentation.detail) copy.append(element('p', '', presentation.detail));
+    item.append(marker, copy);
+    timeline.append(item);
+  });
+  if (!timeline.children.length) timeline.append(element('div', 'task-empty', '任务尚未产生协作动态'));
+  flow.append(flowHead, timeline);
+  grid.append(discussion, flow);
+  root.append(grid);
+  return root;
+}
+
+async function submitCollaborationComment(event, taskId) {
+  event.preventDefault();
+  const mentionValue = $('collaborationCommentMention').value;
+  const mentions = mentionValue ? [{type: mentionValue.split(':')[0], id: mentionValue.slice(mentionValue.indexOf(':') + 1)}] : [];
+  try {
+    await api(`/v1/collaboration/tasks/${taskId}/comments`, {method: 'POST', body: JSON.stringify({
+      parentCommentId: state.collaborationReplyToId || null,
+      content: $('collaborationCommentContent').value.trim(),
+      conclusion: $('collaborationCommentConclusion').checked,
+      mentions
+    })});
+    state.collaborationReplyToId = '';
+    await renderCollaborationTaskDetail();
+  } catch (error) { showNotice(`评论发布失败：${error.message}`, true); }
+}
+
+function renderTaskExecutionLayer(detail) {
+  const root = element('div', 'task-execution-layer');
+  if (detail.finalDeliveryReady) {
+    const deliverables = element('section', 'task-section task-deliverables');
+    deliverables.append(element('h3', '', '最终交付'));
+    const files = detail.workspaceFiles || [];
+    if (files.length) {
+      deliverables.append(element('p', 'hint', '根任务和阶段专家共用的工作区文件。可直接预览或下载。'));
+      const grid = element('div', 'deliverable-grid');
+      files.forEach(file => grid.append(renderWorkspaceFileCard(file.runId, file.path, file)));
+      deliverables.append(grid);
+    } else {
+      deliverables.append(element('div', 'hint', '任务已完成，但共享工作区中尚未发现可交付文件。'));
+    }
+    root.append(deliverables);
+  }
+  if (!detail.runs.length) root.append(element('div', 'task-empty', '尚未触发 Agent Run'));
+  detail.runs.forEach(run => {
+    const row = element('div', 'task-run-row');
+    const copy = element('div');
+    const stage = (detail.children || []).find(child => child.id === run.taskId);
+    const label = stage ? `阶段 ${stage.stage} · ${stage.title}` : run.relationship;
+    copy.append(element('strong', '', `${label} · ${run.status}`),
+      element('small', '', `${agentProfileName(run.agentProfileId, '未指定专家')} · ${taskRunModelName(run)} · ${new Date(run.createdAt).toLocaleString()}`));
+    const open = element('button', 'secondary', '打开会话');
+    open.onclick = () => openCollaborationTaskSession(detail.task, run.sessionId);
+    row.append(copy, open);
+    root.append(row);
+  });
+  return root;
 }
 
 function renderHomeCollaboration() {
@@ -450,14 +1299,38 @@ function renderHomeCollaboration() {
   const actions = element('div', 'dialog-actions');
   const manage = element('button', 'secondary', '管理专家');
   manage.onclick = openAgentStudio;
+  const preview = element('button', 'secondary', '预览路由');
+  preview.onclick = previewHomeCollaboration;
   const start = element('button', 'primary', '启动协作');
   start.id = 'homeStartCollaboration';
   start.onclick = startCollaboration;
-  actions.append(manage, start);
+  actions.append(manage, preview, start);
+  const routePreview = element('div', 'task-route-preview');
+  routePreview.id = 'homeCollaborationRoutePreview';
   panel.append(head, renderHomeModelPicker(), teamField, leaderField, objectiveField,
-    policy, checks, allowed, error, actions);
+    policy, checks, allowed, error, actions, routePreview);
   requestAnimationFrame(applySelectedAgentTeam);
   return panel;
+}
+
+async function previewHomeCollaboration() {
+  const objective = $('homeCollaborationObjective')?.value.trim();
+  if (!objective) return setFormError('homeCollaborationError', '请先填写一句话目标');
+  const team = state.agentTeams.find(value => value.id === state.selectedAgentTeamId && value.enabled);
+  const leaderId = $('homeCollaborationLeader')?.value
+    || homeLeaders()[0]?.id;
+  if (!team && !leaderId) return setFormError('homeCollaborationError', '没有可用的 Agent 或 AgentTeam');
+  try {
+    const preview = await api('/v1/collaboration/routing/preview', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(), input: objective,
+      targetType: team ? 'TEAM' : 'AGENT', targetId: team?.id || leaderId
+    })});
+    const target = $('homeCollaborationRoutePreview');
+    target.replaceChildren(
+      element('strong', '', `Leader ${preview.leaderName} · 建议并发 ${preview.estimatedConcurrency}`),
+      element('pre', '', (preview.candidates || []).map(value => `${value.name}（${value.role}）：${value.reason}`).join('\n'))
+    );
+  } catch (error) { setFormError('homeCollaborationError', error.message); }
 }
 
 function applySelectedAgentTeam() {
@@ -757,7 +1630,7 @@ function collectMatches(text, regex) {
 
 function renderArtifactCard(artifact) {
   const card = element('article', 'deliverable-card artifact');
-  card.append(element('strong', '', artifact.name || artifact.id));
+  card.append(element('strong', '', artifact.name || '未命名 Artifact'));
   card.append(element('small', '', `${artifact.type || 'artifact'} · ${formatBytes(artifact.size || 0)}`));
   const actions = element('div', 'deliverable-actions');
   const open = element('button', 'secondary', '打开');
@@ -782,8 +1655,8 @@ function renderArtifactCard(artifact) {
 
 function renderArtifactIdCard(id) {
   const card = element('article', 'deliverable-card artifact');
-  card.append(element('strong', '', id));
-  card.append(element('small', '', 'Artifact 引用'));
+  card.append(element('strong', '', '关联 Artifact'));
+  card.append(element('small', '', '模型生成的交付文件'));
   const actions = element('div', 'deliverable-actions');
   const open = element('button', 'secondary', '打开');
   open.onclick = () => openArtifactPreview(id);
@@ -823,10 +1696,10 @@ function renderLocalFileCard(path) {
   return card;
 }
 
-function renderWorkspaceFileCard(runId, path) {
+function renderWorkspaceFileCard(runId, path, metadata = null) {
   const card = element('article', 'deliverable-card workspace-file');
   card.append(element('strong', '', path));
-  card.append(element('small', '', '工作区文件'));
+  card.append(element('small', '', metadata ? `工作区文件 · ${formatBytes(metadata.size)}` : '工作区文件'));
   const actions = element('div', 'deliverable-actions');
   const open = element('button', 'secondary', '打开');
   open.onclick = () => openWorkspaceFilePreview(runId, path);
@@ -849,8 +1722,8 @@ function renderMessage(message) {
   if (message.role === 'tool') {
     const details = element('details', 'tool');
     details.append(
-      element('summary', '', `工具结果 · ${message.toolCallId || 'tool'}`),
-      element('pre', '', message.content || '')
+      element('summary', '', `工具结果 · ${toolCallDisplayName(message.toolCallId)}`),
+      element('pre', '', replaceEntityReferences(message.content || ''))
     );
     $('stack').append(details);
     return;
@@ -860,7 +1733,7 @@ function renderMessage(message) {
   const body = element('div', 'body');
   body.append(
     element('div', 'who', message.role === 'user' ? '你' : 'PaiCLI'),
-    renderRichText(message.content || '', 'text')
+    renderRichText(replaceEntityReferences(message.content || ''), 'text')
   );
   const deliverables = renderDeliverables(message);
   if (deliverables) body.append(deliverables);
@@ -868,7 +1741,7 @@ function renderMessage(message) {
     const reasoning = element('details', 'reason');
     reasoning.append(
       element('summary', '', '查看思考过程'),
-      element('pre', '', message.reasoningContent)
+      element('pre', '', replaceEntityReferences(message.reasoningContent))
     );
     body.append(reasoning);
   }
@@ -884,6 +1757,7 @@ async function loadMessages(options = {}) {
   const previousTop = $('messages').scrollTop;
   const previousHeight = $('messages').scrollHeight;
   const messages = await api(`/v1/sessions/${state.sessionId}/messages`);
+  indexMessageToolCalls(messages);
   markFinalAssistantMessages(messages);
   $('stack').replaceChildren();
   const hasPlans = await renderSessionPlanPanel();
@@ -990,7 +1864,7 @@ function renderSessionPlanItem(view) {
       `${step.status} · ${step.title} · ${step.runId ? '打开 Run' : 'Run 未生成'}`);
     button.type = 'button';
     button.disabled = !step.runId;
-    button.title = step.runId ? `打开 ${step.runId}` : '该步骤尚未绑定 Run';
+    button.title = step.runId ? `打开“${step.title}”的关联执行` : '该步骤尚未绑定执行';
     button.onclick = () => openPlanStepRun(plan, step);
     stepList.append(button);
   });
@@ -1034,11 +1908,13 @@ async function renderCollaborationBoard() {
         actionButtonElement('返回父专家', () => openParentSession(board.parent))
       );
       panel.append(navigation);
+      $('stack').append(panel);
+      return;
     }
     const title = element('div', 'section-title');
     title.append(
       element('h3', '', '协作任务看板'),
-      element('span', '', `${policy.complexity || 'MEDIUM'} · ${policy.risk || 'MEDIUM'} · ${board.tasks.length}/${policy.maxExperts || 0} 专家`)
+      element('span', '', `路由推断：${routingComplexityLabel(policy.complexity)} · ${routingRiskLabel(policy.risk)} · ${board.tasks.length}/${policy.maxExperts || 0} 专家`)
     );
     const list = element('div', 'collaboration-task-list');
     board.tasks.forEach(task => list.append(renderCollaborationTask(task)));
@@ -1069,7 +1945,9 @@ function renderCollaborationTask(task) {
     item.append(element('div', 'hint',
       `依赖 ${task.dependencies.length} 个节点 · 失败策略 ${task.failurePolicy || 'BLOCK_GRAPH'}`));
   }
-  item.append(element('p', '', task.task || ''));
+  const description = task.task || '';
+  item.append(element('p', 'collaboration-task-summary', description.length > 360
+    ? `${description.slice(0, 360)}…` : description));
   const actions = element('div', 'collaboration-actions');
   const openChild = element('button', 'secondary', '打开子会话');
   openChild.onclick = () => openChildSession(task.childSessionId);
@@ -1090,8 +1968,8 @@ function renderCollaborationTask(task) {
     const blocked = (task.pendingApprovals || []).length ? ' · 有待审批' : '';
     details.append(element('summary', '', `子执行链路${blocked}`));
     const trace = element('div', 'child-trace');
-    (task.toolCalls || []).forEach(call => trace.append(renderTraceLine('tool', `${call.status} · ${call.name}`, call.error)));
-    (task.events || []).forEach(event => trace.append(renderTraceLine('event', `${event.type} #${event.id}`, event.data)));
+    (task.toolCalls || []).forEach(call => trace.append(renderTraceLine('tool', `${call.status} · ${toolDisplayName(call.name)}`, call.error)));
+    (task.events || []).forEach(event => trace.append(renderTraceLine('event', event.type, event.data)));
     details.append(trace);
     item.append(details);
   }
@@ -1143,19 +2021,71 @@ function renderChildApproval(approval) {
 function renderTraceLine(kind, title, detail = '') {
   const line = element('div', `trace-line ${kind}`);
   line.append(element('span', '', title));
-  if (detail) line.append(element('small', '', String(detail).slice(0, 260)));
+  if (detail) line.append(element('small', '', replaceEntityReferences(detail).slice(0, 260)));
   return line;
 }
 
 async function openChildSession(sessionId) {
-  if (!sessionId) return;
+  if (!sessionId) return false;
   let session = state.sessions.find(item => item.id === sessionId);
   if (!session) {
     try { session = await api(`/v1/sessions/${sessionId}`); }
-    catch (error) { return showNotice(`打开子会话失败：${error.message}`, true); }
+    catch (error) {
+      showNotice(`打开子会话失败：${error.message}`, true);
+      return false;
+    }
   }
   await selectSession(session.id, false);
   $('chatTitle').textContent = session.title || '子 Agent 会话';
+  return true;
+}
+
+function routingComplexityLabel(value) {
+  return ({SIMPLE: '简单', MEDIUM: '中等', COMPLEX: '复杂'})[value] || '中等';
+}
+
+function routingRiskLabel(value) {
+  return ({LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险'})[value] || '中风险';
+}
+
+async function openCollaborationTaskSession(task, sessionId) {
+  if (!task?.id || !sessionId) return;
+  const origin = {
+    taskId: task.id,
+    taskTitle: task.title || '协作任务',
+    sessionId,
+    view: 'execution'
+  };
+  state.collaborationTaskReturn = origin;
+  sessionStorage.setItem('paicli_collaboration_task_return', JSON.stringify(origin));
+  syncCollaborationTaskReturnAction();
+  if (!await openChildSession(sessionId)) clearCollaborationTaskReturn();
+}
+
+function syncCollaborationTaskReturnAction() {
+  const button = $('returnCollaborationTask');
+  if (!button) return;
+  const origin = state.collaborationTaskReturn;
+  const visible = Boolean(origin && origin.sessionId === state.sessionId);
+  button.hidden = !visible;
+  button.title = visible ? `返回协作任务：${origin.taskTitle}` : '';
+}
+
+function clearCollaborationTaskReturn() {
+  state.collaborationTaskReturn = null;
+  sessionStorage.removeItem('paicli_collaboration_task_return');
+  syncCollaborationTaskReturnAction();
+}
+
+function returnToCollaborationTask() {
+  const origin = state.collaborationTaskReturn;
+  if (!origin) return;
+  state.selectedCollaborationTaskId = origin.taskId;
+  state.collaborationTaskView = origin.view;
+  state.homeMode = 'tasks';
+  localStorage.setItem('paicli_home_mode', 'tasks');
+  clearCollaborationTaskReturn();
+  showHome();
 }
 
 function mountChildTrace(task) {
@@ -1180,37 +2110,74 @@ function mountChildTrace(task) {
 
 function renderSessions() {
   $('sessions').replaceChildren();
-  const sections = [
-    ...state.groups.map(group => ({id: group.id, name: group.name, removable: true})),
-    {id: null, name: '未分组', removable: false}
+  const linkedTaskSessions = new Set(state.collaborationTaskHistory.flatMap(item => item.linkedSessionIds || []));
+  const entries = [
+    ...state.sessions.filter(session => !linkedTaskSessions.has(session.id))
+      .map(session => ({type: sessionHistoryType(session), projectKey: session.projectKey || 'default',
+        groupId: session.groupId || null, updatedAt: session.updatedAt, session})),
+    ...state.collaborationTaskHistory.map(history => ({type: 'task',
+      projectKey: history.task.projectKey || 'default', groupId: null,
+      updatedAt: history.task.updatedAt, history}))
   ];
-  for (const group of sections) {
-    const members = state.sessions.filter(session => (session.groupId || null) === group.id);
-    if (!members.length && !group.removable) continue;
-    const section = element('section', 'session-group');
-    const heading = element('div', 'session-group-head');
-    heading.append(element('span', '', `${group.name}  ${members.length}`));
-    if (group.removable) {
-      const remove = element('button', 'group-delete', '×');
-      remove.title = '删除分组';
-      remove.onclick = () => deleteGroup(group);
-      heading.append(remove);
-    }
-    section.append(heading);
-    members.forEach(session => section.append(renderSessionItem(session)));
-    $('sessions').append(section);
-  }
-  if (!state.sessions.length) $('sessions').append(element('div', 'nothing', '暂无对话'));
+  const projects = [...new Set(entries.map(entry => entry.projectKey))]
+    .sort((left, right) => left === currentProjectKey() ? -1 : right === currentProjectKey() ? 1 : left.localeCompare(right));
+  projects.forEach((projectKey, projectIndex) => {
+    const projectEntries = entries.filter(entry => entry.projectKey === projectKey);
+    const project = element('section', 'session-project');
+    const projectHead = element('div', 'session-project-head');
+    projectHead.append(element('strong', '', projectKey), element('span', '', String(projectEntries.length)));
+    project.append(projectHead);
+    const sections = [...state.groups.map(group => ({...group, removable: true})),
+      {id: null, name: '未分组', removable: false}];
+    sections.forEach(group => {
+      const members = projectEntries.filter(entry => entry.groupId === (group.id || null))
+        .sort((left, right) => new Date(right.updatedAt || 0) - new Date(left.updatedAt || 0));
+      if (!members.length && !(group.removable && projectIndex === 0)) return;
+      const section = element('section', 'session-group');
+      const heading = element('div', 'session-group-head');
+      heading.append(element('span', '', `${group.name}  ${members.length}`));
+      if (group.removable) {
+        const remove = element('button', 'group-delete', '×');
+        remove.title = '删除分组';
+        remove.onclick = () => deleteGroup(group);
+        heading.append(remove);
+      }
+      section.append(heading);
+      members.forEach(entry => section.append(entry.type === 'task'
+        ? renderTaskHistoryItem(entry.history) : renderSessionItem(entry.session, entry.type)));
+      project.append(section);
+    });
+    $('sessions').append(project);
+  });
+  if (!entries.length) $('sessions').append(element('div', 'nothing', '暂无历史记录'));
 }
 
-function renderSessionItem(session) {
-  const row = element('div', `session-row${session.id === state.sessionId ? ' active' : ''}`);
+function sessionHistoryType(session) {
+  return /^协作\s*[:：]/.test(session.title || '') ? 'expert' : 'chat';
+}
+
+function historyTypeLabel(type) {
+  return type === 'task' ? '任务' : type === 'expert' ? '专家' : '普通';
+}
+
+function historyTitle(type, title) {
+  if (type === 'expert') return String(title || '未命名协作').replace(/^协作\s*[:：]\s*/, '');
+  return title || (type === 'task' ? '未命名任务' : '未命名对话');
+}
+
+function renderHistoryButton(type, title, meta) {
   const button = element('button', 'session');
-  button.append(
-    element('span', '', session.title || '未命名对话'),
-    element('small', 'meta', session.projectKey || 'default')
-  );
-  button.onclick = () => selectSession(session.id);
+  const line = element('span', 'session-title-line');
+  line.append(element('span', `history-type history-type-${type}`, historyTypeLabel(type)),
+    element('span', 'session-title-text', historyTitle(type, title)));
+  button.append(line, element('small', 'meta', meta));
+  return button;
+}
+
+function renderSessionItem(session, type = sessionHistoryType(session)) {
+  const row = element('div', `session-row${session.id === state.sessionId ? ' active' : ''}`);
+  const button = renderHistoryButton(type, session.title, '对话记录');
+  button.onclick = () => openSessionHistory(session, type);
   const more = element('button', 'session-more', '⋯');
   more.title = '对话操作';
   const menu = element('div', 'session-menu');
@@ -1241,15 +2208,63 @@ function renderSessionItem(session) {
   return row;
 }
 
+function openSessionHistory(session, type) {
+  state.homeMode = type === 'expert' ? 'collaboration' : 'chat';
+  localStorage.setItem('paicli_home_mode', state.homeMode);
+  syncGlobalModeSwitch();
+  selectSession(session.id);
+}
+
+function renderTaskHistoryItem(history) {
+  const task = history.task;
+  const active = !state.sessionId && state.homeMode === 'tasks' && task.id === state.selectedCollaborationTaskId;
+  const row = element('div', `session-row${active ? ' active' : ''}`);
+  const meta = `${collaborationStatusNames[task.status] || task.status} · ${collaborationAssigneeName(task)}`;
+  const button = renderHistoryButton('task', task.title, meta);
+  button.onclick = () => openCollaborationTaskHistory(task);
+  const more = element('button', 'session-more', '⋯');
+  more.title = '任务操作';
+  const menu = element('div', 'session-menu history-task-menu');
+  const open = element('button', 'secondary', '打开任务');
+  open.onclick = () => openCollaborationTaskHistory(task);
+  const remove = element('button', 'delete-session', '删除任务');
+  remove.onclick = () => deleteCollaborationTask(task);
+  menu.append(open, remove);
+  more.onclick = event => {
+    event.stopPropagation();
+    document.querySelectorAll('.session-menu.open').forEach(value => {
+      if (value !== menu) value.classList.remove('open');
+    });
+    menu.classList.toggle('open');
+  };
+  menu.onclick = event => event.stopPropagation();
+  row.append(button, more, menu);
+  return row;
+}
+
+function openCollaborationTaskHistory(task, notice = '') {
+  state.selectedCollaborationTaskId = task.id;
+  state.collaborationTaskView = 'task';
+  state.collaborationTaskNotice = notice;
+  state.collaborationTaskSignature = '';
+  state.homeMode = 'tasks';
+  localStorage.setItem('paicli_home_mode', 'tasks');
+  showHome();
+}
+
+async function loadSidebarHistory() {
+  [state.sessions, state.groups, state.collaborationTaskHistory] = await Promise.all([
+    api('/v1/sessions'), api('/v1/session-groups'), api('/v1/collaboration/history?limit=1000')
+  ]);
+  renderSessions();
+}
+
 async function refreshSessions() {
   try {
-    [state.sessions, state.groups] = await Promise.all([
-      api('/v1/sessions'), api('/v1/session-groups')
-    ]);
+    await loadSidebarHistory();
     if (!state.sessions.some(item => item.id === state.sessionId)) {
       state.sessionId = state.sessions[0]?.id || '';
     }
-    renderSessions();
     if (state.sessionId) await selectSession(state.sessionId, false);
     else renderEmpty();
   } catch (error) {
@@ -1261,6 +2276,7 @@ async function selectSession(id, rerender = true) {
   state.stream?.abort();
   configurePlanPolling(false);
   configureApprovalPolling(false);
+  configureCollaborationTaskPolling(false);
   state.runId = '';
   state.planStatus = '';
   const previousSession = state.sessionId;
@@ -1270,6 +2286,7 @@ async function selectSession(id, rerender = true) {
       api(`/v1/sessions/${previousSession}/attachments/${attachment.id}`, {method: 'DELETE'})));
   }
   state.sessionId = id;
+  syncCollaborationTaskReturnAction();
   state.live = null;
   clearPendingAttachments();
   localStorage.setItem('paicli_session', id);
@@ -1309,7 +2326,7 @@ async function syncLatestRun(options = {}) {
   const run = runs[0];
   const changed = state.runId !== run.id;
   state.runId = run.id;
-  $('runMeta').textContent = run.id;
+  $('runMeta').textContent = runMetaLabel(run);
   setStatus(run.status);
   await loadApprovals();
   if (options.watch !== false && !terminal.has(run.status) && (changed || !state.stream)) watch(run.id);
@@ -1340,6 +2357,7 @@ function showHome() {
   state.runId = '';
   state.runStatus = '';
   state.planStatus = '';
+  syncCollaborationTaskReturnAction();
   localStorage.removeItem('paicli_session');
   $('chatTitle').textContent = '新对话';
   $('runMeta').textContent = '尚未开始任务';
@@ -1381,6 +2399,35 @@ async function deleteSession(session) {
     await refreshSessions();
   } catch (error) {
     showNotice(error.message, true);
+  }
+}
+
+async function deleteCollaborationTask(task) {
+  if (!confirm(`删除协作任务“${task.title || '未命名任务'}”？任务、阶段、评论和协作动态会删除；已结束的执行、会话和交付文件会保留。`)) return;
+  try {
+    await api(`/v1/collaboration/tasks/${task.id}`, {method: 'DELETE'});
+    if (state.selectedCollaborationTaskId === task.id) {
+      state.selectedCollaborationTaskId = '';
+      state.collaborationTaskNotice = '';
+      state.collaborationTaskSignature = '';
+    }
+    await loadSidebarHistory();
+    if (state.homeMode === 'tasks' && $('collaborationTaskWorkspace')) {
+      await refreshCollaborationTaskWorkspace();
+    }
+    showNotice('协作任务已删除');
+  } catch (error) {
+    const message = error.status === 409
+      ? '任务仍有执行中的 Run。请先使用“取消任务”，待执行停止后再删除协作任务记录。'
+      : `删除任务失败：${error.message}`;
+    state.collaborationTaskNotice = message;
+    state.collaborationTaskSignature = '';
+    if (state.selectedCollaborationTaskId === task.id && state.homeMode === 'tasks'
+        && !state.sessionId && $('collaborationTaskDetail')) {
+      await renderCollaborationTaskDetail();
+    } else {
+      openCollaborationTaskHistory(task, message);
+    }
   }
 }
 
@@ -1444,7 +2491,7 @@ async function sendMessage() {
     clearPendingAttachments();
     resizeInput();
     state.runId = run.id;
-    $('runMeta').textContent = run.id;
+    $('runMeta').textContent = runMetaLabel(run);
     setStatus(run.status);
     await loadMessages({forceScroll: true});
     clearEvents();
@@ -1725,6 +2772,109 @@ function actionButton(item, label, action, primary = false) {
   return button;
 }
 
+const workbenchBatchConfig = {
+  runs: {deleteButton: 'deleteSelectedRuns', selectButton: 'selectAllRuns', noun: 'Run'},
+  memories: {deleteButton: 'deleteSelectedMemories', selectButton: 'selectAllMemories', noun: 'Memory'},
+  artifacts: {deleteButton: 'deleteSelectedArtifacts', selectButton: 'selectAllArtifacts', noun: 'Artifact'},
+  policies: {deleteButton: 'deleteSelectedPolicies', selectButton: 'selectAllPolicies', noun: '审批策略'}
+};
+const workbenchBatchSelections = Object.fromEntries(Object.keys(workbenchBatchConfig)
+  .map(kind => [kind, new Set()]));
+const workbenchBatchVisible = Object.fromEntries(Object.keys(workbenchBatchConfig)
+  .map(kind => [kind, new Set()]));
+
+function setWorkbenchBatchVisible(kind, ids) {
+  const visible = new Set(ids);
+  workbenchBatchVisible[kind] = visible;
+  [...workbenchBatchSelections[kind]].forEach(id => {
+    if (!visible.has(id)) workbenchBatchSelections[kind].delete(id);
+  });
+  syncWorkbenchBatchControls(kind);
+}
+
+function selectableWorkbenchItem(item, kind, id, selectable = true) {
+  const checkbox = element('input', 'workbench-select');
+  checkbox.type = 'checkbox';
+  checkbox.checked = workbenchBatchSelections[kind].has(id);
+  checkbox.disabled = !selectable;
+  checkbox.setAttribute('aria-label', selectable ? `选择此 ${workbenchBatchConfig[kind].noun}` : '运行中的 Run 不可删除');
+  checkbox.title = selectable ? '选择后可批量永久删除' : '仅终态 Run 可以永久删除';
+  checkbox.onclick = event => event.stopPropagation();
+  checkbox.onchange = () => {
+    if (checkbox.checked) workbenchBatchSelections[kind].add(id);
+    else workbenchBatchSelections[kind].delete(id);
+    syncWorkbenchBatchControls(kind);
+  };
+  item.prepend(checkbox);
+  return item;
+}
+
+function syncWorkbenchBatchControls(kind) {
+  const config = workbenchBatchConfig[kind];
+  const count = workbenchBatchSelections[kind].size;
+  const visible = workbenchBatchVisible[kind];
+  const deleteButton = $(config.deleteButton);
+  const selectButton = $(config.selectButton);
+  if (deleteButton) {
+    deleteButton.disabled = count === 0;
+    deleteButton.textContent = count ? `永久删除已选 (${count})` : '永久删除已选';
+  }
+  if (selectButton) {
+    selectButton.disabled = visible.size === 0;
+    selectButton.textContent = visible.size > 0 && [...visible].every(id => workbenchBatchSelections[kind].has(id))
+      ? '清空选择' : kind === 'runs' ? '全选终态' : '全选';
+  }
+}
+
+function toggleWorkbenchBatchSelection(kind, event) {
+  event?.stopPropagation();
+  const selected = workbenchBatchSelections[kind];
+  const visible = workbenchBatchVisible[kind];
+  const allSelected = visible.size > 0 && [...visible].every(id => selected.has(id));
+  visible.forEach(id => allSelected ? selected.delete(id) : selected.add(id));
+  const container = kind === 'runs' ? $('queueList')
+    : kind === 'memories' ? $('memoryList') : kind === 'artifacts' ? $('artifactList') : $('policyList');
+  container?.querySelectorAll('.workbench-select:not(:disabled)').forEach(checkbox => {
+    checkbox.checked = !allSelected;
+  });
+  syncWorkbenchBatchControls(kind);
+}
+
+async function deleteWorkbenchSelection(kind, event) {
+  event?.stopPropagation();
+  const config = workbenchBatchConfig[kind];
+  const ids = [...workbenchBatchSelections[kind]];
+  if (!ids.length) return;
+  if (!confirm(`永久删除已选的 ${ids.length} 个 ${config.noun}？数据库记录和关联内容会被真实删除，此操作不可恢复。`)) return;
+  const button = $(config.deleteButton);
+  button.disabled = true;
+  try {
+    if (kind === 'runs') {
+      await api('/v1/productivity/queue/batch', {
+        method: 'POST', body: JSON.stringify({runIds: ids, action: 'DELETE'})
+      });
+      workbenchBatchSelections[kind].clear();
+      await loadProductivityData();
+      if (ids.includes(state.runId)) {
+        await syncLatestRun({watch: false});
+        await loadMessages();
+      }
+    } else {
+      const endpoint = kind === 'memories' ? '/v1/memories/batch-delete'
+        : kind === 'artifacts' ? '/v1/artifacts/batch-delete' : '/v1/approvals/policies/batch-delete';
+      await api(endpoint, {method: 'POST', body: JSON.stringify({ids})});
+      workbenchBatchSelections[kind].clear();
+      if (kind === 'memories') await loadManagedMemories();
+      else if (kind === 'artifacts') await loadArtifacts();
+      else await loadApprovalPolicies();
+    }
+    showNotice(`已从数据库永久删除 ${ids.length} 个 ${config.noun}`);
+  } catch (error) {
+    showNotice(`批量删除失败：${error.message}`, true);
+    syncWorkbenchBatchControls(kind);
+  }
+}
+
 async function reindexKnowledge(name) {
   try {
     await api(`/v1/knowledge/documents/${encodeURIComponent(currentProjectKey())}/${encodeURIComponent(name)}/reindex`, {method: 'POST'});
@@ -1852,11 +3002,11 @@ function eventSummary(type, data) {
   if (type === 'model.delta') return '正在生成回答';
   if (type === 'model.reasoning.delta') return '收到推理内容';
   if (type === 'model.tool_calls') return `模型请求 ${data.count || 0} 个工具`;
-  if (type === 'tool.requested') return `请求工具：${data.name || ''}`;
+  if (type === 'tool.requested') return `请求工具：${toolDisplayName(data.name)}`;
   if (type === 'tool.started') {
     return data.shell
       ? `开始执行 · ${data.shell} · ${data.cwd || '.'}`
-      : `开始执行：${data.name || '工具'}`;
+      : `开始执行：${toolDisplayName(data.name)}`;
   }
   if (type === 'tool.completed') {
     const execution = data.shell ? ` · ${data.shell} · exit ${data.exitCode ?? '-'}` : '';
@@ -1880,12 +3030,12 @@ function addEvent(event, data) {
   const followTail = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   const item = element('div', 'event');
   const top = element('div', 'event-top');
-  top.append(element('span', '', event.type), element('i', '', `#${event.id || ''}`));
-  item.append(top, element('div', 'summary', eventSummary(event.type, data)));
+  top.append(element('span', '', event.type));
+  item.append(top, element('div', 'summary', replaceEntityReferences(eventSummary(event.type, data))));
   const details = element('details');
   details.append(
     element('summary', 'hint', '原始数据'),
-    element('pre', 'raw', JSON.stringify(data, null, 2))
+    element('pre', 'raw', replaceEntityReferences(JSON.stringify(data, null, 2)))
   );
   item.append(details);
   container.append(item);
@@ -1898,15 +3048,14 @@ function updateReasoningActivity(event, data) {
   if (!state.reasoningActivity) {
     const item = element('div', 'event');
     const top = element('div', 'event-top');
-    top.append(element('span', '', 'model.reasoning.delta'), element('i', '', `#${event.id || ''}`));
+    top.append(element('span', '', 'model.reasoning.delta'));
     const summary = element('div', 'summary', '正在接收推理内容');
     item.append(top, summary);
     $('events').querySelector('.nothing')?.remove();
     $('events').append(item);
-    state.reasoningActivity = {item, summary, eventId: top.lastElementChild};
+    state.reasoningActivity = {item, summary};
   }
   state.reasoningActivity.summary.textContent = `推理流已合并 · ${state.reasoningChars} 字符`;
-  state.reasoningActivity.eventId.textContent = `#${event.id || ''}`;
 }
 
 async function handleEvent(event, runId) {
@@ -2073,7 +3222,7 @@ async function retryRun(branch) {
       })
     });
     state.runId = result.run.id;
-    $('runMeta').textContent = result.run.id;
+    $('runMeta').textContent = runMetaLabel(result.run);
     setStatus(result.run.status);
     await loadMessages({forceScroll: true});
     watch(result.run.id);
@@ -2104,6 +3253,8 @@ let currentEvaluationExecution = '';
 
 async function openEvaluationCenter() {
   $('evaluationProject').textContent = `当前项目：${currentProjectKey()}`;
+  fillSelect($('evaluationAgentTeam'), state.agentTeams.filter(value => value.enabled)
+    .map(value => ({id: value.id, label: `团队评测 · ${value.name}`})), '单 Agent 基线');
   const creationButtons = ['installEvaluationStarterPack', 'addEvaluationSuite'].map($);
   creationButtons.forEach(button => { button.disabled = true; });
   $('evaluationDialog').showModal();
@@ -2229,9 +3380,12 @@ async function submitEvaluationCase(event) {
 }
 
 async function startEvaluation(suite) {
-  if (!confirm(`运行“${suite.name}”？每个启用用例将执行 ${suite.defaultTrials} 次。`)) return;
+  const teamId = $('evaluationAgentTeam')?.value || '';
+  const team = state.agentTeams.find(value => value.id === teamId);
+  if (!confirm(`运行“${suite.name}”？每个启用用例将执行 ${suite.defaultTrials} 次${team ? `，执行者为团队“${team.name}”` : ''}。`)) return;
   try {
     const body = state.modelProfileId ? {modelProfileId: state.modelProfileId} : {};
+    if (teamId) body.agentTeamId = teamId;
     const execution = await api(`/v1/evaluations/suites/${suite.id}/executions`, {method: 'POST', body: JSON.stringify(body)});
     currentEvaluationExecution = execution.id; showNotice('评测已排队，将复用内部 Run 执行');
     await Promise.all([loadEvaluations(), loadEvaluationReport(execution.id)]);
@@ -2247,8 +3401,9 @@ async function loadEvaluationReport(executionId, notify = true) {
     $('evaluationReportState').textContent = `${execution.status} · ${execution.trialCount} Trial/用例`;
     const header = element('div', 'evaluation-report-header');
     const score = execution.averageScore == null ? '执行中' : `${execution.averageScore.toFixed(1)} 分`;
+    const team = state.agentTeams.find(value => value.id === execution.agentTeamId);
     header.append(element('strong', '', `${report.suite.name} · ${score}`),
-      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过`));
+      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过${team ? ` · 团队 ${team.name}` : ''}`));
     const refresh = element('button', 'secondary', '刷新报告'); refresh.onclick = () => loadEvaluationReport(executionId); header.append(refresh);
     const nodes = [header];
     report.trials.forEach(value => {
@@ -2257,7 +3412,7 @@ async function loadEvaluationReport(executionId, notify = true) {
       const item = element('div', `evaluation-trial ${trial.score == null ? '' : trial.passed ? 'pass' : 'fail'}`);
       item.append(element('strong', '', `${value.caseName} · Trial ${trial.ordinal} · ${status}`));
       if (details.toolCalls != null) item.append(element('div', 'evaluation-checks',
-        `${details.toolCalls} 次工具调用 · ${details.outputTokens ?? details.tokens ?? 0} 输出 Token · ${details.totalTokens ?? details.tokens ?? 0} 总 Token · ${details.durationMs || 0} ms · Run ${trial.runId}`));
+        `${details.toolCalls} 次工具调用 · ${details.outputTokens ?? details.tokens ?? 0} 输出 Token · ${details.totalTokens ?? details.tokens ?? 0} 总 Token · ${details.durationMs || 0} ms`));
       const failures = (details.checks || []).filter(check => !check.passed);
       if (failures.length) item.append(element('div', 'evaluation-checks', failures.map(check => `${check.rule}：${check.evidence}（-${check.deduction}）`).join('\n')));
       (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
@@ -2334,6 +3489,7 @@ async function refreshComposerOptions() {
     if (state.agentProfiles.some(value => value.id === state.agentProfileId && value.enabled)) agent.value = state.agentProfileId;
     else state.agentProfileId = '';
     renderModelControls();
+    renderSessions();
     scheduleEstimate();
     if (!state.sessionId) renderEmpty();
   } catch (error) { showNotice(`效率配置加载失败：${error.message}`, true); }
@@ -2464,7 +3620,7 @@ function renderAgentStudio(values = state.agentProfiles) {
       value.templateKey ? `模板 ${value.templateKey}@v${value.templateVersion || 0}` : '自定义专家',
       model ? `模型 ${model.name}` : '项目默认模型',
       value.thinkingMode ? `思考 ${value.thinkingMode === 'enabled' ? (value.reasoningEffort || 'high') : '关闭'}` : '思考跟随对话',
-      tools.length ? `工具 ${tools.slice(0, 8).join(', ')}` : '工具不限制'
+      tools.length ? `工具 ${tools.slice(0, 8).map(toolDisplayName).join('、')}` : '工具不限制'
     ].join(' · ');
     const selected = state.agentProfileId === value.id;
     const item = workbenchItem(`${selected ? '当前 · ' : ''}${value.enabled ? '●' : '○'} ${value.name}`, subtitle);
@@ -2484,12 +3640,13 @@ function renderAgentTeams(values = state.agentTeams) {
   list.replaceChildren(...values.map(team => {
     const leader = state.agentProfiles.find(value => value.id === team.leaderAgentProfileId);
     const members = parseStringListJson(team.memberAgentProfileIdsJson)
-      .map(id => state.agentProfiles.find(value => value.id === id)?.name || id);
+      .map(id => agentProfileName(id));
     const item = workbenchItem(
       `${team.enabled ? '●' : '○'} ${team.name}`,
       `${leader ? `Leader ${leader.name}` : 'Leader 已失效'} · ${members.length ? members.join('、') : '暂无成员'} · 最多 ${team.maxExperts} 人`
     );
     if (team.enabled) actionButton(item, '用于协作', () => useAgentTeam(team), true);
+    actionButton(item, '团队指标', () => showAgentTeamMetrics(team));
     actionButton(item, '编辑', () => openAgentTeamDialog(team));
     actionButton(item, '删除', async () => {
       if (!confirm(`删除执行小队“${team.name}”？`)) return;
@@ -2500,6 +3657,13 @@ function renderAgentTeams(values = state.agentTeams) {
     return item;
   }));
   if (!values.length) list.append(element('div', 'hint', '暂无执行小队；新建后可在专家协作首页一键套用。'));
+}
+
+async function showAgentTeamMetrics(team) {
+  try {
+    const metrics = await api(`/v1/collaboration/teams/${team.id}/metrics`);
+    showNotice(`${team.name}\n任务 ${metrics.totalTasks} · 完成率 ${(metrics.taskCompletionRate * 100).toFixed(1)}% · 阻塞 ${metrics.blockedTasks}\nRun ${metrics.totalRuns} · 成功率 ${(metrics.runSuccessRate * 100).toFixed(1)}% · 委派 ${metrics.delegatedRuns} · 人工介入 ${metrics.humanInterventions}`);
+  } catch (error) { showNotice(`团队指标加载失败：${error.message}`, true); }
 }
 
 function useAgentTeam(team) {
@@ -2596,6 +3760,7 @@ async function startCollaboration() {
   if (!leader) return setFormError(ids.error, '没有可用 Leader，请先到“专家创建”补齐或创建专家模板');
   const allowedAgentProfileIds = [...document.querySelectorAll('[data-collaboration-agent]:checked')]
       .map(input => input.value).filter(Boolean);
+  const allowedAgentNames = allowedAgentProfileIds.map(id => agentProfileName(id));
   const selectedTeam = state.agentTeams.find(value =>
     value.id === state.selectedAgentTeamId && value.enabled);
   const complexity = $('homeCollaborationComplexity').value;
@@ -2606,7 +3771,7 @@ async function startCollaboration() {
     `协作目标：${objective}`,
     selectedTeam ? `执行小队：${selectedTeam.name}。` : '执行小队：本次临时组合。',
     `任务复杂度：${complexity}；风险等级：${risk}；最多可派发专家数：${maxExperts}。`,
-    allowedAgentProfileIds.length ? `本次只允许从这些 agent_profile_id 中选择：${allowedAgentProfileIds.join(', ')}` : '本次允许从全部启用专家中选择。',
+    allowedAgentNames.length ? `本次只允许选择这些专家：${allowedAgentNames.join('、')}` : '本次允许从全部启用专家中选择。',
     '',
     '请作为 Leader 执行：',
     '1. 调用 list_agent_profiles 查看本次策略允许的专家。',
@@ -2860,11 +4025,18 @@ function openAgentTeamDialog(team = null) {
   $('saveAgentTeam').textContent = editing ? '保存小队' : '创建小队';
   $('agentTeamName').value = editing ? team.name : '';
   $('agentTeamDescription').value = editing ? team.description || '' : '';
+  $('agentTeamInstructions').value = editing ? team.teamInstructions || '' : '';
+  $('agentTeamCapabilityTags').value = editing ? parseStringListJson(team.capabilityTagsJson).join(', ') : '';
+  $('agentTeamRoutingPolicy').value = editing ? team.routingPolicy || 'CAPABILITY' : 'CAPABILITY';
+  $('agentTeamCompletionPolicy').value = editing ? team.completionPolicy || 'LEADER_ACCEPTS' : 'LEADER_ACCEPTS';
   const leaders = state.agentProfiles
     .filter(value => value.enabled && (value.collaborationRole || '').toUpperCase() === 'LEADER')
     .map(value => ({id: value.id, label: value.name}));
   fillSelect($('agentTeamLeader'), leaders, '选择 Leader');
   if (editing) $('agentTeamLeader').value = team.leaderAgentProfileId;
+  fillSelect($('agentTeamFallback'), state.agentProfiles.filter(value => value.enabled)
+    .map(value => ({id: value.id, label: `${value.name} · ${value.collaborationRole || 'EXPERT'}`})), '不设置');
+  if (editing) $('agentTeamFallback').value = team.fallbackAgentProfileId || '';
   const selectedMembers = new Set(editing ? parseStringListJson(team.memberAgentProfileIdsJson) : []);
   const memberNodes = state.agentProfiles
     .filter(value => value.enabled && (value.collaborationRole || '').toUpperCase() !== 'LEADER')
@@ -2883,6 +4055,7 @@ function openAgentTeamDialog(team = null) {
   if (!memberNodes.length) $('agentTeamMembers').append(element('div', 'hint', '暂无可用成员专家'));
   $('agentTeamMaxExperts').value = String(editing ? team.maxExperts : 3);
   $('agentTeamMaxDepth').value = String(editing ? team.maxDepth : 1);
+  $('agentTeamMaxConcurrency').value = String(editing ? team.maxConcurrency : 3);
   $('agentTeamRequireReviewer').checked = editing && team.requireReviewer;
   $('agentTeamRequireRunner').checked = editing && team.requireRunner;
   $('agentTeamEnabled').checked = editing ? team.enabled : true;
@@ -2900,12 +4073,23 @@ async function submitAgentTeam(event) {
     const id = state.editingAgentTeamId;
     const members = [...document.querySelectorAll('[data-agent-team-member]:checked')]
       .map(input => input.value);
+    const memberRoles = Object.fromEntries(members.map(memberId => {
+      const profile = state.agentProfiles.find(value => value.id === memberId);
+      return [memberId, `${profile?.collaborationRole || 'EXPERT'} · ${profile?.description || profile?.name || memberId}`];
+    }));
     await api(id ? `/v1/productivity/agent-teams/${id}` : '/v1/productivity/agent-teams', {
       method: id ? 'PUT' : 'POST',
       body: JSON.stringify({
         projectKey: currentProjectKey(),
         name: $('agentTeamName').value.trim(),
         description: $('agentTeamDescription').value.trim(),
+        teamInstructions: $('agentTeamInstructions').value.trim(),
+        capabilityTags: $('agentTeamCapabilityTags').value.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+        routingPolicy: $('agentTeamRoutingPolicy').value,
+        completionPolicy: $('agentTeamCompletionPolicy').value,
+        fallbackAgentProfileId: $('agentTeamFallback').value || null,
+        maxConcurrency: Number($('agentTeamMaxConcurrency').value || 1),
+        memberRoles,
         leaderAgentProfileId: $('agentTeamLeader').value,
         memberAgentProfileIds: members,
         maxExperts: Number($('agentTeamMaxExperts').value || 1),
@@ -2978,20 +4162,23 @@ async function submitProfile(event) {
 
 function renderQueue(values) {
   if ($('queueSummary')) $('queueSummary').textContent = values.length ? `${values.length} 个任务` : '无任务';
+  setWorkbenchBatchVisible('runs', values.filter(value => terminal.has(value.run.status)).map(value => value.run.id));
   $('queueList').replaceChildren(...values.map(value => {
     const run = value.run; const remaining = value.remainingBudgetTokens < 0 ? '预算不限' : `项目余量 ${value.remainingBudgetTokens.toLocaleString()} Token`;
-    const item = workbenchItem(`${run.status} · ${value.sessionTitle}`, `${run.id} · step ${run.currentStep} · 优先级 ${run.priority} · ${Math.round(value.elapsedMs / 1000)}s · 已用 ${value.usedTokens.toLocaleString()} Token · ${remaining} · retry ${run.retryCount}`);
+    const executor = agentProfileName(run.agentProfileId, '默认专家');
+    const model = modelProfileName(run.modelProfileId);
+    const item = workbenchItem(`${run.status} · ${value.sessionTitle}`, `${executor} · ${model} · step ${run.currentStep} · 优先级 ${run.priority} · ${Math.round(value.elapsedMs / 1000)}s · 已用 ${value.usedTokens.toLocaleString()} Token · ${remaining} · retry ${run.retryCount}`);
     if (run.status === 'QUEUED') { actionButton(item, '提高优先级', () => setRunPriority(run.id, run.priority + 1)); actionButton(item, '取消', () => cancelQueueRun(run.id)); }
     if (!terminal.has(run.status) && run.status !== 'QUEUED') actionButton(item, '终止', () => cancelQueueRun(run.id));
     if (run.status === 'FAILED' || run.status === 'CANCELED') actionButton(item, '重新排队', () => batchQueue([run.id], 'REQUEUE'), true);
-    return item;
+    return selectableWorkbenchItem(item, 'runs', run.id, terminal.has(run.status));
   }));
   if (!values.length) $('queueList').append(element('div', 'hint', '当前没有排队、运行、待审批或失败任务'));
 }
 async function setRunPriority(id, priority) { await api(`/v1/productivity/queue/${id}/priority`, {method: 'PATCH', body: JSON.stringify({priority})}); await loadProductivityData(); }
 async function batchQueue(runIds, action) { await api('/v1/productivity/queue/batch', {method: 'POST', body: JSON.stringify({runIds, action})}); await loadProductivityData(); }
 async function cancelQueueRun(id) {
-  if (!confirm(`终止 Run ${id}？它会变为 CANCELED 终态，之后仍可从队列重新排队。`)) return;
+  if (!confirm('终止这次执行？它会变为 CANCELED 终态，之后仍可从队列重新排队。')) return;
   await batchQueue([id], 'CANCEL');
 }
 
@@ -3003,7 +4190,7 @@ function renderSchedules(values, templates) {
     const team = state.agentTeams.find(item => item.id === value.agentTeamId);
     const executor = team ? `小队 ${team.name}` : agent ? `专家 ${agent.name}` : '普通 Run';
     const modelLabel = model ? `模型 ${model.name}` : '模型继承模板/项目默认';
-    const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || value.templateId} · ${modelLabel} · ${executor} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
+    const item = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`, `${value.scheduleType} ${value.scheduleValue || ''} · ${template?.name || '模板已失效'} · ${modelLabel} · ${executor} · 下次 ${value.nextRunAt ? new Date(value.nextRunAt).toLocaleString() : '未安排'}`);
     actionButton(item, '删除', async () => { if (confirm(`删除定时任务“${value.name}”？`)) { await api(`/v1/productivity/schedules/${value.id}`, {method: 'DELETE'}); await loadProductivityData(); } }); return item;
   }));
 }
@@ -3188,6 +4375,7 @@ async function sendKnowledgeFeedback(result, helpful) {
 async function loadManagedMemories() {
   try {
     const values = await api(`/v1/memories/managed?projectKey=${encodeURIComponent(currentProjectKey())}&limit=200`);
+    state.managedMemories = values;
     renderManagedMemories(values);
   } catch (error) { showNotice(`Memory 加载失败：${error.message}`, true); }
 }
@@ -3366,6 +4554,7 @@ const MEMORY_LAYER_LABELS = {
 function renderManagedMemories(values) {
   const container = $('memoryList');
   container.replaceChildren();
+  setWorkbenchBatchVisible('memories', values.map(memory => memory.id));
   if (!values.length) {
     container.append(element('div', 'hint', '暂无启用的 Memory'));
     return;
@@ -3410,7 +4599,7 @@ function memoryItem(memory, allMemories) {
   actionButton(item, memory.enabled ? '停用' : '启用', () => setMemoryState(memory.id, {enabled: !memory.enabled}));
   if (allMemories.length > 1) actionButton(item, '合并到…', () => openMemoryMerge(memory, allMemories));
   actionButton(item, '修订', () => openMemoryRevision(memory));
-  return item;
+  return selectableWorkbenchItem(item, 'memories', memory.id);
 }
 
 function memoryDisplayTitle(memory) {
@@ -3555,13 +4744,14 @@ async function submitMemoryRevision(event) {
 async function loadArtifacts() {
   try {
     const values = await api(`/v1/artifacts?projectKey=${encodeURIComponent(currentProjectKey())}&limit=100`);
+    setWorkbenchBatchVisible('artifacts', values.map(artifact => artifact.id));
     $('artifactList').replaceChildren(...values.map(artifact => {
-      const item = workbenchItem(artifact.name, `${artifact.type} · ${Math.ceil(artifact.size / 1024)} KB · ${artifact.runId}`);
+      const item = workbenchItem(artifact.name || '未命名 Artifact', `${artifact.type} · ${Math.ceil(artifact.size / 1024)} KB · 关联执行产物`);
       actionButton(item, '预览', () => previewArtifact(artifact.id));
       actionButton(item, '下载', () => downloadArtifact(artifact.id));
       actionButton(item, '复用', () => reuseArtifact(artifact.id), true);
       actionButton(item, '删除', () => deleteArtifact(artifact.id));
-      return item;
+      return selectableWorkbenchItem(item, 'artifacts', artifact.id);
     }));
     if (!values.length) $('artifactList').append(element('div', 'hint', '暂无 Artifact'));
   } catch (error) { showNotice(`Artifact 加载失败：${error.message}`, true); }
@@ -3742,20 +4932,21 @@ async function inspectPlan(id) {
       api(`/v1/plans/${id}/dag/batches`)
     ]);
     const stateText = Object.entries(view.state.stepCounts || {}).map(([status, count]) => `${status}=${count}`).join(' · ') || '无步骤';
+    const stepNames = new Map(view.steps.map(step => [step.id, `${step.ordinal}. ${step.title}`]));
     $('planDetailTitle').textContent = `${view.plan.status} · ${conciseTaskName(view.plan.summary || view.plan.objective, 'Plan')}`;
     const content = $('planDetailContent');
     content.replaceChildren();
     content.append(auditSummary([
-      ['Plan', view.plan.id],
+      ['计划', conciseTaskName(view.plan.summary || view.plan.objective, '未命名计划')],
       ['步骤状态', stateText],
       ['模型 Token', String(view.state.totalTokens || 0)]
     ]));
     content.append(auditTextSection('完整目标', view.plan.objective));
     content.append(auditListSection('步骤与 Run', view.steps.map(step => {
       const card = auditCard(`${step.status} · ${step.ordinal}. ${step.title}`,
-        `${step.clientId} · ${step.type} · ${step.executionMode}`, step.description);
+        `${step.type} · ${step.executionMode}`, step.description);
       const actions = element('div', 'managed-actions');
-      const openRun = actionButtonElement(step.runId ? `打开 Run · ${step.runId}` : '打开 Run · 尚未生成',
+      const openRun = actionButtonElement(step.runId ? '打开关联执行' : '尚未生成执行',
         () => openPlanStepRun(view.plan, step));
       openRun.disabled = !step.runId;
       actions.append(openRun);
@@ -3772,14 +4963,14 @@ async function inspectPlan(id) {
       return card;
     })));
     content.append(auditTextSection('Graph 边', view.edges.map(edge =>
-      `${edge.type} · ${edge.fromStepId} → ${edge.toStepId} · ${edge.conditionExpression}`
+      `${edge.type} · ${stepNames.get(edge.fromStepId) || '未知步骤'} → ${stepNames.get(edge.toStepId) || '未知步骤'} · ${edge.conditionExpression}`
       + `${edge.type === 'REWORK' ? ` · ${edge.traversalCount}/${edge.maxTraversals}` : ''}`).join('\n') || '无'));
     content.append(auditTextSection('阻塞原因', (view.state.blockers || []).map(blocker =>
-      `${blocker.kind} · ${blocker.stepId} · ${blocker.detail}`).join('\n') || '无'));
+      `${blocker.kind} · ${stepNames.get(blocker.stepId) || '计划级'} · ${blocker.detail}`).join('\n') || '无'));
     content.append(auditTextSection('调度批次', batches.map(batch =>
-      `#${batch.ordinal} ${batch.readOnlyEligible ? 'read-only' : 'serial'} · ${batch.stepIds.join(', ')}`).join('\n') || '无'));
+      `第 ${batch.ordinal} 批 · ${batch.readOnlyEligible ? '可并行只读' : '串行'} · ${batch.stepIds.map(stepId => stepNames.get(stepId) || '未知步骤').join('、')}`).join('\n') || '无'));
     content.append(auditTextSection('异步任务', jobs.map(job =>
-      `${job.status} · ${job.kind} · ${job.id}${job.runId ? ` · run ${job.runId}` : ''}`).join('\n') || '无'));
+      `${job.status} · ${job.kind}${job.runId ? ' · 已关联执行' : ''}`).join('\n') || '无'));
     if (!$('planDetailDialog').open) $('planDetailDialog').showModal();
   } catch (error) { showNotice(`Plan 详情加载失败：${error.message}`, true); }
 }
@@ -3806,9 +4997,10 @@ async function openPlanStepRun(plan, step) {
     const content = $('runAuditContent');
     content.replaceChildren();
     content.append(auditSummary([
-      ['Run', audit.run.id],
-      ['Session', `${audit.session.title} · ${audit.session.id}`],
-      ['Plan Step', `${step.ordinal}. ${step.title}`]
+      ['执行者', agentProfileName(audit.run.agentProfileId, '默认专家')],
+      ['模型', modelProfileName(audit.run.modelProfileId)],
+      ['所属会话', audit.session.title],
+      ['计划步骤', `${step.ordinal}. ${step.title}`]
     ]));
     const sessionActions = element('div', 'managed-actions');
     sessionActions.append(actionButtonElement('打开所属 Session', async () => {
@@ -3820,20 +5012,20 @@ async function openPlanStepRun(plan, step) {
     content.append(auditTextSection('Run 输入', audit.run.input || ''));
     content.append(auditListSection('模型输出', (audit.messages || [])
       .filter(message => message.role === 'assistant').map(message => {
-      const card = auditCard(`${message.role} · #${message.sequence}`, message.createdAt || '',
+      const card = auditCard('模型回答', message.createdAt || '',
         message.content || '');
       if (message.reasoningContent) card.append(auditDetails('模型推理', message.reasoningContent));
       return card;
     })));
     content.append(auditListSection('工具调用', (audit.toolCalls || []).map(call => {
-      const card = auditCard(`${call.status} · ${call.toolName}`, call.id,
+      const card = auditCard(`${call.status} · ${toolDisplayName(call.toolName)}`, call.createdAt || '',
         call.error || call.result || '尚无结果');
       card.append(auditDetails('持久化参数', formatAuditValue(call.arguments)));
       if (call.result) card.append(auditDetails('完整结果', formatAuditValue(call.result)));
       return card;
     })));
     content.append(auditListSection('审批', (audit.approvals || []).map(approval => {
-      const card = auditCard(`${approval.status} · ${approval.id}`, approval.createdAt || '', approval.reason || '');
+      const card = auditCard(`审批 · ${approval.status}`, approval.createdAt || '', approval.reason || '');
       if (approval.status === 'PENDING') {
         const actions = element('div', 'managed-actions');
         actions.append(
@@ -3854,7 +5046,7 @@ async function openPlanStepRun(plan, step) {
       auditCard(`${check.status} · ${check.name}`, check.kind,
         check.evidence || check.actual || check.expected || check.error || ''))));
     content.append(auditListSection('Run 事件', (audit.events || []).map(event =>
-      auditCard(`${event.type} · #${event.id}`, event.createdAt || '', formatAuditValue(event.data)))));
+      auditCard(event.type, event.createdAt || '', formatAuditValue(event.data)))));
     if (!$('runAuditDialog').open) $('runAuditDialog').showModal();
   } catch (error) {
     showNotice(`Run 审计详情加载失败：${error.message}`, true);
@@ -3873,7 +5065,7 @@ function auditSummary(values) {
 
 function auditTextSection(title, text) {
   const section = element('section', 'audit-section');
-  section.append(element('h3', '', title), element('pre', 'raw', text || '无'));
+  section.append(element('h3', '', title), element('pre', 'raw', replaceEntityReferences(text || '无')));
   return section;
 }
 
@@ -3890,15 +5082,15 @@ function auditListSection(title, cards) {
 function auditCard(title, meta = '', body = '') {
   const card = element('article', 'audit-card');
   const head = element('div', 'audit-card-head');
-  head.append(element('strong', '', title), element('small', 'hint', meta));
+  head.append(element('strong', '', replaceEntityReferences(title)), element('small', 'hint', replaceEntityReferences(meta)));
   card.append(head);
-  if (body) card.append(element('p', '', body));
+  if (body) card.append(element('p', '', replaceEntityReferences(body)));
   return card;
 }
 
 function auditDetails(title, value) {
   const details = element('details', '');
-  details.append(element('summary', '', title), element('pre', '', value || ''));
+  details.append(element('summary', '', title), element('pre', '', replaceEntityReferences(value || '')));
   return details;
 }
 
@@ -3911,13 +5103,14 @@ function formatAuditValue(value) {
 async function loadApprovalPolicies() {
   try {
     const values = await api(`/v1/approvals/policies?projectKey=${encodeURIComponent(currentProjectKey())}`);
+    setWorkbenchBatchVisible('policies', values.map(policy => policy.id));
     $('policyList').replaceChildren(...values.map(policy => {
       const item = workbenchItem(`${policy.scope} · ${policy.toolName}`, `参数指纹 ${policy.argumentsSha256.slice(0, 16)}…`);
       actionButton(item, '撤销', async () => {
         await api(`/v1/approvals/policies/${policy.id}`, {method: 'DELETE'});
         await loadApprovalPolicies();
       });
-      return item;
+      return selectableWorkbenchItem(item, 'policies', policy.id);
     }));
     if (!values.length) $('policyList').append(element('div', 'hint', '暂无持久化审批策略'));
   } catch (error) { showNotice(`审批策略加载失败：${error.message}`, true); }
@@ -3944,7 +5137,7 @@ async function loadApprovals() {
       : taskNames.get(approval.runId) || '协作子专家';
     card.append(
       element('strong', '', `${owner}需要你的确认`),
-      element('div', 'approval-context', `Run ${approval.runId}`),
+      element('div', 'approval-context', approval.runId === state.runId ? '当前执行' : `${owner}执行`),
       element('div', '', approval.reason)
     );
     const actions = element('div', 'actions');
@@ -3980,6 +5173,7 @@ async function resolveApproval(id, decision, rememberScope = null) {
     });
     showNotice(decision === 'APPROVED' ? '已允许，继续执行' : '已拒绝');
     await loadApprovals();
+    await refreshApprovalInbox();
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -4028,7 +5222,9 @@ function updateAgentModelControls() {
     : '仅在思考模式开启时生效。';
 }
 
-$('new').onclick = showHome;
+document.querySelectorAll('[data-home-mode]').forEach(button => {
+  button.onclick = () => setHomeMode(button.dataset.homeMode);
+});
 $('newGroup').onclick = () => {
   $('groupName').value = '';
   $('groupDialog').showModal();
@@ -4076,6 +5272,12 @@ $('settings').onclick = () => openConnectionSettings();
 $('capabilities').onclick = openCapabilities;
 $('workbench').onclick = openWorkbench;
 $('agentStudio').onclick = openAgentStudio;
+$('returnCollaborationTask').onclick = returnToCollaborationTask;
+$('approvalInbox').onclick = async () => {
+  renderApprovalInbox(await refreshApprovalInbox());
+  $('approvalInboxDialog').showModal();
+};
+$('closeApprovalInbox').onclick = () => $('approvalInboxDialog').close();
 $('evaluationCenter').onclick = openEvaluationCenter;
 $('closeWorkbench').onclick = () => $('workbenchDialog').close();
 $('closePlanDetail').onclick = () => $('planDetailDialog').close();
@@ -4085,6 +5287,8 @@ $('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
 $('refreshMemories').onclick = loadManagedMemories;
+$('selectAllMemories').onclick = event => toggleWorkbenchBatchSelection('memories', event);
+$('deleteSelectedMemories').onclick = event => deleteWorkbenchSelection('memories', event);
 $('openMemoryWiki').onclick = () => openMemoryWiki().catch(error => showNotice(`Wiki 加载失败：${error.message}`, true));
 $('closeMemoryWiki').onclick = () => $('memoryWikiDialog').close();
 $('searchMemoryWiki').onclick = () => loadMemoryWiki();
@@ -4092,10 +5296,16 @@ $('showMemoryWikiGraph').onclick = () => setMemoryWikiView('graph');
 $('showMemoryWikiPages').onclick = () => setMemoryWikiView('pages');
 $('memoryWikiSearch').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); loadMemoryWiki(); } };
 $('refreshArtifacts').onclick = loadArtifacts;
+$('selectAllArtifacts').onclick = event => toggleWorkbenchBatchSelection('artifacts', event);
+$('deleteSelectedArtifacts').onclick = event => deleteWorkbenchSelection('artifacts', event);
 $('refreshPlans').onclick = loadPlans;
 $('refreshPolicies').onclick = loadApprovalPolicies;
+$('selectAllPolicies').onclick = event => toggleWorkbenchBatchSelection('policies', event);
+$('deleteSelectedPolicies').onclick = event => deleteWorkbenchSelection('policies', event);
 $('refreshProductivity').onclick = loadProductivityData;
 $('refreshQueue').onclick = event => { event.stopPropagation(); loadProductivityData(); };
+$('selectAllRuns').onclick = event => toggleWorkbenchBatchSelection('runs', event);
+$('deleteSelectedRuns').onclick = event => deleteWorkbenchSelection('runs', event);
 $('refreshEvaluations').onclick = loadEvaluations;
 $('addEvaluationSuite').onclick = openEvaluationSuiteDialog;
 $('installEvaluationStarterPack').onclick = installEvaluationStarterPack;
@@ -4198,6 +5408,9 @@ $('workspace').classList.toggle('hide-detail', !state.detailOpen);
 clearEvents();
 renderModelControls();
 selectExecutionShell(state.executionShell);
+syncCollaborationTaskReturnAction();
 renderEmpty();
 refreshComposerOptions();
 refreshSessions();
+refreshApprovalInbox();
+state.approvalInboxRefreshTimer = setInterval(refreshApprovalInbox, 3000);

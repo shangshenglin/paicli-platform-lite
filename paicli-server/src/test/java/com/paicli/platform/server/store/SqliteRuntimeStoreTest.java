@@ -4,10 +4,12 @@ import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.artifact.LocalArtifactStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.List;
@@ -89,7 +91,31 @@ class SqliteRuntimeStoreTest {
             var values = new java.util.ArrayList<Integer>();
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27);
+                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+                    28, 29, 30, 31, 32, 33, 34);
+        }
+    }
+
+    @Test
+    void migratesEnhancedTeamsAndDurableCollaborationTables() throws Exception {
+        store();
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            var teamColumns = new java.util.ArrayList<String>();
+            try (var columns = statement.executeQuery("PRAGMA table_info(agent_teams)")) {
+                while (columns.next()) teamColumns.add(columns.getString("name"));
+            }
+            assertThat(teamColumns).contains("team_instructions", "member_roles_json", "capability_tags_json",
+                    "routing_policy", "completion_policy", "fallback_agent_profile_id", "max_concurrency");
+
+            var tables = new java.util.ArrayList<String>();
+            try (var values = statement.executeQuery(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'collaboration_%'")) {
+                while (values.next()) tables.add(values.getString(1));
+            }
+            assertThat(tables).contains("collaboration_tasks", "collaboration_comments",
+                    "collaboration_activities", "collaboration_triggers", "collaboration_mentions",
+                    "collaboration_task_runs", "collaboration_route_decisions", "collaboration_stage_barriers");
         }
     }
 
@@ -432,6 +458,69 @@ class SqliteRuntimeStoreTest {
         var continuation = store.createRun(session.id(), "continue in the same workspace");
         assertThat(store.workspaceOwnerRunId(continuation.id())).isEqualTo(parent.id());
         assertThat(store.latestCollaborationRunId(session.id())).contains(parent.id());
+    }
+
+    @Test
+    void explicitCollaborationWorkspaceIsSharedAcrossSessionsAndDelegations() throws Exception {
+        SqliteRuntimeStore store = store();
+        String owner = SqliteRuntimeStore.collaborationWorkspaceOwner("task-root");
+        var firstSession = store.createSession("leader-1");
+        var first = store.createRunInWorkspace(firstSession.id(), "coordinate", "auto", "", List.of(),
+                null, null, 0, 0, "bash", owner);
+        var tool = store.createToolCall(first.id(), "provider-agent", "spawn_agent", "{}", "shared-agent");
+        var child = store.createOrGetDelegation(first.id(), tool.id(), "worker", "implement",
+                null, null, "auto", "", null, null, "{}");
+        var secondSession = store.createSession("leader-2");
+        var second = store.createRunInWorkspace(secondSession.id(), "continue", "auto", "", List.of(),
+                null, null, 0, 0, "bash", owner);
+
+        assertThat(store.workspaceOwnerRunId(first.id())).isEqualTo(owner);
+        assertThat(store.workspaceOwnerRunId(child.childRunId())).isEqualTo(owner);
+        assertThat(store.workspaceOwnerRunId(second.id())).isEqualTo(owner);
+    }
+
+    @Test
+    void startupMovesExistingCollaborationRunsIntoTaskWorkspace() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("legacy collaboration");
+        var run = first.createRun(session.id(), "legacy work");
+        CollaborationStore collaboration = new CollaborationStore(properties());
+        collaboration.saveTask("task-root", "default", "Legacy", "", "IN_PROGRESS", 0,
+                "AGENT", "agent-a", "", null, 0, null, "USER");
+        collaboration.linkRun("task-root", run.id(), null, "TRIGGERED");
+        Path source = tempDir.resolve("workspaces").resolve(run.id());
+        Files.createDirectories(source);
+        Files.writeString(source.resolve("delivery.txt"), "legacy delivery");
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        String owner = SqliteRuntimeStore.collaborationWorkspaceOwner("task-root");
+        assertThat(recovered.workspaceOwnerRunId(run.id())).isEqualTo(owner);
+        assertThat(tempDir.resolve("workspaces").resolve(owner).resolve("delivery.txt"))
+                .hasContent("legacy delivery");
+    }
+
+    @Test
+    void limitsConcurrentDelegatedRunsByCollaborationPolicy() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("concurrency", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var policy = store.saveCollaborationPolicy(parent.id(), true, "complex", "medium",
+                "[\"agent-a\",\"agent-b\"]", 2, 1, 2, 1, 0, 0,
+                false, false, false);
+        var firstTool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-first");
+        var secondTool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "agent-second");
+        var first = store.createOrGetDelegation(parent.id(), firstTool.id(), "first", "first task");
+        var second = store.createOrGetDelegation(parent.id(), secondTool.id(), "second", "second task");
+
+        assertThat(policy.maxConcurrentAgentRuns()).isEqualTo(1);
+        assertThat(store.waitForAgent(parent.id())).isTrue();
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(first.childRunId());
+        assertThat(store.claimNextRun()).isEmpty();
+
+        store.completeRun(first.childRunId());
+        assertThat(store.claimNextRun()).get().extracting("id").isEqualTo(second.childRunId());
     }
 
     @Test
@@ -794,6 +883,87 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void batchDeleteIsAtomicAndPhysicallyRemovesRuntimeRecordsAndArtifactFiles() throws Exception {
+        SqliteRuntimeStore store = store();
+        var memoryA = store.createMemory("project-a", "batch.a", "first", "batch");
+        var memoryB = store.createMemory("project-a", "batch.b", "second", "batch");
+        store.updateMemory(memoryA.id(), memoryA.memoryKey(), "first revised", memoryA.tags());
+
+        assertThatThrownBy(() -> store.deleteMemories(List.of(memoryA.id(), "missing-memory")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("missing-memory");
+        assertThat(store.findMemory(memoryA.id())).isPresent();
+        assertThat(store.deleteMemories(List.of(memoryA.id(), memoryB.id())))
+                .containsExactly(memoryA.id(), memoryB.id());
+        assertThat(store.findMemory(memoryA.id())).isEmpty();
+        assertThat(countWhere("memory_revisions", "memory_id", memoryA.id())).isZero();
+
+        var policySession = store.createSession("policies", "project-a");
+        var policyA = store.createApprovalPolicy("PROJECT", null, "project-a", "write_file", "a".repeat(64));
+        var policyB = store.createApprovalPolicy("SESSION", policySession.id(), "project-a",
+                "execute_command", "b".repeat(64));
+        assertThat(store.deleteApprovalPolicies(List.of(policyA.id(), policyB.id())))
+                .containsExactly(policyA.id(), policyB.id());
+        assertThat(store.approvalPolicies("project-a")).isEmpty();
+
+        var artifactSession = store.createSession("artifacts", "project-a");
+        var artifactRun = store.createRun(artifactSession.id(), "create artifacts");
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties(), store);
+        var artifactA = artifacts.saveText(artifactRun.id(), "report", "a", "alpha");
+        var artifactB = artifacts.saveText(artifactRun.id(), "report", "b", "beta");
+        Path artifactAPath = artifacts.root().resolve(artifactA.relativePath());
+        Path artifactBPath = artifacts.root().resolve(artifactB.relativePath());
+        assertThat(Files.exists(artifactAPath)).isTrue();
+        assertThat(artifacts.deleteBatch(List.of(artifactA.id(), artifactB.id())))
+                .containsExactly(artifactA.id(), artifactB.id());
+        assertThat(store.findArtifact(artifactA.id())).isEmpty();
+        assertThat(Files.exists(artifactAPath)).isFalse();
+        assertThat(Files.exists(artifactBPath)).isFalse();
+
+        var failedSession = store.createSession("failed", "project-a");
+        var failedRun = store.createRun(failedSession.id(), "failed work");
+        var call = store.createToolCall(failedRun.id(), "provider", "write_file", "{}", "batch-run-call");
+        var approval = store.createApproval(failedRun.id(), call.id(), "confirm");
+        var runArtifact = store.createArtifact(failedRun.id(), "tool-result", "result", "result.txt", 1, "abc");
+        store.recordModelUsage(failedRun.id(), "provider", 10, 8, 2, 0);
+        store.startModelAttempt(failedRun.id(), "provider", "model", 1);
+        store.saveCollaborationPolicy(failedRun.id(), true, "medium", "medium",
+                "[]", 2, 1, 2, 4_000, 0, false, false, false);
+        store.failRun(failedRun.id(), "expected failure");
+
+        var activeSession = store.createSession("active", "project-a");
+        var activeRun = store.createRun(activeSession.id(), "active work");
+        assertThatThrownBy(() -> store.deleteRuns(List.of(failedRun.id(), activeRun.id())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("only terminal runs");
+        assertThat(store.findRun(failedRun.id())).isPresent();
+        assertThat(store.findApproval(approval.id())).isPresent();
+
+        var graphSession = store.createSession("delegation graph", "project-a");
+        var graphParent = store.createRun(graphSession.id(), "delegate work");
+        var graphTool = store.createToolCall(graphParent.id(), "spawn", "spawn_agent", "{}",
+                "batch-delete-graph");
+        var delegation = store.createOrGetDelegation(graphParent.id(), graphTool.id(), "worker", "child work");
+        store.failRun(graphParent.id(), "parent failed");
+        assertThatThrownBy(() -> store.deleteRuns(List.of(graphParent.id())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("active delegated relatives", delegation.childRunId());
+
+        store.cancelRun(activeRun.id());
+        assertThat(store.deleteRuns(List.of(failedRun.id(), activeRun.id())))
+                .containsExactly(failedRun.id(), activeRun.id());
+        assertThat(store.findRun(failedRun.id())).isEmpty();
+        assertThat(store.findApproval(approval.id())).isEmpty();
+        assertThat(store.findToolCall(call.id())).isEmpty();
+        assertThat(store.findArtifact(runArtifact.id())).isEmpty();
+        assertThat(store.messages(failedSession.id())).isEmpty();
+        for (String table : List.of("run_events", "model_usage", "model_attempts",
+                "memory_extractions", "run_collaboration_policies")) {
+            assertThat(countWhere(table, "run_id", failedRun.id())).as(table).isZero();
+        }
+    }
+
+    @Test
     void terminalRunCannotBeCompletedOrRequeuedAfterCancellation() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("cancel-race");
@@ -807,6 +977,23 @@ class SqliteRuntimeStoreTest {
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.CANCELED);
         assertThat(store.events(run.id(), 0)).extracting("type")
                 .contains("run.canceled").doesNotContain("run.completed");
+    }
+
+    @Test
+    void cancelingRunClosesItsPendingApprovals() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("cancel-approval");
+        var run = store.createRun(session.id(), "work");
+        var call = store.createToolCall(run.id(), "command", "execute_command", "{}", "cancel-approval-key");
+        var approval = store.createApproval(run.id(), call.id(), "confirm");
+
+        assertThat(store.cancelRun(run.id())).isTrue();
+
+        assertThat(store.findApproval(approval.id())).hasValueSatisfying(value -> {
+            assertThat(value.status()).isEqualTo(com.paicli.platform.common.ApprovalStatus.DENIED);
+            assertThat(value.resolvedAt()).isNotNull();
+        });
+        assertThat(store.pendingApprovals()).isEmpty();
     }
 
     @Test
@@ -899,5 +1086,17 @@ class SqliteRuntimeStoreTest {
 
     private PlatformProperties properties() {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+    }
+
+    private long countWhere(String table, String column, String value) throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (Connection connection = DriverManager.getConnection(url);
+             var statement = connection.prepareStatement(
+                     "SELECT COUNT(*) FROM " + table + " WHERE " + column + "=?")) {
+            statement.setString(1, value);
+            try (var result = statement.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0;
+            }
+        }
     }
 }

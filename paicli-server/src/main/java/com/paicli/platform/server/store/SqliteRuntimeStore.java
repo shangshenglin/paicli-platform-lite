@@ -24,6 +24,8 @@ import org.springframework.stereotype.Repository;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -42,10 +44,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Repository
 public class SqliteRuntimeStore {
     private static final Pattern WIKI_LINK = Pattern.compile("\\[\\[([a-zA-Z0-9_.-]{1,120})]]");
+    private static final Pattern SAFE_WORKSPACE_KEY = Pattern.compile("[A-Za-z0-9_.-]{1,240}");
     private final Path databasePath;
     private final Path workspaceRoot;
     private final Path artifactRoot;
@@ -285,10 +289,13 @@ public class SqliteRuntimeStore {
                     "run_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, complexity TEXT NOT NULL DEFAULT 'MEDIUM', " +
                     "risk TEXT NOT NULL DEFAULT 'MEDIUM', allowed_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]', " +
                     "max_experts INTEGER NOT NULL DEFAULT 3, max_depth INTEGER NOT NULL DEFAULT 1, " +
-                    "max_child_runs INTEGER NOT NULL DEFAULT 6, max_estimated_tokens INTEGER NOT NULL DEFAULT 0, " +
+                    "max_child_runs INTEGER NOT NULL DEFAULT 6, max_concurrent_agent_runs INTEGER NOT NULL DEFAULT 0, " +
+                    "max_estimated_tokens INTEGER NOT NULL DEFAULT 0, " +
                     "max_estimated_cost REAL NOT NULL DEFAULT 0, allow_expert_delegation INTEGER NOT NULL DEFAULT 0, " +
                     "require_reviewer INTEGER NOT NULL DEFAULT 0, require_runner INTEGER NOT NULL DEFAULT 0, " +
                     "created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_collaboration_policies", "max_concurrent_agent_runs",
+                    "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE TABLE IF NOT EXISTS task_templates (" +
                     "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, name TEXT NOT NULL, shortcut TEXT NOT NULL DEFAULT '', " +
                     "prompt TEXT NOT NULL, variables_json TEXT NOT NULL DEFAULT '{}', attachment_requirements TEXT NOT NULL DEFAULT '', " +
@@ -331,8 +338,82 @@ public class SqliteRuntimeStore {
                     "require_reviewer INTEGER NOT NULL DEFAULT 0, require_runner INTEGER NOT NULL DEFAULT 0, " +
                     "enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
                     "UNIQUE(project_key,name))");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "team_instructions",
+                    "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "member_roles_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "capability_tags_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "routing_policy",
+                    "TEXT NOT NULL DEFAULT 'CAPABILITY_MATCH'");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "completion_policy",
+                    "TEXT NOT NULL DEFAULT 'VALIDATED_REVIEW'");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "fallback_agent_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "agent_teams", "max_concurrency",
+                    "INTEGER NOT NULL DEFAULT 3");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_teams_project " +
                     "ON agent_teams(project_key,enabled DESC,name COLLATE NOCASE)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_tasks (" +
+                    "id TEXT PRIMARY KEY,project_key TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT ''," +
+                    "status TEXT NOT NULL DEFAULT 'TODO',priority INTEGER NOT NULL DEFAULT 0," +
+                    "assignee_type TEXT NOT NULL DEFAULT 'HUMAN',assignee_id TEXT," +
+                    "acceptance_criteria TEXT NOT NULL DEFAULT '',parent_id TEXT,stage INTEGER NOT NULL DEFAULT 0," +
+                    "latest_plan_id TEXT,created_by TEXT NOT NULL DEFAULT 'USER'," +
+                    "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "FOREIGN KEY(parent_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_tasks_project " +
+                    "ON collaboration_tasks(project_key,status,priority DESC,updated_at DESC)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_tasks_parent " +
+                    "ON collaboration_tasks(parent_id,stage,status,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_comments (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,parent_comment_id TEXT," +
+                    "author_type TEXT NOT NULL,author_id TEXT,content TEXT NOT NULL," +
+                    "resolved INTEGER NOT NULL DEFAULT 0,conclusion INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(parent_comment_id) REFERENCES collaboration_comments(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_comments_task " +
+                    "ON collaboration_comments(task_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_activities (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,activity_type TEXT NOT NULL," +
+                    "actor_type TEXT NOT NULL,actor_id TEXT,subject_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}'," +
+                    "created_at TEXT NOT NULL,FOREIGN KEY(task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_activities_task " +
+                    "ON collaboration_activities(task_id,id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_triggers (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_key TEXT NOT NULL,trigger_type TEXT NOT NULL," +
+                    "source_id TEXT,target_type TEXT NOT NULL,target_id TEXT NOT NULL,payload_json TEXT NOT NULL DEFAULT '{}'," +
+                    "idempotency_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL DEFAULT 'PENDING'," +
+                    "created_run_id TEXT,error TEXT,created_at TEXT NOT NULL,processed_at TEXT," +
+                    "FOREIGN KEY(task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(created_run_id) REFERENCES runs(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_triggers_task " +
+                    "ON collaboration_triggers(task_id,created_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_triggers_status " +
+                    "ON collaboration_triggers(status,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_mentions (" +
+                    "comment_id TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,created_at TEXT NOT NULL," +
+                    "PRIMARY KEY(comment_id,target_type,target_id)," +
+                    "FOREIGN KEY(comment_id) REFERENCES collaboration_comments(id) ON DELETE CASCADE)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_task_runs (" +
+                    "task_id TEXT NOT NULL,run_id TEXT NOT NULL UNIQUE,trigger_id TEXT,relationship TEXT NOT NULL DEFAULT 'EXECUTION'," +
+                    "created_at TEXT NOT NULL,PRIMARY KEY(task_id,run_id)," +
+                    "FOREIGN KEY(task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(trigger_id) REFERENCES collaboration_triggers(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_task_runs_task " +
+                    "ON collaboration_task_runs(task_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_route_decisions (" +
+                    "id TEXT PRIMARY KEY,project_key TEXT NOT NULL,task_id TEXT,trigger_id TEXT,input TEXT NOT NULL," +
+                    "complexity TEXT NOT NULL,risk TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT," +
+                    "leader_agent_profile_id TEXT,recommended_agent_profile_ids_json TEXT NOT NULL DEFAULT '[]'," +
+                    "reasons_json TEXT NOT NULL DEFAULT '[]',estimated_concurrency INTEGER NOT NULL DEFAULT 1," +
+                    "created_at TEXT NOT NULL,FOREIGN KEY(task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_routes_project " +
+                    "ON collaboration_route_decisions(project_key,created_at DESC)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_stage_barriers (" +
+                    "parent_task_id TEXT NOT NULL,stage INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'WAITING'," +
+                    "completed_at TEXT,created_at TEXT NOT NULL,PRIMARY KEY(parent_task_id,stage)," +
+                    "FOREIGN KEY(parent_task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
             statement.execute("CREATE TABLE IF NOT EXISTS budget_policies (" +
                     "project_key TEXT PRIMARY KEY, daily_tokens INTEGER NOT NULL DEFAULT 0, monthly_tokens INTEGER NOT NULL DEFAULT 0, " +
                     "daily_cost REAL NOT NULL DEFAULT 0, monthly_cost REAL NOT NULL DEFAULT 0, warn_ratio REAL NOT NULL DEFAULT 0.8, " +
@@ -388,6 +469,7 @@ public class SqliteRuntimeStore {
                     "model_profile_id TEXT, trial_count INTEGER NOT NULL, pass_threshold INTEGER NOT NULL, " +
                     "average_score REAL, passed INTEGER, created_at TEXT NOT NULL, completed_at TEXT, " +
                     "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_executions", "agent_team_id", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_executions_suite " +
                     "ON evaluation_executions(suite_id,created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_trials (" +
@@ -540,9 +622,21 @@ public class SqliteRuntimeStore {
                     "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
                     "('COMPLETED','FAILED','CANCELED')");
             SqliteSchemaMigrator.recordAppliedVersions(connection);
+            statement.execute("UPDATE approvals SET status='DENIED',resolved_at='" + Instant.now()
+                    + "' WHERE status='PENDING' AND run_id IN "
+                    + "(SELECT id FROM runs WHERE status IN ('COMPLETED','FAILED','CANCELED'))");
+            statement.execute("WITH RECURSIVE task_tree(root_id,task_id) AS ("
+                    + "SELECT id,id FROM collaboration_tasks WHERE parent_id IS NULL OR parent_id='' "
+                    + "UNION ALL SELECT task_tree.root_id,child.id FROM collaboration_tasks child "
+                    + "JOIN task_tree ON child.parent_id=task_tree.task_id) "
+                    + "UPDATE collaboration_tasks SET status='IN_PROGRESS',updated_at='" + Instant.now()
+                    + "' WHERE status='IN_REVIEW' AND id IN (SELECT DISTINCT root_id FROM task_tree "
+                    + "JOIN collaboration_task_runs link ON link.task_id=task_tree.task_id "
+                    + "JOIN runs ON runs.id=link.run_id WHERE runs.status NOT IN ('COMPLETED','FAILED','CANCELED'))");
             statement.execute("UPDATE memory_extractions SET status='PENDING', updated_at='" +
                     Instant.now() + "' WHERE status='RUNNING'");
         }
+        reconcileCollaborationTaskWorkspaces();
         recoverInterruptedRuns();
     }
 
@@ -850,6 +944,27 @@ public class SqliteRuntimeStore {
                                List<String> attachmentIds, String modelProfileId,
                                String agentProfileId, int priority, int retryCount,
                                String executionShell) {
+        return createRunInternal(sessionId, input, thinkingMode, reasoningEffort, attachmentIds,
+                modelProfileId, agentProfileId, priority, retryCount, executionShell, null);
+    }
+
+    public RunRecord createRunInWorkspace(String sessionId, String input,
+                                          String thinkingMode, String reasoningEffort,
+                                          List<String> attachmentIds, String modelProfileId,
+                                          String agentProfileId, int priority, int retryCount,
+                                          String executionShell, String workspaceOwner) {
+        if (workspaceOwner == null || !SAFE_WORKSPACE_KEY.matcher(workspaceOwner).matches()) {
+            throw new IllegalArgumentException("workspace owner must be a safe workspace key");
+        }
+        return createRunInternal(sessionId, input, thinkingMode, reasoningEffort, attachmentIds,
+                modelProfileId, agentProfileId, priority, retryCount, executionShell, workspaceOwner);
+    }
+
+    private RunRecord createRunInternal(String sessionId, String input,
+                                        String thinkingMode, String reasoningEffort,
+                                        List<String> attachmentIds, String modelProfileId,
+                                        String agentProfileId, int priority, int retryCount,
+                                        String executionShell, String explicitWorkspaceOwner) {
         if (input == null || input.isBlank()) {
             throw new IllegalArgumentException("input must not be blank");
         }
@@ -864,7 +979,8 @@ public class SqliteRuntimeStore {
         String resolvedThinking = normalizeThinkingMode(thinkingMode);
         String resolvedEffort = normalizeReasoningEffort(reasoningEffort);
         String resolvedShell = normalizeExecutionShell(executionShell);
-        String workspaceOwnerRunId = latestWorkspaceOwner(sessionId);
+        String workspaceOwnerRunId = explicitWorkspaceOwner == null
+                ? latestWorkspaceOwner(sessionId) : explicitWorkspaceOwner;
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -973,7 +1089,7 @@ public class SqliteRuntimeStore {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
-                RunRecord selected = null;
+                List<RunRecord> candidates = new ArrayList<>();
                 try (PreparedStatement ps = connection.prepareStatement(
                         "SELECT r.* FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.status=? " +
                                 "AND NOT EXISTS (SELECT 1 FROM run_delegations gate " +
@@ -996,10 +1112,17 @@ public class SqliteRuntimeStore {
                                 "WHERE owner.project_key=s.project_key AND active.status NOT IN ('QUEUED','COMPLETED','FAILED','CANCELED')) " +
                                 "< COALESCE((SELECT max_concurrent_runs FROM budget_policies b " +
                                 "WHERE b.project_key=s.project_key),4) " +
-                                "ORDER BY r.priority DESC, queued_at, r.created_at LIMIT 1")) {
+                                "ORDER BY r.priority DESC, queued_at, r.created_at LIMIT 64")) {
                     ps.setString(1, RunStatus.QUEUED.name());
                     try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) selected = mapRun(rs);
+                        while (rs.next()) candidates.add(mapRun(rs));
+                    }
+                }
+                RunRecord selected = null;
+                for (RunRecord candidate : candidates) {
+                    if (canClaimCollaborationRun(connection, candidate)) {
+                        selected = candidate;
+                        break;
                     }
                 }
                 if (selected == null) {
@@ -1074,6 +1197,17 @@ public class SqliteRuntimeStore {
                                                        int maxDepth, int maxChildRuns, long maxEstimatedTokens,
                                                        double maxEstimatedCost, boolean allowExpertDelegation,
                                                        boolean requireReviewer, boolean requireRunner) {
+        return saveCollaborationPolicy(runId, enabled, complexity, risk, allowedAgentProfileIdsJson,
+                maxExperts, maxDepth, maxChildRuns, 0, maxEstimatedTokens, maxEstimatedCost,
+                allowExpertDelegation, requireReviewer, requireRunner);
+    }
+
+    public CollaborationPolicy saveCollaborationPolicy(String runId, boolean enabled, String complexity, String risk,
+                                                       String allowedAgentProfileIdsJson, int maxExperts,
+                                                       int maxDepth, int maxChildRuns, int maxConcurrentAgentRuns,
+                                                       long maxEstimatedTokens, double maxEstimatedCost,
+                                                       boolean allowExpertDelegation, boolean requireReviewer,
+                                                       boolean requireRunner) {
         findRun(runId).orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
         Instant now = Instant.now();
         String resolvedComplexity = normalizeEnum(complexity, Set.of("SIMPLE", "MEDIUM", "COMPLEX"), "MEDIUM");
@@ -1081,15 +1215,17 @@ public class SqliteRuntimeStore {
         int resolvedMaxExperts = Math.max(0, Math.min(maxExperts, 6));
         int resolvedMaxDepth = Math.max(0, Math.min(maxDepth, 3));
         int resolvedMaxChildRuns = Math.max(0, Math.min(maxChildRuns, 12));
+        int resolvedMaxConcurrentAgentRuns = Math.max(0, Math.min(maxConcurrentAgentRuns, 6));
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "INSERT INTO run_collaboration_policies(run_id,enabled,complexity,risk,allowed_agent_profile_ids_json," +
-                        "max_experts,max_depth,max_child_runs,max_estimated_tokens,max_estimated_cost," +
+                        "max_experts,max_depth,max_child_runs,max_concurrent_agent_runs,max_estimated_tokens,max_estimated_cost," +
                         "allow_expert_delegation,require_reviewer,require_runner,created_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET " +
                         "enabled=excluded.enabled,complexity=excluded.complexity,risk=excluded.risk," +
                         "allowed_agent_profile_ids_json=excluded.allowed_agent_profile_ids_json," +
                         "max_experts=excluded.max_experts,max_depth=excluded.max_depth," +
-                        "max_child_runs=excluded.max_child_runs,max_estimated_tokens=excluded.max_estimated_tokens," +
+                        "max_child_runs=excluded.max_child_runs,max_concurrent_agent_runs=excluded.max_concurrent_agent_runs," +
+                        "max_estimated_tokens=excluded.max_estimated_tokens," +
                         "max_estimated_cost=excluded.max_estimated_cost,allow_expert_delegation=excluded.allow_expert_delegation," +
                         "require_reviewer=excluded.require_reviewer,require_runner=excluded.require_runner")) {
             int i = 1;
@@ -1102,6 +1238,7 @@ public class SqliteRuntimeStore {
             ps.setInt(i++, resolvedMaxExperts);
             ps.setInt(i++, resolvedMaxDepth);
             ps.setInt(i++, resolvedMaxChildRuns);
+            ps.setInt(i++, resolvedMaxConcurrentAgentRuns);
             ps.setLong(i++, Math.max(0, maxEstimatedTokens));
             ps.setDouble(i++, Math.max(0, maxEstimatedCost));
             ps.setInt(i++, allowExpertDelegation ? 1 : 0);
@@ -1125,13 +1262,7 @@ public class SqliteRuntimeStore {
 
     public Optional<CollaborationPolicy> collaborationPolicyForTree(String runId) {
         try (Connection connection = open()) {
-            String current = runId;
-            for (int i = 0; i < 8 && current != null && !current.isBlank(); i++) {
-                Optional<CollaborationPolicy> policy = collaborationPolicy(connection, current);
-                if (policy.isPresent()) return policy;
-                current = parentRunId(connection, current).orElse(null);
-            }
-            return Optional.empty();
+            return collaborationPolicyForTree(connection, runId);
         } catch (SQLException e) {
             throw failure("find collaboration policy tree", e);
         }
@@ -2552,6 +2683,29 @@ public class SqliteRuntimeStore {
         catch (Exception e) { throw new IllegalStateException("failed to delete memory", e); }
     }
 
+    public List<String> deleteMemories(List<String> memoryIds) {
+        List<String> ids = normalizedDeleteIds(memoryIds, "memory");
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                requireAllRows(connection, "memories", ids, "memory");
+                deleteRows(connection, "memory_revisions", "memory_id", ids);
+                deleteRows(connection, "memory_sources", "memory_id", ids);
+                deleteRows(connection, "memory_usage_feedback", "memory_id", ids);
+                deleteRows(connection, "memory_conflicts", "memory_id", ids);
+                deleteRows(connection, "memory_conflicts", "conflicting_memory_id", ids);
+                deleteRows(connection, "memories", "id", ids);
+                connection.commit();
+                return ids;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("batch delete memories", e);
+        }
+    }
+
     public void markToolRunning(String id) {
         updateTool(id, ToolCallStatus.RUNNING, null, null, false);
     }
@@ -2828,6 +2982,7 @@ public class SqliteRuntimeStore {
             boolean changed = ps.executeUpdate() > 0;
             if (changed) {
                 insertEvent(connection, runId, "run.canceled", "{}");
+                closePendingApprovals(connection, runId);
                 finalizeDelegationGraph(connection, runId, RunStatus.CANCELED, "run canceled");
             }
             connection.commit();
@@ -3012,6 +3167,140 @@ public class SqliteRuntimeStore {
                 "DELETE FROM approval_policies WHERE id=?")) {
             ps.setString(1, id); return ps.executeUpdate() > 0;
         } catch (SQLException e) { throw failure("delete approval policy", e); }
+    }
+
+    public static String collaborationWorkspaceOwner(String rootTaskId) {
+        String value = rootTaskId == null ? "" : rootTaskId.trim();
+        if (value.length() <= 180 && SAFE_WORKSPACE_KEY.matcher(value).matches()) {
+            return "collaboration_" + value;
+        }
+        return "collaboration_" + UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void reconcileCollaborationTaskWorkspaces() throws SQLException {
+        Map<String, List<String>> ownersByRoot = new LinkedHashMap<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "WITH RECURSIVE task_tree(root_id,task_id) AS ("
+                        + "SELECT id,id FROM collaboration_tasks WHERE parent_id IS NULL OR parent_id='' "
+                        + "UNION ALL SELECT tree.root_id,child.id FROM collaboration_tasks child "
+                        + "JOIN task_tree tree ON child.parent_id=tree.task_id), "
+                        + "run_tree(root_id,run_id) AS (SELECT tree.root_id,link.run_id FROM task_tree tree "
+                        + "JOIN collaboration_task_runs link ON link.task_id=tree.task_id "
+                        + "UNION SELECT tree.root_id,delegation.child_run_id FROM run_tree tree "
+                        + "JOIN run_delegations delegation ON delegation.parent_run_id=tree.run_id) "
+                        + "SELECT tree.root_id,COALESCE(NULLIF(run.workspace_owner_run_id,''),run.id) owner "
+                        + "FROM run_tree tree JOIN runs run ON run.id=tree.run_id "
+                        + "ORDER BY tree.root_id,run.created_at,run.id")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    List<String> owners = ownersByRoot.computeIfAbsent(rs.getString("root_id"), ignored -> new ArrayList<>());
+                    String owner = rs.getString("owner");
+                    if (!owners.contains(owner)) owners.add(owner);
+                }
+            }
+        }
+        for (Map.Entry<String, List<String>> entry : ownersByRoot.entrySet()) {
+            mergeCollaborationWorkspaces(entry.getKey(), entry.getValue());
+        }
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "WITH RECURSIVE task_tree(task_id) AS (SELECT id FROM collaboration_tasks WHERE id=? "
+                            + "UNION ALL SELECT child.id FROM collaboration_tasks child "
+                            + "JOIN task_tree tree ON child.parent_id=tree.task_id), "
+                            + "run_tree(run_id) AS (SELECT link.run_id FROM collaboration_task_runs link "
+                            + "JOIN task_tree tree ON tree.task_id=link.task_id "
+                            + "UNION SELECT delegation.child_run_id FROM run_delegations delegation "
+                            + "JOIN run_tree tree ON delegation.parent_run_id=tree.run_id) "
+                            + "UPDATE runs SET workspace_owner_run_id=? WHERE id IN (SELECT run_id FROM run_tree)")) {
+                for (String rootTaskId : ownersByRoot.keySet()) {
+                    ps.setString(1, rootTaskId);
+                    ps.setString(2, collaborationWorkspaceOwner(rootTaskId));
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+                connection.commit();
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        }
+    }
+
+    private void mergeCollaborationWorkspaces(String rootTaskId, List<String> sourceOwners) {
+        String targetOwner = collaborationWorkspaceOwner(rootTaskId);
+        Path target = workspaceRoot.resolve(targetOwner).normalize();
+        if (!target.startsWith(workspaceRoot)) {
+            throw new IllegalStateException("Invalid collaboration workspace target");
+        }
+        for (String sourceOwner : sourceOwners) {
+            if (targetOwner.equals(sourceOwner)) continue;
+            Path source = workspaceRoot.resolve(sourceOwner).normalize();
+            if (!source.startsWith(workspaceRoot) || !Files.isDirectory(source)) continue;
+            try (Stream<Path> files = Files.walk(source)) {
+                for (Path file : files.filter(Files::isRegularFile).sorted().toList()) {
+                    Path relative = source.relativize(file).normalize();
+                    if (relative.isAbsolute() || relative.startsWith("..")
+                            || relative.startsWith(Path.of(".paicli", "workspace-history"))) continue;
+                    Path destination = target.resolve(relative).normalize();
+                    if (!destination.startsWith(target)) continue;
+                    Files.createDirectories(destination.getParent());
+                    if (Files.exists(destination) && Files.mismatch(destination, file) != -1) {
+                        Path history = target.resolve(".paicli").resolve("workspace-history")
+                                .resolve("before-" + safeWorkspaceHistorySegment(sourceOwner))
+                                .resolve(relative).normalize();
+                        if (!history.startsWith(target)) {
+                            throw new IllegalStateException("Invalid collaboration workspace history path");
+                        }
+                        Files.createDirectories(history.getParent());
+                        Files.copy(destination, history, StandardCopyOption.REPLACE_EXISTING,
+                                StandardCopyOption.COPY_ATTRIBUTES);
+                    }
+                    if (!Files.exists(destination) || Files.mismatch(destination, file) != -1) {
+                        Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING,
+                                StandardCopyOption.COPY_ATTRIBUTES);
+                    }
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to merge collaboration workspace " + sourceOwner, e);
+            }
+        }
+    }
+
+    private static String safeWorkspaceHistorySegment(String value) {
+        String safe = value == null ? "unknown" : value.replaceAll("[^A-Za-z0-9_.-]", "_");
+        return safe.length() <= 120 ? safe : safe.substring(0, 120);
+    }
+
+    public boolean hasCompletedMutatingToolCall(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT 1 FROM tool_calls WHERE run_id=? AND status='COMPLETED' "
+                        + "AND effect<>'READ_ONLY' LIMIT 1")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            throw failure("check Run delivery tool evidence", e);
+        }
+    }
+
+    public List<String> deleteApprovalPolicies(List<String> policyIds) {
+        List<String> ids = normalizedDeleteIds(policyIds, "approval policy");
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                requireAllRows(connection, "approval_policies", ids, "approval policy");
+                deleteRows(connection, "approval_policies", "id", ids);
+                connection.commit();
+                return ids;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("batch delete approval policies", e);
+        }
     }
 
     public KnowledgeFeedback createKnowledgeFeedback(String projectKey, String documentName, int chunk,
@@ -3336,6 +3625,129 @@ public class SqliteRuntimeStore {
         } catch (SQLException e) { throw failure("delete artifact", e); }
     }
 
+    public List<ArtifactRecord> deleteArtifacts(List<String> artifactIds) {
+        List<String> ids = normalizedDeleteIds(artifactIds, "artifact");
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                Map<String, ArtifactRecord> found = new LinkedHashMap<>();
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT * FROM artifacts WHERE id IN (" + placeholders(ids.size()) + ")")) {
+                    bindStrings(ps, ids);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            ArtifactRecord artifact = mapArtifact(rs);
+                            found.put(artifact.id(), artifact);
+                        }
+                    }
+                }
+                requireAllIds(ids, found.keySet(), "artifact");
+                deleteRows(connection, "artifacts", "id", ids);
+                connection.commit();
+                return ids.stream().map(found::get).toList();
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("batch delete artifacts", e);
+        }
+    }
+
+    public List<String> deleteRuns(List<String> runIds) {
+        List<String> ids = normalizedDeleteIds(runIds, "run");
+        List<String> attachmentPaths = new ArrayList<>();
+        List<String> removableWorkspaceIds = new ArrayList<>();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                Map<String, RunStatus> statuses = new LinkedHashMap<>();
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT id,status FROM runs WHERE id IN (" + placeholders(ids.size()) + ")")) {
+                    bindStrings(ps, ids);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) statuses.put(rs.getString("id"), RunStatus.valueOf(rs.getString("status")));
+                    }
+                }
+                requireAllIds(ids, statuses.keySet(), "run");
+                List<String> active = ids.stream().filter(id -> !statuses.get(id).terminal()).toList();
+                if (!active.isEmpty()) {
+                    throw new IllegalStateException("only terminal runs can be deleted: " + String.join(", ", active));
+                }
+                List<String> activeRelated = activeDelegationRuns(connection, ids);
+                if (!activeRelated.isEmpty()) {
+                    throw new IllegalStateException("runs with active delegated relatives cannot be deleted: "
+                            + String.join(", ", activeRelated));
+                }
+
+                String in = placeholders(ids.size());
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT relative_path FROM input_attachments WHERE run_id IN (" + in + ") "
+                                + "OR message_id IN (SELECT id FROM messages WHERE run_id IN (" + in + "))")) {
+                    int next = bindStrings(ps, ids);
+                    bindStrings(ps, ids, next);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) attachmentPaths.add(rs.getString(1));
+                    }
+                }
+
+                deleteDelegationsForRuns(connection, ids);
+                deleteRows(connection, "collaboration_task_runs", "run_id", ids);
+                updateRunReferencesToNull(connection, "collaboration_triggers", "created_run_id", ids);
+                deleteRows(connection, "evaluation_trials", "run_id", ids);
+                deleteRows(connection, "evaluation_baselines", "source_run_id", ids);
+                updateRunReferencesToNull(connection, "scheduled_tasks", "last_run_id", ids);
+                deleteRows(connection, "notification_outbox", "run_id", ids);
+                updateRunReferencesToNull(connection, "memories", "source_run_id", ids);
+                updateRunReferencesToNull(connection, "memory_revisions", "source_run_id", ids);
+                updateRunReferencesToNull(connection, "plans", "run_id", ids);
+                updateRunReferencesToNull(connection, "plan_steps", "run_id", ids);
+                updateRunReferencesToNull(connection, "async_jobs", "run_id", ids);
+                deleteRows(connection, "agent_feedback", "run_id", ids);
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "DELETE FROM input_attachments WHERE run_id IN (" + in + ") "
+                                + "OR message_id IN (SELECT id FROM messages WHERE run_id IN (" + in + "))")) {
+                    int next = bindStrings(ps, ids);
+                    bindStrings(ps, ids, next);
+                    ps.executeUpdate();
+                }
+                for (String table : List.of("model_usage", "model_attempts", "memory_usage_feedback",
+                        "memory_extractions", "run_collaboration_policies", "approvals", "run_events",
+                        "artifacts")) {
+                    deleteRows(connection, table, "run_id", ids);
+                }
+                deleteRows(connection, "tool_calls", "run_id", ids);
+                deleteRows(connection, "messages", "run_id", ids);
+                deleteRows(connection, "runs", "id", ids);
+
+                for (String id : ids) {
+                    try (PreparedStatement ps = connection.prepareStatement(
+                            "SELECT 1 FROM runs WHERE COALESCE(workspace_owner_run_id,id)=? LIMIT 1")) {
+                        ps.setString(1, id);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (!rs.next()) removableWorkspaceIds.add(id);
+                        }
+                    }
+                }
+                connection.commit();
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("batch delete runs", e);
+        }
+
+        for (String runId : ids) deleteTree(artifactRoot, artifactRoot.resolve(runId).normalize());
+        for (String runId : removableWorkspaceIds) deleteTree(workspaceRoot, workspaceRoot.resolve(runId).normalize());
+        for (String relativePath : attachmentPaths) {
+            if (relativePath != null && !relativePath.isBlank()) {
+                deleteTree(attachmentRoot, attachmentRoot.resolve(relativePath).normalize());
+            }
+        }
+        return ids;
+    }
+
     public long countRuns(RunStatus status) {
         try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement(
                 "SELECT COUNT(*) FROM runs WHERE status=?")) {
@@ -3424,6 +3836,108 @@ public class SqliteRuntimeStore {
                 return rs.next() && rs.getInt(1) != 0;
             }
         }
+    }
+
+    private static List<String> normalizedDeleteIds(List<String> values, String entity) {
+        if (values == null) throw new IllegalArgumentException(entity + " ids are required");
+        List<String> ids = values.stream()
+                .map(value -> value == null ? "" : value.trim())
+                .filter(value -> !value.isBlank())
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) throw new IllegalArgumentException(entity + " ids are required");
+        if (ids.size() > 100) throw new IllegalArgumentException("at most 100 " + entity + " ids can be deleted");
+        return ids;
+    }
+
+    private static String placeholders(int count) {
+        return String.join(",", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static int bindStrings(PreparedStatement statement, List<String> values) throws SQLException {
+        return bindStrings(statement, values, 1);
+    }
+
+    private static int bindStrings(PreparedStatement statement, List<String> values, int start) throws SQLException {
+        int index = start;
+        for (String value : values) statement.setString(index++, value);
+        return index;
+    }
+
+    private static void requireAllRows(Connection connection, String table, List<String> ids, String entity)
+            throws SQLException {
+        Set<String> found = new HashSet<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT id FROM " + table + " WHERE id IN (" + placeholders(ids.size()) + ")")) {
+            bindStrings(ps, ids);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) found.add(rs.getString(1));
+            }
+        }
+        requireAllIds(ids, found, entity);
+    }
+
+    private static void requireAllIds(List<String> ids, Set<String> found, String entity) {
+        List<String> missing = ids.stream().filter(id -> !found.contains(id)).toList();
+        if (!missing.isEmpty()) throw new IllegalArgumentException(entity + " not found: " + String.join(", ", missing));
+    }
+
+    private static void deleteRows(Connection connection, String table, String column, List<String> ids)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM " + table + " WHERE " + column + " IN (" + placeholders(ids.size()) + ")")) {
+            bindStrings(ps, ids);
+            ps.executeUpdate();
+        }
+    }
+
+    private static void updateRunReferencesToNull(Connection connection, String table, String column,
+                                                   List<String> runIds) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE " + table + " SET " + column + "=NULL WHERE " + column + " IN ("
+                        + placeholders(runIds.size()) + ")")) {
+            bindStrings(ps, runIds);
+            ps.executeUpdate();
+        }
+    }
+
+    private static void deleteDelegationsForRuns(Connection connection, List<String> runIds) throws SQLException {
+        String predicate = "delegation_id IN (SELECT id FROM run_delegations WHERE parent_run_id IN ("
+                + placeholders(runIds.size()) + ") OR child_run_id IN (" + placeholders(runIds.size()) + "))";
+        for (String table : List.of("run_delegation_dependencies", "run_delegation_resources")) {
+            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM " + table + " WHERE " + predicate)) {
+                int next = bindStrings(ps, runIds);
+                bindStrings(ps, runIds, next);
+                ps.executeUpdate();
+            }
+        }
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM run_delegations WHERE parent_run_id IN (" + placeholders(runIds.size())
+                        + ") OR child_run_id IN (" + placeholders(runIds.size()) + ")")) {
+            int next = bindStrings(ps, runIds);
+            bindStrings(ps, runIds, next);
+            ps.executeUpdate();
+        }
+    }
+
+    private static List<String> activeDelegationRuns(Connection connection, List<String> runIds)
+            throws SQLException {
+        String sql = "WITH RECURSIVE related(id) AS ("
+                + "SELECT id FROM runs WHERE id IN (" + placeholders(runIds.size()) + ") "
+                + "UNION SELECT delegation.child_run_id FROM run_delegations delegation "
+                + "JOIN related ON delegation.parent_run_id=related.id "
+                + "UNION SELECT delegation.parent_run_id FROM run_delegations delegation "
+                + "JOIN related ON delegation.child_run_id=related.id) "
+                + "SELECT run.id FROM runs run JOIN related ON related.id=run.id "
+                + "WHERE run.status NOT IN ('COMPLETED','FAILED','CANCELED') ORDER BY run.created_at";
+        List<String> active = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            bindStrings(ps, runIds);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) active.add(rs.getString(1));
+            }
+        }
+        return active;
     }
 
     private static void deleteBySessionRuns(Connection connection, String table, String sessionId)
@@ -3523,6 +4037,83 @@ public class SqliteRuntimeStore {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? Optional.of(mapCollaborationPolicy(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    /** Lists files produced in a Run's effective workspace without exposing host paths. */
+    public List<WorkspaceFile> workspaceFiles(String runId, int requestedLimit) {
+        String owner = workspaceOwnerRunId(runId);
+        Path root = workspaceRoot.resolve(owner).normalize();
+        if (!root.startsWith(workspaceRoot) || !Files.isDirectory(root)) return List.of();
+        int limit = Math.max(1, Math.min(requestedLimit, 200));
+        try (Stream<Path> files = Files.walk(root)) {
+            return files.filter(Files::isRegularFile)
+                    .map(path -> workspaceFile(runId, owner, root, path))
+                    .filter(java.util.Objects::nonNull)
+                    .sorted(Comparator.comparing(WorkspaceFile::modifiedAt).reversed()
+                            .thenComparing(WorkspaceFile::path))
+                    .limit(limit)
+                    .toList();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to list Run workspace files", e);
+        }
+    }
+
+    private static WorkspaceFile workspaceFile(String runId, String owner, Path root, Path file) {
+        try {
+            Path relative = root.relativize(file).normalize();
+            if (relative.isAbsolute() || relative.startsWith("..")) return null;
+            return new WorkspaceFile(runId, owner, relative.toString().replace('\\', '/'),
+                    Files.size(file), Files.getLastModifiedTime(file).toInstant());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void closePendingApprovals(Connection connection, String runId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE approvals SET status=?,resolved_at=? WHERE run_id=? AND status=?")) {
+            ps.setString(1, ApprovalStatus.DENIED.name());
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, runId);
+            ps.setString(4, ApprovalStatus.PENDING.name());
+            ps.executeUpdate();
+        }
+    }
+
+    private Optional<CollaborationPolicy> collaborationPolicyForTree(Connection connection, String runId)
+            throws SQLException {
+        String current = runId;
+        for (int i = 0; i < 8 && current != null && !current.isBlank(); i++) {
+            Optional<CollaborationPolicy> policy = collaborationPolicy(connection, current);
+            if (policy.isPresent()) return policy;
+            current = parentRunId(connection, current).orElse(null);
+        }
+        return Optional.empty();
+    }
+
+    private boolean canClaimCollaborationRun(Connection connection, RunRecord candidate) throws SQLException {
+        Optional<CollaborationPolicy> policy = collaborationPolicyForTree(connection, candidate.id());
+        if (policy.isEmpty() || !policy.get().enabled() || policy.get().maxConcurrentAgentRuns() <= 0
+                || policy.get().runId().equals(candidate.id())) {
+            return true;
+        }
+        return activeDelegatedRunCount(connection, policy.get().runId())
+                < policy.get().maxConcurrentAgentRuns();
+    }
+
+    private int activeDelegatedRunCount(Connection connection, String rootRunId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "WITH RECURSIVE tree(run_id) AS (" +
+                        "SELECT child_run_id FROM run_delegations WHERE parent_run_id=? " +
+                        "UNION SELECT delegation.child_run_id FROM run_delegations delegation " +
+                        "JOIN tree ON delegation.parent_run_id=tree.run_id) " +
+                        "SELECT COUNT(*) FROM runs run JOIN tree ON tree.run_id=run.id " +
+                        "WHERE run.status NOT IN ('QUEUED','COMPLETED','FAILED','CANCELED')")) {
+            ps.setString(1, rootRunId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
             }
         }
     }
@@ -4220,6 +4811,7 @@ public class SqliteRuntimeStore {
                 rs.getString("complexity"), rs.getString("risk"),
                 rs.getString("allowed_agent_profile_ids_json"), rs.getInt("max_experts"),
                 rs.getInt("max_depth"), rs.getInt("max_child_runs"),
+                rs.getInt("max_concurrent_agent_runs"),
                 rs.getLong("max_estimated_tokens"), rs.getDouble("max_estimated_cost"),
                 rs.getInt("allow_expert_delegation") != 0, rs.getInt("require_reviewer") != 0,
                 rs.getInt("require_runner") != 0, instant(rs.getString("created_at")));
@@ -4529,7 +5121,10 @@ public class SqliteRuntimeStore {
 
     public record CollaborationPolicy(String runId, boolean enabled, String complexity, String risk,
                                       String allowedAgentProfileIdsJson, int maxExperts, int maxDepth,
-                                      int maxChildRuns, long maxEstimatedTokens, double maxEstimatedCost,
+                                      int maxChildRuns, int maxConcurrentAgentRuns, long maxEstimatedTokens,
+                                      double maxEstimatedCost,
                                       boolean allowExpertDelegation, boolean requireReviewer,
                                       boolean requireRunner, Instant createdAt) { }
+    public record WorkspaceFile(String runId, String workspaceOwnerRunId, String path,
+                                long size, Instant modifiedAt) { }
 }

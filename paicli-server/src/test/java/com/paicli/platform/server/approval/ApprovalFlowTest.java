@@ -120,6 +120,26 @@ class ApprovalFlowTest {
         assertThat(approvals.pendingForRunTree(delegation.childRunId())).containsExactly(childApproval);
     }
 
+    @Test
+    void returnsOnlyPendingApprovalsForRequestedProject() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        var selectedSession = store.createSession("selected", "project-a");
+        var selectedRun = store.createRun(selectedSession.id(), "selected run");
+        var selectedTool = store.createToolCall(selectedRun.id(), "selected-tool", "execute_command", "{}", "selected-key");
+        var selectedApproval = store.createApproval(selectedRun.id(), selectedTool.id(), "selected approval");
+        var otherSession = store.createSession("other", "project-b");
+        var otherRun = store.createRun(otherSession.id(), "other run");
+        var otherTool = store.createToolCall(otherRun.id(), "other-tool", "execute_command", "{}", "other-key");
+        store.createApproval(otherRun.id(), otherTool.id(), "other approval");
+
+        ApprovalService approvals = new ApprovalService(store, null, null);
+
+        assertThat(approvals.pendingForProject("project-a")).containsExactly(selectedApproval);
+    }
+
     private static final class CommandModel implements ModelClient {
         @Override
         public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {

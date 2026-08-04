@@ -1,0 +1,583 @@
+package com.paicli.platform.server.collaboration;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.SandboxDriver;
+import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.server.domain.RunRecord;
+import com.paicli.platform.server.model.ModelClient;
+import com.paicli.platform.server.domain.RunDelegationRecord;
+import com.paicli.platform.server.store.CollaborationStore;
+import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+@Service
+public class CollaborationService {
+    private static final Set<String> TERMINAL_RUN_STATUSES = Set.of("COMPLETED", "FAILED", "CANCELED");
+    private final CollaborationStore collaboration;
+    private final SqliteRuntimeStore runtime;
+    private final ProductivityStore productivity;
+    private final CollaborationRoutingService routing;
+    private final ObjectMapper mapper;
+    private final ModelClient modelClient;
+    private final SandboxDriver sandboxDriver;
+
+    public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
+                                ProductivityStore productivity, CollaborationRoutingService routing,
+                                ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver) {
+        this.collaboration = collaboration;
+        this.runtime = runtime;
+        this.productivity = productivity;
+        this.routing = routing;
+        this.mapper = mapper;
+        this.modelClient = modelClient;
+        this.sandboxDriver = sandboxDriver;
+    }
+
+    public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
+        validateAssignee(command.projectKey(), command.assigneeType(), command.assigneeId());
+        if (command.parentId() != null && !command.parentId().isBlank()) {
+            CollaborationStore.CollaborationTask parent = collaboration.task(command.parentId())
+                    .orElseThrow(() -> new IllegalArgumentException("parent collaboration task not found"));
+            if (!parent.projectKey().equals(normalizeProject(command.projectKey()))) {
+                throw new IllegalArgumentException("parent task belongs to another project");
+            }
+        }
+        return collaboration.saveTask(id, command.projectKey(), command.title(), command.description(),
+                command.status(), command.priority(), command.assigneeType(), command.assigneeId(),
+                command.acceptanceCriteria(), command.parentId(), command.stage(),
+                command.latestPlanId(), command.createdBy());
+    }
+
+    public StageExecution createAndDispatchSubtask(String parentTaskId, String parentRunId, String toolCallId,
+                                                    TaskCommand command) {
+        CollaborationStore.CollaborationTask parent = collaboration.task(parentTaskId)
+                .orElseThrow(() -> new IllegalArgumentException("parent collaboration task not found"));
+        if (!parent.id().equals(command.parentId())) {
+            throw new IllegalArgumentException("subtask must be bound to the current collaboration task");
+        }
+        ProductivityStore.AgentProfile agent = resolveStageAgent(command.projectKey(),
+                command.assigneeType(), command.assigneeId());
+        String taskId = "task_stage_" + toolCallId.replaceAll("[^A-Za-z0-9]", "");
+        CollaborationStore.CollaborationTask subtask = saveTask(taskId,
+                new TaskCommand(command.projectKey(), command.title(), command.description(), "IN_PROGRESS",
+                        command.priority(), command.assigneeType(), command.assigneeId(),
+                        command.acceptanceCriteria(), parent.id(), command.stage(), command.latestPlanId(),
+                        command.createdBy()));
+        String input = "执行协作阶段任务，不要创建新的阶段任务。\n"
+                + "阶段任务：" + subtask.title() + "\n"
+                + "目标：\n" + subtask.description() + "\n"
+                + "验收标准：\n" + subtask.acceptanceCriteria() + "\n"
+                + "在当前共享工作区完成交付，并通过协作评论说明结果与证据。";
+        RunDelegationRecord delegation = runtime.createOrGetDelegation(parentRunId, toolCallId,
+                agent.name(), input, agent.id(), agent.modelProfileId(), agent.thinkingMode(),
+                agent.reasoningEffort(), null, null, "{}");
+        collaboration.linkRun(subtask.id(), delegation.childRunId(), null, "STAGE_DELEGATION");
+        collaboration.recordActivity(subtask.id(), "STAGE_DISPATCHED", "AGENT", agent.id(),
+                delegation.childRunId(), write(Map.of("parentRunId", parentRunId, "stage", subtask.stage())));
+        return new StageExecution(subtask, delegation,
+                runtime.findRun(delegation.childRunId()).orElseThrow());
+    }
+
+    public CollaborationRoutingService.RoutePreview preview(String projectKey, String input,
+                                                             String targetType, String targetId) {
+        return routing.preview(projectKey, input, targetType, targetId);
+    }
+
+    public TriggerExecution trigger(String taskId, String triggerType, String sourceId,
+                                    String targetType, String targetId, String instruction,
+                                    String idempotencyKey) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        String resolvedTargetType = blank(targetType) ? task.assigneeType() : targetType.trim().toUpperCase();
+        String resolvedTargetId = blank(targetId) ? task.assigneeId() : targetId.trim();
+        String resolvedTriggerType = blank(triggerType) ? "MANUAL" : triggerType.trim().toUpperCase();
+        if ("HUMAN".equals(resolvedTargetType) || blank(resolvedTargetId)) {
+            throw new IllegalArgumentException("collaboration task has no agent or team assignee");
+        }
+        validateAssignee(task.projectKey(), resolvedTargetType, resolvedTargetId);
+        String key = blank(idempotencyKey)
+                ? "task:" + task.id() + ":" + resolvedTriggerType + ":" + (blank(sourceId) ? resolvedTargetId : sourceId)
+                : idempotencyKey.trim();
+        String payload = write(Map.of("instruction", blank(instruction) ? "" : instruction));
+        CollaborationStore.Trigger trigger = collaboration.createOrGetTrigger(task.id(), resolvedTriggerType,
+                sourceId, resolvedTargetType, resolvedTargetId, payload, key);
+        if (!blank(trigger.createdRunId())) {
+            return new TriggerExecution(trigger, runtime.findRun(trigger.createdRunId()).orElse(null), null);
+        }
+
+        CollaborationRoutingService.RoutePreview preview = routing.preview(task.projectKey(),
+                task.description() + "\n" + instruction, resolvedTargetType, resolvedTargetId);
+        CollaborationStore.RouteDecision decision = routing.persist(task.projectKey(), task.id(), trigger.id(),
+                task.description() + "\n" + instruction, preview);
+        try {
+            ProductivityStore.AgentProfile agent = productivity.resolveAgentProfile(
+                    task.projectKey(), preview.leaderAgentProfileId()).orElseThrow();
+            String sessionTitle = "协作任务 · " + task.title();
+            var session = runtime.createSession(sessionTitle, task.projectKey());
+            String input = runInput(task, trigger, preview, instruction);
+            String modelProfileId = productivity.resolveModelProfile(task.projectKey(), agent.modelProfileId())
+                    .map(ProductivityStore.ModelProfile::id).orElse(null);
+            String workspaceOwner = SqliteRuntimeStore.collaborationWorkspaceOwner(rootTask(task).id());
+            RunRecord run = runtime.createRunInWorkspace(session.id(), input,
+                    blank(agent.thinkingMode()) ? "auto" : agent.thinkingMode(), agent.reasoningEffort(),
+                    List.of(), modelProfileId, agent.id(), task.priority(), 0, agent.executionShell(),
+                    workspaceOwner);
+            if ("TEAM".equals(preview.targetType())) {
+                ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElseThrow();
+                runtime.saveCollaborationPolicy(run.id(), true, preview.complexity(), preview.risk(),
+                        team.memberAgentProfileIdsJson(), team.maxExperts(), team.maxDepth(),
+                        team.maxExperts(), preview.estimatedConcurrency(), 0, 0, team.maxDepth() > 1,
+                        team.requireReviewer(), team.requireRunner());
+            }
+            CollaborationStore.Trigger completed = collaboration.completeTrigger(trigger.id(), run.id());
+            if (List.of("BACKLOG", "TODO", "BLOCKED").contains(task.status())
+                    || ("IN_REVIEW".equals(task.status())
+                    && List.of("HUMAN_ACTION", "STAGE_BARRIER").contains(resolvedTriggerType))) {
+                collaboration.updateStatus(task.id(), "IN_PROGRESS", "SYSTEM", null,
+                        write(Map.of("triggerId", trigger.id(), "runId", run.id())));
+            }
+            return new TriggerExecution(completed, run, decision);
+        } catch (Exception error) {
+            collaboration.failTrigger(trigger.id(), message(error));
+            throw error instanceof RuntimeException runtimeError ? runtimeError
+                    : new IllegalStateException("failed to trigger collaboration run", error);
+        }
+    }
+
+    public CommentResult comment(String taskId, String parentCommentId, String authorType,
+                                 String authorId, String content, boolean conclusion,
+                                 List<CollaborationStore.MentionTarget> explicitMentions) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        List<CollaborationStore.MentionTarget> mentions = new ArrayList<>(
+                explicitMentions == null ? List.of() : explicitMentions);
+        if (mentions.isEmpty() && !blank(parentCommentId)) {
+            collaboration.comment(parentCommentId)
+                    .filter(parent -> "AGENT".equals(parent.authorType()) && !blank(parent.authorId()))
+                    .ifPresent(parent -> mentions.add(new CollaborationStore.MentionTarget("AGENT", parent.authorId())));
+        }
+        if (mentions.isEmpty() && "USER".equalsIgnoreCase(authorType)
+                && !"HUMAN".equals(task.assigneeType()) && !blank(task.assigneeId())) {
+            mentions.add(new CollaborationStore.MentionTarget(task.assigneeType(), task.assigneeId()));
+        }
+        CollaborationStore.CollaborationComment comment = collaboration.addComment(taskId, parentCommentId,
+                authorType, authorId, content, conclusion, mentions);
+        List<TriggerExecution> executions = new ArrayList<>();
+        for (CollaborationStore.MentionTarget mention : mentions.stream().distinct().toList()) {
+            executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
+                    "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
+        }
+        if ("AGENT".equalsIgnoreCase(authorType) && "TEAM".equals(task.assigneeType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
+            if (team != null && !team.leaderAgentProfileId().equals(authorId)) {
+                executions.add(trigger(taskId, "REPLY", comment.id(), "AGENT",
+                        team.leaderAgentProfileId(), content,
+                        "agent-comment:" + comment.id() + ":leader:" + team.leaderAgentProfileId()));
+            }
+        }
+        return new CommentResult(comment, List.copyOf(mentions), List.copyOf(executions));
+    }
+
+    public CollaborationStore.CollaborationTask updateStatus(String taskId, String status,
+                                                              String actorType, String actorId,
+                                                              String reason) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        String actor = blank(actorType) ? "SYSTEM" : actorType.trim().toUpperCase();
+        String targetStatus = blank(status) ? "" : status.trim().toUpperCase();
+        if ("USER".equals(actor)) {
+            throw new IllegalArgumentException("human users must use an explicit collaboration task action");
+        }
+        if ("AGENT".equals(actor)) validateAgentTransition(task, targetStatus, actorId);
+        return persistStatus(task, targetStatus, actor, actorId, reason, null);
+    }
+
+    public HumanActionResult humanAction(String taskId, String action, String reason, String idempotencyKey) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        String normalizedAction = blank(action) ? "" : action.trim().toUpperCase();
+        String normalizedReason = blank(reason) ? "" : reason.trim();
+        HumanActionResult result = switch (normalizedAction) {
+            case "ACCEPT" -> {
+                requireStatus(task, "IN_REVIEW", normalizedAction);
+                yield new HumanActionResult(persistStatus(task, "DONE", "USER", null,
+                        normalizedReason, normalizedAction), null);
+            }
+            case "REQUEST_REWORK" -> {
+                requireStatus(task, "IN_REVIEW", normalizedAction);
+                requireReason(normalizedReason, normalizedAction);
+                ensureNoActiveRuns(task);
+                TriggerExecution execution = humanTrigger(task, normalizedAction, normalizedReason, idempotencyKey);
+                yield new HumanActionResult(collaboration.task(task.id()).orElseThrow(), execution);
+            }
+            case "START" -> {
+                requireOneOf(task, normalizedAction, "BACKLOG", "TODO");
+                ensureNoActiveRuns(task);
+                TriggerExecution execution = humanTrigger(task, normalizedAction, normalizedReason, idempotencyKey);
+                yield new HumanActionResult(collaboration.task(task.id()).orElseThrow(), execution);
+            }
+            case "CONTINUE" -> {
+                requireStatus(task, "IN_PROGRESS", normalizedAction);
+                ensureNoActiveRuns(task);
+                TriggerExecution execution = humanTrigger(task, normalizedAction, normalizedReason, idempotencyKey);
+                yield new HumanActionResult(collaboration.task(task.id()).orElseThrow(), execution);
+            }
+            case "RESUME" -> {
+                requireStatus(task, "BLOCKED", normalizedAction);
+                ensureNoActiveRuns(task);
+                TriggerExecution execution = humanTrigger(task, normalizedAction, normalizedReason, idempotencyKey);
+                yield new HumanActionResult(collaboration.task(task.id()).orElseThrow(), execution);
+            }
+            case "BLOCK" -> {
+                requireOneOf(task, normalizedAction, "TODO", "IN_PROGRESS");
+                requireReason(normalizedReason, normalizedAction);
+                ensureNoActiveRuns(task);
+                yield new HumanActionResult(persistStatus(task, "BLOCKED", "USER", null,
+                        normalizedReason, normalizedAction), null);
+            }
+            case "CANCEL" -> {
+                if (List.of("DONE", "CANCELED").contains(task.status())) throw invalidAction(task, normalizedAction);
+                cancelActiveTaskRuns(task);
+                yield new HumanActionResult(persistStatus(task, "CANCELED", "USER", null,
+                        normalizedReason, normalizedAction), null);
+            }
+            case "REOPEN" -> {
+                requireOneOf(task, normalizedAction, "DONE", "CANCELED");
+                yield new HumanActionResult(persistStatus(task, "TODO", "USER", null,
+                        normalizedReason, normalizedAction), null);
+            }
+            default -> throw new IllegalArgumentException("unsupported collaboration task action: " + action);
+        };
+        collaboration.recordActivity(task.id(), "HUMAN_ACTION", "USER", null, task.id(),
+                write(Map.of("action", normalizedAction, "reason", normalizedReason,
+                        "fromStatus", task.status(), "toStatus", result.task().status())));
+        return result;
+    }
+
+    private void cancelActiveTaskRuns(CollaborationStore.CollaborationTask task) {
+        collaboration.taskTreeRuns(task.id()).stream()
+                .filter(link -> !TERMINAL_RUN_STATUSES.contains(link.status()))
+                .map(CollaborationStore.TaskRun::runId)
+                .distinct()
+                .flatMap(runId -> runtime.cancelRunTree(runId).stream())
+                .distinct()
+                .forEach(runId -> {
+                    modelClient.cancel(runId);
+                    sandboxDriver.cancel(runId);
+                });
+    }
+
+    public CollaborationStore.CollaborationTask legacyHumanStatus(String taskId, String status, String reason) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        String target = blank(status) ? "" : status.trim().toUpperCase();
+        String action = switch (target) {
+            case "DONE" -> "ACCEPT";
+            case "CANCELED" -> "CANCEL";
+            case "TODO" -> "REOPEN";
+            case "BLOCKED" -> "BLOCK";
+            case "IN_PROGRESS" -> switch (task.status()) {
+                case "BACKLOG", "TODO" -> "START";
+                case "BLOCKED" -> "RESUME";
+                case "IN_REVIEW" -> "REQUEST_REWORK";
+                case "IN_PROGRESS" -> null;
+                default -> throw invalidAction(task, "SET_" + target);
+            };
+            case "IN_REVIEW" -> throw new IllegalArgumentException(
+                    "IN_REVIEW is submitted by the assigned Agent or Team Leader");
+            default -> throw new IllegalArgumentException("unsupported human status change: " + status);
+        };
+        return action == null ? task : humanAction(taskId, action, reason, null).task();
+    }
+
+    private CollaborationStore.CollaborationTask persistStatus(CollaborationStore.CollaborationTask task,
+                                                                String status, String actorType,
+                                                                String actorId, String reason, String action) {
+        Map<String, String> payload = action == null
+                ? Map.of("reason", blank(reason) ? "" : reason)
+                : Map.of("reason", blank(reason) ? "" : reason, "action", action);
+        CollaborationStore.CollaborationTask updated = collaboration.updateStatus(task.id(), status,
+                actorType, actorId, write(payload));
+        advanceCompletedStage(updated);
+        return updated;
+    }
+
+    public void onRunTerminal(RunRecord run, String event) {
+        CollaborationStore.CollaborationTask task = collaboration.taskForRun(run.id()).orElse(null);
+        if (task == null) return;
+        collaboration.recordActivity(task.id(), "RUN_" + event, "AGENT", run.agentProfileId(), run.id(),
+                write(Map.of("status", run.status().name(), "error", run.error() == null ? "" : run.error())));
+        if (task.parentId() != null && !task.parentId().isBlank()
+                && run.status() == RunStatus.COMPLETED && "IN_PROGRESS".equals(task.status())
+                && !hasActiveRuns(task.id())) {
+            if (!hasStageDeliveryEvidence(task, run)) {
+                String reason = "Stage Run " + run.id() + " completed without durable delivery evidence: "
+                        + "no workspace file change, Artifact, or task comment was recorded";
+                collaboration.updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
+                        write(Map.of("reason", reason, "runId", run.id())));
+                collaboration.task(task.parentId()).filter(parent -> "IN_PROGRESS".equals(parent.status()))
+                        .ifPresent(parent -> collaboration.updateStatus(parent.id(), "BLOCKED", "SYSTEM", null,
+                                write(Map.of("reason", reason, "stageTaskId", task.id()))));
+                return;
+            }
+            persistStatus(task, "IN_REVIEW", "SYSTEM", null,
+                    "linked stage run completed: " + run.id(), null);
+            return;
+        }
+        if ("TEAM".equals(task.assigneeType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
+            if (team != null && !team.leaderAgentProfileId().equals(run.agentProfileId())) {
+                trigger(task.id(), "RUN_EVENT", run.id(), "AGENT", team.leaderAgentProfileId(),
+                        "专家 Run " + run.id() + " 已进入终态 " + run.status().name() + "，请评估后续动作。",
+                        "run-terminal:" + run.id() + ":leader:" + team.leaderAgentProfileId());
+                return;
+            }
+        }
+        boolean active = hasActiveRuns(task.id());
+        if (!active && "IN_PROGRESS".equals(task.status())) {
+            if (run.status() == RunStatus.COMPLETED) {
+                if (readyForHumanReview(task)) {
+                    collaboration.updateStatus(task.id(), "IN_REVIEW", "SYSTEM", null,
+                            write(Map.of("reason", "all linked Runs completed", "runId", run.id())));
+                } else {
+                    updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
+                            "Team execution ended without a Leader conclusion after the latest staged delivery");
+                }
+            } else {
+                updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
+                        "All linked Runs reached a terminal failure state");
+            }
+        }
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void reconcileWaitingStageBarriers() {
+        for (CollaborationStore.StageBarrier barrier : collaboration.waitingStageBarriers()) {
+            collaboration.evaluateStageBarrier(barrier.parentTaskId(), barrier.stage())
+                    .filter(value -> "COMPLETED".equals(value.status()))
+                    .ifPresent(this::triggerLeaderForCompletedStage);
+        }
+        for (CollaborationStore.StageBarrier barrier : collaboration.completedStageBarriersWithoutTrigger()) {
+            triggerLeaderForCompletedStage(barrier);
+        }
+    }
+
+    private void advanceCompletedStage(CollaborationStore.CollaborationTask task) {
+        if (task.parentId() == null || task.parentId().isBlank()
+                || !List.of("IN_REVIEW", "DONE", "CANCELED").contains(task.status())) return;
+        collaboration.evaluateStageBarrier(task.parentId(), task.stage())
+                .filter(barrier -> "COMPLETED".equals(barrier.status()))
+                .ifPresent(this::triggerLeaderForCompletedStage);
+    }
+
+    private void triggerLeaderForCompletedStage(CollaborationStore.StageBarrier barrier) {
+        CollaborationStore.CollaborationTask parent = collaboration.task(barrier.parentTaskId()).orElse(null);
+        if (parent == null || List.of("DONE", "CANCELED").contains(parent.status())
+                || "HUMAN".equals(parent.assigneeType()) || blank(parent.assigneeId())) return;
+        trigger(parent.id(), "STAGE_BARRIER", parent.id() + ":" + barrier.stage(),
+                parent.assigneeType(), parent.assigneeId(),
+                "Stage " + barrier.stage() + " is delivered. Read the staged delivery evidence, then dispatch the next required stage or publish the final Leader conclusion.",
+                "stage:" + parent.id() + ":" + barrier.stage());
+    }
+
+    private boolean readyForHumanReview(CollaborationStore.CollaborationTask task) {
+        if (!"TEAM".equals(task.assigneeType())) return true;
+        ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
+        if (team == null) return false;
+        List<CollaborationStore.CollaborationTask> stages = collaboration.descendantTasks(task.id());
+        if (stages.isEmpty() || stages.stream().noneMatch(stage ->
+                List.of("IN_REVIEW", "DONE").contains(stage.status()))) return false;
+        Instant lastStageDelivery = stages.stream().filter(stage ->
+                        List.of("IN_REVIEW", "DONE", "CANCELED").contains(stage.status()))
+                .map(CollaborationStore.CollaborationTask::updatedAt).max(Instant::compareTo).orElse(null);
+        return lastStageDelivery != null && collaboration.comments(task.id()).stream().anyMatch(comment ->
+                comment.conclusion() && "AGENT".equals(comment.authorType())
+                        && team.leaderAgentProfileId().equals(comment.authorId())
+                        && !comment.createdAt().isBefore(lastStageDelivery));
+    }
+
+    private boolean hasStageDeliveryEvidence(CollaborationStore.CollaborationTask task, RunRecord run) {
+        if (!runtime.artifactsForRun(run.id()).isEmpty()) return true;
+        Instant threshold = run.createdAt().minusSeconds(1);
+        if (runtime.hasCompletedMutatingToolCall(run.id()) && runtime.workspaceFiles(run.id(), 200).stream()
+                .anyMatch(file -> !file.modifiedAt().isBefore(threshold))) return true;
+        return collaboration.comments(task.id()).stream().anyMatch(comment ->
+                !blank(comment.content()) && !comment.createdAt().isBefore(threshold));
+    }
+
+    private CollaborationStore.CollaborationTask rootTask(CollaborationStore.CollaborationTask task) {
+        CollaborationStore.CollaborationTask current = task;
+        Set<String> visited = new java.util.HashSet<>();
+        for (int depth = 0; depth < 64; depth++) {
+            if (!visited.add(current.id())) {
+                throw new IllegalStateException("collaboration task parent cycle detected: " + current.id());
+            }
+            if (blank(current.parentId())) return current;
+            String parentId = current.parentId();
+            current = collaboration.task(parentId).orElseThrow(() ->
+                    new IllegalStateException("collaboration parent task not found: " + parentId));
+        }
+        throw new IllegalStateException("collaboration task nesting exceeds 64 levels");
+    }
+
+    private TriggerExecution humanTrigger(CollaborationStore.CollaborationTask task, String action,
+                                          String reason, String idempotencyKey) {
+        String instruction = blank(reason) ? action + " collaboration task: " + task.title() : reason;
+        String key = blank(idempotencyKey)
+                ? "human-action:" + task.id() + ":" + task.updatedAt() + ":" + action
+                : idempotencyKey.trim();
+        return trigger(task.id(), "HUMAN_ACTION", action, task.assigneeType(), task.assigneeId(),
+                instruction, key);
+    }
+
+    private void validateAgentTransition(CollaborationStore.CollaborationTask task,
+                                         String targetStatus, String actorId) {
+        if (!List.of("IN_PROGRESS", "BLOCKED").contains(targetStatus)) {
+            throw new IllegalArgumentException(
+                    "Agent may only report IN_PROGRESS or BLOCKED; Run completion submits the task for review");
+        }
+        if ("TEAM".equals(task.assigneeType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId())
+                    .orElseThrow(() -> new IllegalArgumentException("assigned team not found"));
+            if (!team.leaderAgentProfileId().equals(actorId)) {
+                throw new IllegalArgumentException("only the assigned Team Leader may update the task status");
+            }
+        } else if ("AGENT".equals(task.assigneeType()) && !task.assigneeId().equals(actorId)) {
+            throw new IllegalArgumentException("only the assigned Agent may update the task status");
+        }
+        if ("IN_PROGRESS".equals(targetStatus)) {
+            requireOneOf(task, "REPORT_PROGRESS", "BACKLOG", "TODO", "IN_PROGRESS", "BLOCKED");
+            return;
+        }
+        if ("BLOCKED".equals(targetStatus)) {
+            requireStatus(task, "IN_PROGRESS", "REPORT_BLOCKED");
+            return;
+        }
+    }
+
+    private void ensureNoActiveRuns(CollaborationStore.CollaborationTask task) {
+        if (hasActiveRuns(task.id())) {
+            throw new IllegalStateException(
+                    "task has active Runs; intervene through comments or cancel the active Run first");
+        }
+    }
+
+    private boolean hasActiveRuns(String taskId) {
+        return collaboration.taskTreeRuns(taskId).stream()
+                .anyMatch(link -> !TERMINAL_RUN_STATUSES.contains(link.status()));
+    }
+
+    private static void requireReason(String reason, String action) {
+        if (blank(reason)) throw new IllegalArgumentException("reason is required for " + action);
+    }
+
+    private static void requireStatus(CollaborationStore.CollaborationTask task,
+                                      String status, String action) {
+        if (!status.equals(task.status())) throw invalidAction(task, action);
+    }
+
+    private static void requireOneOf(CollaborationStore.CollaborationTask task, String action,
+                                     String... statuses) {
+        if (!List.of(statuses).contains(task.status())) throw invalidAction(task, action);
+    }
+
+    private static IllegalArgumentException invalidAction(CollaborationStore.CollaborationTask task,
+                                                           String action) {
+        return new IllegalArgumentException(action + " is not allowed while task is " + task.status());
+    }
+
+    private String runInput(CollaborationStore.CollaborationTask task, CollaborationStore.Trigger trigger,
+                            CollaborationRoutingService.RoutePreview preview, String instruction) {
+        StringBuilder value = new StringBuilder("你正在处理持久化协作任务。\n")
+                .append("task_id: ").append(task.id()).append("\n")
+                .append("title: ").append(task.title()).append("\n")
+                .append("status: ").append(task.status()).append("\n")
+                .append("description:\n").append(task.description()).append("\n")
+                .append("acceptance_criteria:\n").append(task.acceptanceCriteria()).append("\n")
+                .append("trigger: ").append(trigger.triggerType()).append("\n")
+                .append("instruction:\n").append(blank(instruction) ? "按任务目标推进。" : instruction).append("\n\n")
+                .append("同一根协作任务的 Leader 唤醒和默认阶段子任务复用同一个持久工作区；先读取现有文件再继续。\n")
+                .append("使用协作工具发布进度、阻塞或结论；阶段交付必须至少产生工作区文件变更、Artifact 或任务评论，Run 完成不等于任务 DONE。\n");
+        if ("TEAM".equals(preview.targetType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElseThrow();
+            value.append("你是小队 Leader。评估后按能力派发，派发后停止；成员结果或阶段屏障会重新唤醒你。\n")
+                    .append("team_instructions:\n").append(team.teamInstructions()).append("\n")
+                    .append("member_roles_json: ").append(team.memberRolesJson()).append("\n")
+                    .append("completion_policy: ").append(team.completionPolicy()).append("\n");
+        }
+        if ("TEAM".equals(preview.targetType())) {
+            value.append("\nTeam completion gate: create durable staged subtasks. After a stage barrier wakes you, read the staged delivery evidence, dispatch the next required stage, and only publish a final response after posting a conclusion comment for the completed delivery.\n");
+        }
+        return value.toString();
+    }
+
+    private void validateAssignee(String projectKey, String type, String id) {
+        String normalized = blank(type) ? "" : type.trim().toUpperCase();
+        if (blank(id)) throw new IllegalArgumentException("assigneeId is required for " + normalized);
+        if ("AGENT".equals(normalized)) {
+            productivity.resolveAgentProfile(projectKey, id).filter(ProductivityStore.AgentProfile::enabled)
+                    .orElseThrow(() -> new IllegalArgumentException("agent assignee not found: " + id));
+            return;
+        }
+        if ("TEAM".equals(normalized)) {
+            productivity.findAgentTeam(id).filter(team -> team.enabled()
+                    && team.projectKey().equals(normalizeProject(projectKey)))
+                    .orElseThrow(() -> new IllegalArgumentException("team assignee not found: " + id));
+            return;
+        }
+        throw new IllegalArgumentException("assigneeType must be AGENT or TEAM");
+    }
+
+    private ProductivityStore.AgentProfile resolveStageAgent(String projectKey, String type, String id) {
+        String normalized = blank(type) ? "" : type.trim().toUpperCase();
+        if ("AGENT".equals(normalized)) {
+            return productivity.resolveAgentProfile(projectKey, id)
+                    .filter(ProductivityStore.AgentProfile::enabled)
+                    .orElseThrow(() -> new IllegalArgumentException("agent assignee not found: " + id));
+        }
+        if ("TEAM".equals(normalized)) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(id)
+                    .filter(value -> value.enabled() && value.projectKey().equals(normalizeProject(projectKey)))
+                    .orElseThrow(() -> new IllegalArgumentException("team assignee not found: " + id));
+            return productivity.resolveAgentProfile(projectKey, team.leaderAgentProfileId())
+                    .filter(ProductivityStore.AgentProfile::enabled)
+                    .orElseThrow(() -> new IllegalArgumentException("team leader is not available: "
+                            + team.leaderAgentProfileId()));
+        }
+        throw new IllegalArgumentException("assigneeType must be AGENT or TEAM");
+    }
+
+    private String write(Object value) {
+        try { return mapper.writeValueAsString(value); }
+        catch (Exception e) { throw new IllegalStateException("failed to serialize collaboration data", e); }
+    }
+
+    private static String normalizeProject(String value) { return blank(value) ? "default" : value.trim(); }
+    private static boolean blank(String value) { return value == null || value.isBlank(); }
+    private static String message(Exception error) {
+        return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+    }
+
+    public record TaskCommand(String projectKey, String title, String description, String status,
+                              int priority, String assigneeType, String assigneeId,
+                              String acceptanceCriteria, String parentId, int stage,
+                              String latestPlanId, String createdBy) { }
+    public record TriggerExecution(CollaborationStore.Trigger trigger, RunRecord run,
+                                   CollaborationStore.RouteDecision routeDecision) { }
+    public record StageExecution(CollaborationStore.CollaborationTask task,
+                                 RunDelegationRecord delegation, RunRecord run) { }
+    public record HumanActionResult(CollaborationStore.CollaborationTask task,
+                                    TriggerExecution triggerExecution) { }
+    public record CommentResult(CollaborationStore.CollaborationComment comment,
+                                List<CollaborationStore.MentionTarget> mentions,
+                                List<TriggerExecution> executions) { }
+}

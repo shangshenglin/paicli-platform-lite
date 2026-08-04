@@ -21,6 +21,7 @@ import com.paicli.platform.server.config.RagProperties;
 import com.paicli.platform.server.memory.LayeredMemoryService;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.plan.PlanToolProvider;
+import com.paicli.platform.server.collaboration.CollaborationToolProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -112,6 +113,7 @@ public class ContextManager {
                 parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
         if (agentProfile != null && !allowedTools.isEmpty()) {
             allowedTools.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+            allowedTools.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
         }
         String runtime = prompts.runtimeContext(
                 platformProperties.workspaceRoot().resolve(workspaceRunId), run.createdAt());

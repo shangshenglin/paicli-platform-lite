@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/v1/memories")
@@ -118,5 +119,14 @@ public class MemoryController {
         if (!store.deleteMemory(memoryId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "memory not found");
         }
+    }
+
+    @PostMapping("/batch-delete")
+    @Operation(summary = "Permanently delete Memory records in one transaction",
+            description = "Deletes up to 100 Memory records and their revisions, sources, conflicts and usage "
+                    + "feedback. Missing ids roll back the complete batch.")
+    public Map<String, Object> batchDelete(@Valid @RequestBody ApiDtos.BatchDeleteRequest request) {
+        List<String> deleted = store.deleteMemories(request.ids());
+        return Map.of("deletedIds", deleted, "deletedCount", deleted.size());
     }
 }

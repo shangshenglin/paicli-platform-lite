@@ -2,6 +2,7 @@ package com.paicli.platform.server.api;
 
 import com.paicli.platform.server.approval.ApprovalService;
 import com.paicli.platform.server.domain.ApprovalRecord;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/v1/approvals")
@@ -28,10 +30,11 @@ public class ApprovalController {
     }
 
     @GetMapping
-    public List<ApprovalRecord> pending(@RequestParam(required = false) String runId) {
-        return runId == null || runId.isBlank()
-                ? approvalService.pending()
-                : approvalService.pendingForRunTree(runId);
+    public List<ApprovalRecord> pending(@RequestParam(required = false) String runId,
+                                        @RequestParam(required = false) String projectKey) {
+        if (runId != null && !runId.isBlank()) return approvalService.pendingForRunTree(runId);
+        return projectKey == null || projectKey.isBlank()
+                ? approvalService.pending() : approvalService.pendingForProject(projectKey);
     }
 
     @PostMapping("/{approvalId}")
@@ -51,5 +54,14 @@ public class ApprovalController {
     public void deletePolicy(@PathVariable String policyId) {
         if (!approvalService.deletePolicy(policyId)) throw new ResponseStatusException(
                 HttpStatus.NOT_FOUND, "approval policy not found");
+    }
+
+    @PostMapping("/policies/batch-delete")
+    @Operation(summary = "Permanently delete persisted approval policies in one transaction",
+            description = "Deletes up to 100 exact-argument approval policies. Missing ids roll back the complete batch.")
+    public Map<String, Object> batchDeletePolicies(
+            @Valid @RequestBody ApiDtos.BatchDeleteRequest request) {
+        List<String> deleted = approvalService.deletePolicies(request.ids());
+        return Map.of("deletedIds", deleted, "deletedCount", deleted.size());
     }
 }

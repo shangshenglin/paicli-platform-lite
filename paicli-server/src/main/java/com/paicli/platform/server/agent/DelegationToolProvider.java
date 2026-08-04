@@ -11,6 +11,7 @@ import com.paicli.platform.server.model.ModelToolDefinition;
 import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import com.paicli.platform.server.store.CollaborationStore;
 import com.paicli.platform.server.tool.ServerToolProvider;
 import org.springframework.stereotype.Component;
 
@@ -30,13 +31,15 @@ public class DelegationToolProvider implements ServerToolProvider {
     private final ProductivityStore productivity;
     private final ObjectMapper mapper;
     private final PlanStore plans;
+    private final CollaborationStore collaboration;
 
     public DelegationToolProvider(SqliteRuntimeStore store, ProductivityStore productivity,
-                                  ObjectMapper mapper, PlanStore plans) {
+                                  ObjectMapper mapper, PlanStore plans, CollaborationStore collaboration) {
         this.store = store;
         this.productivity = productivity;
         this.mapper = mapper;
         this.plans = plans;
+        this.collaboration = collaboration;
     }
 
     @Override public String id() { return "agent"; }
@@ -143,6 +146,8 @@ public class DelegationToolProvider implements ServerToolProvider {
                 profile == null ? null : profile.reasoningEffort(),
                 profile == null ? null : profile.executionShell(),
                 planId, planStepId, envelopeJson, graph);
+        collaboration.taskForRun(request.runId()).ifPresent(task ->
+                collaboration.linkRun(task.id(), delegation.childRunId(), null, "DELEGATION"));
         var child = store.findRun(delegation.childRunId()).orElseThrow();
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("delegation_id", delegation.id());

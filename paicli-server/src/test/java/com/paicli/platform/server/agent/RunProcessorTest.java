@@ -70,6 +70,42 @@ class RunProcessorTest {
     }
 
     @Test
+    void emptyModelResponseCannotCompleteRun() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient emptyModel = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                return ModelResponse.text(" ");
+            }
+
+            @Override public String name() { return "empty-model-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, emptyModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties));
+        var session = store.createSession("empty response");
+        var run = store.createRun(session.id(), "produce a durable result");
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        assertThat(store.findRun(run.id()).orElseThrow()).satisfies(failed -> {
+            assertThat(failed.status()).isEqualTo(RunStatus.FAILED);
+            assertThat(failed.error()).contains("empty final response");
+        });
+    }
+
+    @Test
     void persistsRunDefaultShellBeforeRequestingCommandApproval() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");

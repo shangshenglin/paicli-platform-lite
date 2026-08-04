@@ -23,4 +23,6 @@ public interface ArtifactStore {
     InputAttachmentRecord reuse(String artifactId, String sessionId);
 
     boolean delete(String artifactId);
+
+    List<String> deleteBatch(List<String> artifactIds);
 }

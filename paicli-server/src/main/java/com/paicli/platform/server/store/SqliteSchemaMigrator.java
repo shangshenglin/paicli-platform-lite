@@ -36,7 +36,14 @@ final class SqliteSchemaMigrator {
             new Migration(24, "reusable expert collaboration teams"),
             new Migration(25, "durable collaboration graph dependencies resources and terminal propagation"),
             new Migration(26, "durable run and agent profile execution shell"),
-            new Migration(27, "immutable memory sources context feedback and harness governance")
+            new Migration(27, "immutable memory sources context feedback and harness governance"),
+            new Migration(28, "expert teams routing decisions and collaboration metrics"),
+            new Migration(29, "durable collaboration tasks comments activities and run links"),
+            new Migration(30, "idempotent collaboration triggers mentions and stage barriers"),
+            new Migration(31, "effective agent team concurrency on collaboration run trees"),
+            new Migration(32, "close pending approvals left by terminal runs"),
+            new Migration(33, "reconcile review tasks with active run trees"),
+            new Migration(34, "task scoped collaboration workspaces and delivery evidence gate")
     );
 
     private SqliteSchemaMigrator() { }

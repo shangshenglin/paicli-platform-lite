@@ -52,7 +52,7 @@ public class ScheduledTaskService {
                 if(team != null){
                     runtime.saveCollaborationPolicy(run.id(),true,"MEDIUM","MEDIUM",
                             team.memberAgentProfileIdsJson(),team.maxExperts(),team.maxDepth(),team.maxExperts(),
-                            0,0,false,team.requireReviewer(),team.requireRunner());
+                            team.maxConcurrency(),0,0,false,team.requireReviewer(),team.requireRunner());
                     plans.createAutomaticCollaborationPlan(session.id(),run.id(),task.projectKey(),prompt);
                 }
                 productivity.markTemplateUsed(task.projectKey(),template.id());

@@ -20,6 +20,7 @@ import com.paicli.platform.server.observability.RuntimeMetrics;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
+import com.paicli.platform.server.collaboration.CollaborationService;
 import com.paicli.platform.server.tool.ToolRouter;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,6 +51,7 @@ public class RunProcessor {
     private final RuntimeMetrics metrics;
     private final ProductivityStore productivity;
     private final CompletionNotificationService notifications;
+    private final CollaborationService collaboration;
 
     @Autowired
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -58,7 +60,8 @@ public class RunProcessor {
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer,
                         LayeredMemoryService memoryService, ModelProperties modelProperties,
                         RuntimeMetrics metrics, ProductivityStore productivity,
-                        CompletionNotificationService notifications) {
+                        CompletionNotificationService notifications,
+                        CollaborationService collaboration) {
         this.store = store;
         this.modelClient = modelClient;
         this.toolRouter = toolRouter;
@@ -72,6 +75,7 @@ public class RunProcessor {
         this.metrics = metrics;
         this.productivity = productivity;
         this.notifications = notifications;
+        this.collaboration = collaboration;
     }
 
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -79,7 +83,19 @@ public class RunProcessor {
                         ApprovalService approvalService, AuditService auditService,
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
-                contextManager, resultMaterializer, null, null, null, null, null);
+                contextManager, resultMaterializer, null, null, null, null, null, null);
+    }
+
+    RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
+                 ToolRouter toolRouter, ObjectMapper mapper,
+                 ApprovalService approvalService, AuditService auditService,
+                 ContextManager contextManager, ToolResultMaterializer resultMaterializer,
+                 LayeredMemoryService memoryService, ModelProperties modelProperties,
+                 RuntimeMetrics metrics, ProductivityStore productivity,
+                 CompletionNotificationService notifications) {
+        this(store, modelClient, toolRouter, mapper, approvalService, auditService,
+                contextManager, resultMaterializer, memoryService, modelProperties, metrics,
+                productivity, notifications, null);
     }
 
     public void process(RunRecord claimedRun) {
@@ -154,6 +170,10 @@ public class RunProcessor {
             if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) return;
 
             if (!response.hasToolCalls()) {
+                if (response.content().isBlank()) {
+                    throw new IllegalStateException(
+                            "model returned an empty final response without tool calls; refusing false completion");
+                }
                 boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(),
                         response.content(), response.reasoningContent(), json(Map.of(
                         "content", response.content(),
@@ -289,8 +309,19 @@ public class RunProcessor {
     }
 
     private void notify(RunRecord run,String event,String message){
-        if(notifications==null)return;
-        store.findSession(run.sessionId()).ifPresent(session->notifications.publish(session.projectKey(),event,run.id(),message));
+        if (notifications != null) {
+            store.findSession(run.sessionId()).ifPresent(session ->
+                    notifications.publish(session.projectKey(), event, run.id(), message));
+        }
+        if (collaboration != null && ("COMPLETED".equals(event) || "FAILED".equals(event))) {
+            try {
+                store.findRun(run.id()).ifPresent(value -> collaboration.onRunTerminal(value, event));
+            } catch (Exception error) {
+                store.appendEvent(run.id(), "collaboration.lifecycle_failed", json(Map.of(
+                        "error", error.getMessage() == null
+                                ? error.getClass().getSimpleName() : error.getMessage())));
+            }
+        }
     }
 
     private record RunBudgetSnapshot(int step, int maxSteps, int tokens, int maxTokens,
@@ -355,7 +386,8 @@ public class RunProcessor {
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
                     materialized.modelContent(), null, json(completedEvent), run.currentStep());
             if (!committed) return;
-            if (isActiveAgentResult(call, materialized.modelContent())) {
+            if (isActiveAgentResult(call, materialized.modelContent())
+                    || "create_collaboration_subtask".equals(call.toolName())) {
                 store.waitForAgent(run.id());
                 return;
             }

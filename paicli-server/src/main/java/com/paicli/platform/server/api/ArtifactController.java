@@ -76,4 +76,13 @@ public class ArtifactController {
         if (!artifactStore.delete(artifactId)) throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                 "artifact not found");
     }
+
+    @PostMapping("/batch-delete")
+    @io.swagger.v3.oas.annotations.Operation(summary = "Permanently delete Artifacts in one database transaction",
+            description = "Deletes up to 100 Artifact metadata rows atomically, then removes their object-storage "
+                    + "content. Missing ids roll back the complete database batch.")
+    public Map<String, Object> batchDelete(@Valid @RequestBody ApiDtos.BatchDeleteRequest request) {
+        List<String> deleted = artifactStore.deleteBatch(request.ids());
+        return Map.of("deletedIds", deleted, "deletedCount", deleted.size());
+    }
 }

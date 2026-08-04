@@ -1,5 +1,12 @@
 # 交付阶段
 
+## 2026-08-04 协作阶段收敛修复
+
+- [x] 阶段子 Run 的终态统一通过阶段屏障唤醒 Leader；启动恢复会补偿旧的 `WAITING` Barrier 及已完成但未触发 Leader 的 Barrier。
+- [x] Team 根任务进入人工验收前要求阶段交付证据与 Leader 的后置结论评论，避免只完成首个子阶段便提前交付。
+- [x] 根协作任务拥有跨 Session/Run 的稳定工作区；Leader 唤醒、阶段 Run 与默认委派后代复用该目录，历史分散目录在启动时归并，显式 `workspace_ref` 继续提供隔离边界。
+- [x] 空模型响应不能完成 Run；阶段 Run 缺少本 Run 写文件、Artifact 或评论证据时阻塞阶段和父任务，不再完成 Barrier 或循环派发。
+
 ## 阶段 1：持久化 Agent Runtime
 
 - [x] 多模块 Maven 工程与 SQLite WAL 存储
@@ -74,6 +81,7 @@
 - [x] Memory 来源/置信度展示、置顶、启停、人工确认、下拉选择合并、表单修订及全部历史版本查看与恢复
 - [x] 知识文档集合、标签、版本、索引状态、重建索引、引用定位和有用性反馈
 - [x] Artifact 列表、预览、认证下载、删除和复用为聊天附件
+- [x] Run 队列、Memory、Artifact 和持久化审批策略支持勾选批量永久删除；数据库事务全有或全无，Run 仅允许终态记录
 - [x] Schema 迁移 10、Console 业务工作台、Store 回归测试和中文文档
 - [x] 59 项自动化测试覆盖 Common、Server 与 Sandbox Agent
 
@@ -206,6 +214,40 @@
 - [x] 官方 Starter Pack `1.1.0` 增加 Context/Memory Harness 六个专项 Case，并补来源冻结、source span、反馈、结构化摘要、按需工具和预算回归测试。
 - [x] Prompt Cache 模板改为稳定前缀、历史前置、动态尾部和持久化 Run 时间；README/架构文档单列命中率优化、增量指标口径及合理失效条件。
 
+## 阶段 22：增强 AgentTeam、结构化路由与团队评测
+
+- [x] AgentTeam 增加团队指令、成员角色说明、能力标签、路由策略、完成策略、故障回退 Agent 和最大并发；Route Preview 的有效并发会固化到根协作策略，队列按委派树限制活动子专家数量，项目级最大并发仍作为外层上限；旧协作策略以 `0` 保持不额外限流的兼容行为。
+- [x] Route Preview 返回目标类型、Leader、候选 Agent、匹配原因、复杂度、风险和预计并发；预览不创建 Run，真实 Trigger 持久化 Route Decision。
+- [x] Agent 评测 Execution 可选绑定 AgentTeam，每个 Trial 使用团队 Leader 和固化的协作策略，继续复用普通 Run、ToolCall、Approval 与评分器。
+- [x] Starter Pack `1.2.0` 增加默认关闭的 AgentTeam 协作 Harness，总计 7 个 Suite/28 个 Case。
+- [x] Console 专家协作入口增加 Route Preview，小队编辑器开放增强字段，团队列表展示任务完成率、Run 成功率、委派数和人工介入数。
+
+## 阶段 23：持久化 CollaborationTask 与协作时间线
+
+- [x] 新增长期 `CollaborationTask`，支持 Agent/AgentTeam 负责人、状态、优先级、可选完成条件、父子任务、阶段和 Plan 引用；人工作为全流程审核与干预者，不建模为任务负责人；阶段子任务会原子绑定直接专家 Run，避免只创建未执行的孤立任务卡片。
+- [x] 新增评论、回复、结论、显式 Mention 和统一 Activity Timeline；评论/状态/Run/Barrier 事件保留 actor、subject、payload 与时间。
+- [x] 新增 Task-Run 多对多关联；Trigger Run 和委派 child Run 都回链所属任务，任务完成与 Run 终态保持分离。
+- [x] Agent Profile 自动获得受白名单约束的任务读取、评论、进度/阻塞报告和子任务创建工具；`IN_REVIEW` 只由整个 Run 树终态后的平台状态机提交，Agent 不能直接写 `IN_REVIEW/DONE/CANCELED`，并继续服从 ToolCall 先持久化及审批边界。
+- [x] Console 新增“协作任务”入口，并按任务、协作、执行三层展示目标与可选完成条件、人工动作、评论时间线和 Run 会话；创建表单默认只保留标题与负责人；三模式切换提升到全局主 Header，在首页、会话和任务过程中持续可见；左侧历史按项目和既有自定义分组统一展示普通、专家、任务三类记录，折叠任务关联的重复 Run 会话，保留打开、会话分组与删除能力，并遵循有执行历史的任务只能取消、不能物理删除的审计边界；协作层使用阶段轨道、参与/执行/评论指标和中文语义动态展示过程，并以同一次三秒轮询同步评论、活动、Run 与状态；执行者、模型、Team、工具和其他实体引用统一映射业务名称。
+
+## 阶段 24：事件驱动 Leader 唤醒与阶段屏障
+
+- [x] 补齐根任务树语义：阶段只在父任务详情内展示；任务执行页聚合根与阶段 Run，并从共享 workspace 直接列出最终交付文件。根任务只有在整个执行树终态后才可进入人工验收，消除“Agent 仍在运行但任务已待验收”的状态错位。
+- [x] 终态协作任务支持删除协作层记录，同时保留已结束 Run、会话和交付文件；活跃 Run 仍要求先取消。
+
+- [x] 统一持久化 Trigger，支持 `MANUAL`、`HUMAN_ACTION`、`MENTION`、`REPLY`、`RUN_EVENT`、`STAGE_BARRIER`，使用全局 idempotency key 阻止恢复或重放时重复创建 Run。
+- [x] 用户评论默认触发任务负责人；显式 Mention 精确触发 Agent/Team；回复 Agent 评论回到原 Agent；团队成员发布评论或进入 Run 终态时唤醒 Leader。
+- [x] 子任务按 `parent_id + stage` 建立持久化 Barrier；同阶段全部 `IN_REVIEW/DONE/CANCELED` 后只完成一次并唤醒父任务负责人，Barrier 完成不替代最终人工验收。阶段派发与后续新 Leader Run 复用根任务级共享工作区，不依赖某个 Leader Session 的临时目录。
+- [x] Run 完成不自动推进任务；单 Agent 任务由被分配 Agent、Team 任务由 Leader 提交 `IN_REVIEW`，人工通过显式 `ACCEPT` 完成最终审核，也可在任意节点评论并启动、继续、阻塞、返工、取消或重新打开；活跃 Run 期间取消任务会同时持久化取消关联 Run 树并中断模型与 Sandbox 执行。
+- [x] Schema 迁移记录推进到 34，并增加迁移、Store 幂等、评论提及、Task-Run、Route Decision、团队 Trial、阶段屏障、小队并发领取、取消审批清理、任务工作区迁移与空交付门禁回归测试；主 Header 汇总当前项目待审批项，子专家 Approval 可不进入会话直接处理，已终态 Run 的遗留审批会自动关闭。
+
+## 阶段 25（规划）：外部 Harness 成本与协作效率控制
+
+- [ ] 在普通对话、专家协作与 CollaborationTask 之前增加统一的任务级 Token/费用信封、原子预留和结算；保留现有项目/Run 级预算作为下层硬上限。
+- [ ] 增加 Trigger 合并、Leader 单飞、证据版本、429 冷却与可读的 Harness 决策审计，避免每条成员事件或评论都直接创建新的模型 Run。
+- [ ] 引入结构化交接包、角色 Context Profile 与确定性工具结果归并，减少跨 Agent 的重复上下文和工具后模型回合。
+- [ ] 将模型调用数、输入/输出 Token、缓存、重试、验收通过率和返工率纳入同一团队评测，拒绝只省 Token 却降低交付质量的策略。详见 [外部 Harness Token 成本优化方案](harness-token-optimization.md)。
+
 ### 阶段 16 后续工作
 
 - [ ] Memory conflict 的人工解决 API 与 Console 审计入口。
@@ -225,6 +267,6 @@
 - Kafka、Redis、PostgreSQL、MinIO
 - 已为 Kafka/Redis/MinIO 预留替换端口：Run Dispatch Queue、Run Execution Registry 和 Object Storage Port；当前默认和唯一可用实现仍是 SQLite/进程内注册/本地文件，配置为外部后端会明确失败，避免误判为已接入。
 - 跨项目 Memory 联想图谱
-- 自治 Planner/Reviewer Agent Team 和复杂团队 Console；当前只做单 Agent 的持久化 Plan Runtime
+- 跨项目自治组织、复杂资源排班和无人工边界的自进化团队；Lite 当前提供单项目 AgentTeam、持久化协作任务和三层任务 Console
 - 默认 Lite 配置中的外部向量数据库
 - 音视频理解和历史原始图片重复注入

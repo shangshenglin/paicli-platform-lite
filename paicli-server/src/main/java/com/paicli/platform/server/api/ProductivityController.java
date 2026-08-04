@@ -3,6 +3,7 @@ package com.paicli.platform.server.api;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.model.ModelClient;
+import com.paicli.platform.server.collaboration.CollaborationToolProvider;
 import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
@@ -261,14 +262,23 @@ public class ProductivityController {
     }
 
     @PostMapping("/queue/batch")
+    @io.swagger.v3.oas.annotations.Operation(summary = "Batch-manage Run queue records",
+            description = "CANCEL, REQUEUE and PRIORITY update queue state. DELETE permanently removes up to 100 "
+                    + "terminal Runs and their persisted runtime records in one transaction; any missing Run, active "
+                    + "target, or active related delegation Run rolls back the complete delete batch.")
     public Map<String,Object> batch(@Valid @RequestBody ApiDtos.QueueBatchRequest request){
-        List<String> changed=new ArrayList<>();String action=request.action().trim().toUpperCase();
+        String action=request.action().trim().toUpperCase();
+        if("DELETE".equals(action)){
+            List<String> deleted=runtime.deleteRuns(request.runIds());
+            return Map.of("action",action,"changed",deleted,"deletedCount",deleted.size());
+        }
+        List<String> changed=new ArrayList<>();
         for(String runId:request.runIds().stream().filter(v->v!=null&&!v.isBlank()).distinct().limit(100).toList()){
             boolean ok=switch(action){
                 case "CANCEL"->{boolean canceled=runtime.cancelRunTree(runId).contains(runId);modelClient.cancel(runId);tools.cancel(runId);yield canceled;}
                 case "REQUEUE"->{boolean requeued=productivity.requeue(runId);if(requeued)runtime.appendEvent(runId,"run.requeued","{\"source\":\"productivity-console\"}");yield requeued;}
                 case "PRIORITY"->productivity.setPriority(runId,request.priority()==null?0:request.priority());
-                default->throw new IllegalArgumentException("action must be CANCEL, REQUEUE, or PRIORITY");};
+                default->throw new IllegalArgumentException("action must be CANCEL, REQUEUE, PRIORITY, or DELETE");};
             if(ok)changed.add(runId);
         }
         return Map.of("action",action,"changed",changed);
@@ -350,6 +360,11 @@ public class ProductivityController {
                     request.maxDepth() == null ? 1 : request.maxDepth(),
                     Boolean.TRUE.equals(request.requireReviewer()),
                     Boolean.TRUE.equals(request.requireRunner()),
+                    request.teamInstructions(),
+                    mapper.writeValueAsString(request.memberRoles() == null ? Map.of() : request.memberRoles()),
+                    mapper.writeValueAsString(request.capabilityTags() == null ? List.of() : request.capabilityTags()),
+                    request.routingPolicy(), request.completionPolicy(), request.fallbackAgentProfileId(),
+                    request.maxConcurrency() == null ? Math.max(1, members.size()) : request.maxConcurrency(),
                     request.enabled() == null || request.enabled());
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
@@ -458,6 +473,7 @@ public class ProductivityController {
     private static List<String> withPlanTools(List<String> tools) {
         var values = new java.util.LinkedHashSet<>(tools);
         values.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+        values.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
         return List.copyOf(values);
     }
     private String withPlanToolsJson(String json) throws Exception {

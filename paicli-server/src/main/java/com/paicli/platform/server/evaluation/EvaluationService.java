@@ -7,7 +7,9 @@ import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.store.EvaluationStore;
+import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -27,15 +29,28 @@ public class EvaluationService {
 
     private final EvaluationStore evaluations;
     private final SqliteRuntimeStore runtime;
+    private final ProductivityStore productivity;
     private final ObjectMapper mapper;
 
-    public EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime, ObjectMapper mapper) {
+    @Autowired
+    public EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
+                             ProductivityStore productivity, ObjectMapper mapper) {
         this.evaluations = evaluations;
         this.runtime = runtime;
+        this.productivity = productivity;
         this.mapper = mapper;
     }
 
+    EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime, ObjectMapper mapper) {
+        this(evaluations, runtime, null, mapper);
+    }
+
     public EvaluationStore.EvaluationExecution start(String suiteId, String modelProfileId,
+                                                     Integer requestedTrials, Integer requestedThreshold) {
+        return start(suiteId, modelProfileId, null, requestedTrials, requestedThreshold);
+    }
+
+    public EvaluationStore.EvaluationExecution start(String suiteId, String modelProfileId, String agentTeamId,
                                                      Integer requestedTrials, Integer requestedThreshold) {
         var suite = evaluations.suite(suiteId)
                 .orElseThrow(() -> new IllegalArgumentException("evaluation suite not found: " + suiteId));
@@ -43,15 +58,36 @@ public class EvaluationService {
         if (cases.isEmpty()) throw new IllegalStateException("evaluation suite has no enabled cases");
         int trials = requestedTrials == null ? suite.defaultTrials() : requestedTrials;
         int threshold = requestedThreshold == null ? suite.passThreshold() : requestedThreshold;
-        var execution = evaluations.createExecution(suite, modelProfileId, trials, threshold);
+        ProductivityStore.AgentTeam team = null;
+        ProductivityStore.AgentProfile leader = null;
+        if (agentTeamId != null && !agentTeamId.isBlank()) {
+            if (productivity == null) throw new IllegalStateException("team evaluation is unavailable");
+            team = productivity.findAgentTeam(agentTeamId).filter(value -> value.enabled()
+                    && value.projectKey().equals(suite.projectKey()))
+                    .orElseThrow(() -> new IllegalArgumentException("evaluation agent team not found: " + agentTeamId));
+            leader = productivity.resolveAgentProfile(suite.projectKey(), team.leaderAgentProfileId())
+                    .filter(ProductivityStore.AgentProfile::enabled)
+                    .orElseThrow(() -> new IllegalArgumentException("evaluation team leader is unavailable"));
+        }
+        var execution = evaluations.createExecution(suite, modelProfileId, agentTeamId, trials, threshold);
         try {
             for (var evaluationCase : cases) {
                 for (int ordinal = 1; ordinal <= trials; ordinal++) {
                     var session = runtime.createInternalSession(
                             "Evaluation: " + suite.name() + " / " + evaluationCase.name() + " #" + ordinal,
                             suite.projectKey());
-                    var run = runtime.createRun(session.id(), evaluationCase.prompt(), "auto", "", List.of(),
-                            modelProfileId, 0, 0);
+                    var run = leader == null
+                            ? runtime.createRun(session.id(), evaluationCase.prompt(), "auto", "", List.of(),
+                            modelProfileId, 0, 0)
+                            : runtime.createRun(session.id(), evaluationCase.prompt(),
+                            leader.thinkingMode(), leader.reasoningEffort(), List.of(), modelProfileId,
+                            leader.id(), 0, 0, leader.executionShell());
+                    if (team != null) {
+                        runtime.saveCollaborationPolicy(run.id(), true, "MEDIUM", "MEDIUM",
+                                team.memberAgentProfileIdsJson(), team.maxExperts(), team.maxDepth(),
+                                team.maxExperts(), team.maxConcurrency(), 0, 0, team.maxDepth() > 1,
+                                team.requireReviewer(), team.requireRunner());
+                    }
                     evaluations.addTrial(execution.id(), evaluationCase.id(), ordinal, session.id(), run.id());
                 }
             }
