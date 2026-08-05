@@ -1,6 +1,6 @@
 FROM eclipse-temurin:17-jre AS java-runtime
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0
+FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
