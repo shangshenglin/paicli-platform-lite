@@ -214,6 +214,8 @@
 - [x] 官方 Starter Pack `1.1.0` 增加 Context/Memory Harness 六个专项 Case，并补来源冻结、source span、反馈、结构化摘要、按需工具和预算回归测试。
 - [x] Prompt Cache 模板改为稳定前缀、历史前置、动态尾部和持久化 Run 时间；README/架构文档单列命中率优化、增量指标口径及合理失效条件。
 
+- [x] 自动 Memory 仅由委派树根 Run 排队；单根 Run 至多 3 条（L1≤1、L2≤2、L3≤1），过滤协作流程噪声，拒绝空证据或仅 Assistant 证据，并按证据质量、重复和稳定性校准模型置信度；Console 支持主动新增人工 L3 长期记忆。
+
 ## 阶段 22：增强 AgentTeam、结构化路由与团队评测
 
 - [x] AgentTeam 增加团队指令、成员角色说明、能力标签、路由策略、完成策略、故障回退 Agent 和最大并发；Route Preview 的有效并发会固化到根协作策略，队列按委派树限制活动子专家数量，项目级最大并发仍作为外层上限；旧协作策略以 `0` 保持不额外限流的兼容行为。
@@ -237,7 +239,7 @@
 
 - [x] 统一持久化 Trigger，支持 `MANUAL`、`HUMAN_ACTION`、`MENTION`、`REPLY`、`RUN_EVENT`、`STAGE_BARRIER`，使用全局 idempotency key 阻止恢复或重放时重复创建 Run。
 - [x] 用户评论默认触发任务负责人；显式 Mention 精确触发 Agent/Team；回复 Agent 评论回到原 Agent；团队成员发布评论或进入 Run 终态时唤醒 Leader。
-- [x] 子任务按 `parent_id + stage` 建立持久化 Barrier；同阶段全部 `IN_REVIEW/DONE/CANCELED` 后只完成一次并唤醒父任务负责人，Barrier 完成不替代最终人工验收。阶段派发与后续新 Leader Run 复用根任务级共享工作区，不依赖某个 Leader Session 的临时目录。
+- [x] 子任务按 `parent_id + stage` 建立持久化 Barrier；同阶段全部 `IN_REVIEW/DONE/CANCELED` 后只完成一次并唤醒父任务负责人，Barrier 完成不替代最终人工验收。阶段派发与后续新 Leader Run 复用根任务级共享工作区，不依赖某个 Leader Session 的临时目录；同一目标已有活跃 Run 时不再由评论、子 Run 终态或 Barrier 并发复唤醒，Leader 最终结论必须晚于其他 Run 终态。
 - [x] Run 完成不自动推进任务；单 Agent 任务由被分配 Agent、Team 任务由 Leader 提交 `IN_REVIEW`，人工通过显式 `ACCEPT` 完成最终审核，也可在任意节点评论并启动、继续、阻塞、返工、取消或重新打开；活跃 Run 期间取消任务会同时持久化取消关联 Run 树并中断模型与 Sandbox 执行。
 - [x] Schema 迁移记录推进到 34，并增加迁移、Store 幂等、评论提及、Task-Run、Route Decision、团队 Trial、阶段屏障、小队并发领取、取消审批清理、任务工作区迁移与空交付门禁回归测试；主 Header 汇总当前项目待审批项，子专家 Approval 可不进入会话直接处理，已终态 Run 的遗留审批会自动关闭。
 

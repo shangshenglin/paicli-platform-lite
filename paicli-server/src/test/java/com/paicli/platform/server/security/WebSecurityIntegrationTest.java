@@ -68,7 +68,16 @@ class WebSecurityIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Frame-Options", "DENY"))
                 .andExpect(header().string("X-Content-Type-Options", "nosniff"))
-                .andExpect(header().exists("Content-Security-Policy"));
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("script-src data:"))));
+        mvc.perform(get("/workspace-preview.html"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.containsString("frame-src blob:")))
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.containsString("connect-src 'none'")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"workspacePreviewFrame\"")));
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -159,6 +168,14 @@ class WebSecurityIntegrationTest {
                         "openWorkspaceFile")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openWorkspaceFilePreview")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "bundleWorkspaceHtmlPreview")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "allow-scripts allow-forms allow-modals allow-downloads")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "new preview.Blob([html], {type: 'text/html'})")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "connect-src 'none'")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "preparePreviewWindow")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

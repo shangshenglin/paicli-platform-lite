@@ -17,7 +17,8 @@
   -> Sandbox / Server Tool 执行
   -> ToolResult / Artifact
   -> 下一轮推理
-  -> Plan 验证与结果交付
+  -> CollaborationTask 阶段屏障与 Plan 验证
+  -> 人工验收与最终结果交付
   -> Memory 提取与评测回归
 ```
 
@@ -31,7 +32,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **�
 
 面试时的 30 秒版本：
 
-> 我用 Java 17、Spring Boot、SQLite WAL 和 Docker 实现了一个单机 Agent Runtime。用户任务先持久化为 Run，再由 Worker 异步领取；模型产生的 ToolCall 会先和 assistant 消息原子落库，危险操作经过持久化审批后才进入 Docker Sandbox。服务重启时可以依据 Run、ToolCall 和 Approval 状态恢复。复杂任务还可以落成类型化 Plan Graph，通过租约、资源冲突检测、隔离工作区和 Validation Gate 完成闭环。项目没有堆分布式中间件，但保留了企业架构最重要的状态、恢复、安全和验证契约。
+> 我用 Java 17、Spring Boot、SQLite WAL 和 Docker 实现了一个单机 Agent Runtime。用户任务先持久化为 Run，再由 Worker 异步领取；模型产生的 ToolCall 会先和 assistant 消息原子落库，危险操作经过持久化审批后才进入 Docker Sandbox。复杂协作则持久化为独立的 CollaborationTask：阶段 Run 跨 Session 共享根任务工作区，交付必须通过证据门禁和 Leader 结论，最后由人工验收。项目没有堆分布式中间件，但保留了企业架构最重要的状态、恢复、安全和验证契约。
 
 ## 2. 它解决的不是“怎么调用模型”，而是“怎么管理模型”
 
@@ -124,7 +125,7 @@ flowchart TD
 data/
 ├─ paicli.db                    # Runtime、Plan、Memory、Evaluation 等状态
 ├─ workspaces/
-│  ├─ {runId}/                  # 普通 Run Workspace
+│  ├─ {ownerId}/                # 普通会话 owner 或稳定根协作任务 owner
 │  ├─ plan-workspaces/...       # 内部 Session 隔离目录
 │  └─ plan-worktrees/...        # GIT_WORKTREE 的受控 Workspace 引用
 ├─ artifacts/{runId}/           # 大工具结果和交付产物
@@ -138,7 +139,7 @@ data/
    └─ knowledge/                # 文档原文、元数据和本地索引
 ```
 
-目录布局表达了两个边界：SQLite 保存“任务事实和元数据”，文件系统保存“可能很大的内容”；Workspace、Artifact、Knowledge、Skill 和 Attachment 互相分区，不使用一个任意可写目录承载所有数据。
+目录布局表达了两个边界：SQLite 保存“任务事实和元数据”，文件系统保存“可能很大的内容”；Workspace、Artifact、Knowledge、Skill 和 Attachment 互相分区，不使用一个任意可写目录承载所有数据。容器仍按 Run 创建和回收，但挂载目录按有效 workspace owner 解析；同一根协作任务的 Leader、阶段 Run 和默认委派后代共享 owner，不同根任务保持隔离。
 
 ## 5. 一次完整任务如何流转
 
@@ -187,6 +188,8 @@ sequenceDiagram
 - OpenAI-compatible 流式模型、reasoning、多 ToolCall、重试、熔断和用量记录。
 - 上下文预算、对话压缩、Artifact 外置、自动 Memory、混合 RAG 和多模态附件。
 - Skill、联网、远程 MCP、历史会话检索和持久化 Multi-Agent。
+- CollaborationTask、评论/Mention/Trigger、阶段屏障、Team 路由、根任务共享工作区和交付证据门禁。
+- 根任务人工验收、协作历史折叠，以及 Run/Memory/Artifact/Approval Policy 批量事务物理删除。
 - Plan、Step、类型化 Edge、Human Node、有限 REWORK、租约恢复、资源冲突和 Validation Gate。
 - 任务模板、模型方案、预算、队列、定时任务、通知、Session 导入导出。
 - 真实内部 Run 驱动的 Agent 评测、多 Trial、确定性门禁和人工 Baseline。
@@ -1375,6 +1378,21 @@ PlanStep 可以把 `plan_id`、`plan_step_id`、done criteria、预算和允许�
 - 并发上限同时受 `max_concurrent_runs`、线程池容量、模型 RPM、父子深度/数量和资源读写集约束。这样多 Agent 的扩容是可背压的，不会因一次委派把本机线程、模型配额和 SQLite 写入打满。
 - 子任务终态回收时采用条件更新和幂等 delegation 记录；即使 Worker 重启，也不会重复创建同一 child Run 或丢失 parent 的唤醒信号。
 
+### 16.8 持久化 CollaborationTask、阶段屏障与共享工作区
+
+Multi-Agent delegation 解决“一次父 Run 如何派生子 Run”，但不能单独表达一个跨多次唤醒、跨多个 Session、需要人工参与和最终验收的长期工作项。因此系统新增 `CollaborationTask` 作为 Run 之上的任务层对象：
+
+- 根任务保存 Agent/AgentTeam 负责人、状态、优先级、完成条件和可选 Plan；阶段子任务通过 `parentId` 归属根任务。
+- `collaboration_task_runs` 允许一个任务关联多次执行尝试。评论、Mention、活动、路由决策、Trigger 和 StageBarrier 都独立持久化。
+- 用户可追加指令、返工、取消、重新打开和验收；Agent 只能报告 `IN_PROGRESS` 或 `BLOCKED`，不能直接提交人工终态。
+- 左侧历史只展示根任务。Leader 初次会话、阶段专家会话和 Barrier 唤醒会话折叠到同一任务，内部阶段不会混入普通对话列表。
+
+阶段完成采用证据门禁，而不是相信模型自述。阶段 Run 必须至少留下 Artifact、任务评论，或本 Run 自己完成的非只读写文件工具并且工作区存在对应近期文件；否则阶段和父任务转为 `BLOCKED`，Barrier 不完成。满足门禁后，平台持久化完成 Barrier，再通过幂等 `STAGE_BARRIER` Trigger 唤醒 Leader。空模型回答且没有 ToolCall 会直接失败，不能形成虚假的 `COMPLETED`。
+
+Team 根任务进入 `IN_REVIEW` 还需要两个条件：至少一个阶段已交付，并且 Leader 在最后阶段交付之后发布结论评论。只有用户执行 `ACCEPT` 后根任务才进入 `DONE`，此时 Console 才展示最终交付；进行中、阻塞、验收中和取消状态只显示过程文件，不能提前宣称完成。
+
+同一根任务使用稳定 task workspace owner。Leader 的多次唤醒 Run、默认阶段 Run 和委派后代即使位于新 Session，也挂载同一目录，从根因上解决“子任务写了文件但后续 Leader 看不见，继而重复派发”的循环。显式 `workspace_ref` 仍保留独立目录语义；迁移 34 会按 Run 创建顺序归并历史目录，冲突旧版本保存在 `.paicli/workspace-history`，文件归并成功后才更新数据库 owner。
+
 ## 17. Plan 与类型化 Graph Runtime
 
 ### 17.1 解决什么问题
@@ -1915,7 +1933,7 @@ Baseline 不写进模型上下文，不改变模型参数，也不会自动成�
 - Agent Profile 保存专家角色、指令、工具、Skill、模型和协作策略。
 - `model_usage` 保存 Token、缓存、耗时、重试和成本估算。
 - 预算按项目限制日/月 Token、日/月费用和最大并发，提交前做风险估算。
-- Run 队列支持优先级、公平领取、批量取消和重新排队。
+- Run 队列支持优先级、公平领取、批量取消、重新排队和终态 Run 批量永久删除。
 - 定时任务支持一次、每日、每周和 Cron，并创建普通 Run。
 - 通知覆盖完成、失败、等待审批和预算不足，密钥只引用 Server 环境变量。
 - Session 可导出 Markdown、JSON 或审计包，也可脱敏后导入另一实例。
@@ -1956,6 +1974,9 @@ Run 领取会考虑优先级、排队时间、项目最大并发和内部子 Run
 - 批量取消。
 - 将可重试 Run 重新排队。
 - 查看 queued、running、waiting approval 和 retry 次数。
+- 勾选终态 Run 批量永久删除；非终态 Run 或仍有活跃委派亲属的 Run 不可删除。
+
+长期记忆地图、Artifact 工作台和持久化审批策略也支持批量永久删除。四组接口单批最多接受 100 个 ID，先确认所有对象存在并满足删除条件，再在单个 SQLite 事务中执行全有或全无删除。Run 删除会清理 Message、ToolCall、Approval、Event、Usage、MemoryExtraction、协作/委派关联和 Artifact 元数据，并解除 Plan、Trigger、Schedule 与 Memory 的可空引用。Artifact 对象文件和不再共享的 workspace 在数据库提交后按受控根路径清理；仍被其他 Run 引用的共享任务工作区必须保留。
 
 “优先级高”不应等于一个项目永久占满线程池，因此企业升级成分布式队列后仍要保留项目级公平调度，而不是只使用全局优先级。
 
@@ -2001,6 +2022,8 @@ Run 领取会考虑优先级、排队时间、项目最大并发和内部子 Run
 - Skill/MCP：安装、预检、启停、升级、回滚、测试和健康状态。
 
 这些能力让用户可以纠正自动系统，而不需要直接修改 SQLite。
+
+批量删除不是前端把卡片隐藏，也不是循环调用单删接口。对应 API 为 `/v1/productivity/queue/batch` 的 `DELETE` 动作、`/v1/memories/batch-delete`、`/v1/artifacts/batch-delete` 和 `/v1/approvals/policies/batch-delete`；任一 ID 缺失或条件不满足时整批回滚。
 
 #### UI 为什么使用结构化表单
 
@@ -2052,6 +2075,7 @@ REST 负责命令和查询，SSE 负责服务端单向事件流，数据库负�
 - Console 对 delta 使用批量 DOM 更新，长时间线限制节点数量。
 - API Key 只保存在当前标签页 `sessionStorage`。
 - 页面包含聊天、执行详情、Plan、评测、Memory、Knowledge、Artifact、模板、预算、队列和通知入口。
+- 页面包含独立协作任务工作区，并把一个任务树的 Leader、阶段与复唤醒会话折叠为左侧一条根任务记录。
 - 首页、对话工具栏和 Agent Profile 使用同一执行环境选项；执行事件显示 Shell、cwd、退出码、耗时、超时和 Artifact/截断状态。
 - 前端在 SSE 结束或异常时通过 Run 查询做终态对账。
 
@@ -2060,11 +2084,12 @@ REST 负责命令和查询，SSE 负责服务端单向事件流，数据库负�
 | 资源 | 主要能力 |
 |---|---|
 | Session / Group | 创建、分组、移动、删除、消息与 Run 查询 |
-| Run | 创建、状态、取消、Retry、Branch、Timeline、Collaboration |
+| Run | 创建、状态、取消、Retry、Branch、Timeline 和批量永久删除 |
+| CollaborationTask | 任务、评论、人工动作、路由决策、Trigger、阶段屏障和关联 Run |
 | Event | Run SSE 重放 |
-| Approval | 待审批、决定、持久策略和撤销 |
-| Attachment / Artifact | 上传、绑定、预览、下载、复用和删除 |
-| Memory / Knowledge / Search | CRUD、修订、索引、检索、反馈和统一搜索 |
+| Approval | 待审批、决定、持久策略、撤销和策略批量永久删除 |
+| Attachment / Artifact | 上传、绑定、预览、下载、复用和 Artifact 批量永久删除 |
+| Memory / Knowledge / Search | CRUD、批量永久删除、修订、索引、检索、反馈和统一搜索 |
 | Skill / MCP / Capability | 导入、生命周期、配置、测试和可用状态 |
 | Productivity | 模板、模型/专家方案、估算、Usage、预算、队列、定时和通知 |
 | Plan / Async Job | 创建、生成、审批、启动、调度、状态、Step、Edge、Job、Validation |
@@ -2104,7 +2129,7 @@ content 和 reasoning delta 先进入前端缓冲，再通过 `requestAnimationF
 
 #### 聊天内容和执行详情分离
 
-消息区显示用户输入、assistant 回答、附件和最终交付；执行详情显示模型状态、reasoning、ToolCall、Approval、Event 和错误。这样普通用户不用阅读底层 JSON，排障时又能查看完整时间线。
+消息区显示用户输入、assistant 回答、附件和普通 Run 产物；执行详情显示模型状态、reasoning、ToolCall、Approval、Event 和错误。协作任务的“最终交付”语义更严格：只有根任务经人工 `ACCEPT` 进入 `DONE` 后才显示，之前的文件只能作为过程证据，不能因某个子 Run `COMPLETED` 就提前交付。
 
 Plan 详情还展示 Step 状态、类型化 Edge、阻塞原因、REWORK 计数、Async Job 和 ValidationCheck；Collaboration 视图展示 child Run、专家、工具摘要、Artifact、Token 和待审批项。
 
@@ -2116,7 +2141,7 @@ Plan 详情还展示 Step 状态、类型化 Edge、阻塞原因、REWORK 计数
 
 #### 最终交付成果
 
-最终回答会聚合 Workspace 文件、Artifact、URL 和本地路径引用。Console 以“交付成果”展示可预览或下载的产物，HTML、Markdown 和图片通过受控接口打开。这样复杂 Agent 的结果不只是一句“已完成”，用户能直接找到实际产物。
+最终回答会聚合 Workspace 文件、Artifact、URL 和本地路径引用。普通 Run 可以在消息中展示自己的产物；协作任务则从根任务共享 workspace 汇总 Leader 与阶段专家的真实文件，并仅在状态 `DONE` 时以“最终交付”展示可预览或下载的产物。这样既能直接找到结果，又不会把协作中的中间文件误标为最终成果。
 
 代码入口：
 
@@ -2169,7 +2194,7 @@ SQLite 使用 WAL，初始化时设置日志模式，普通连接使用 busy tim
 | 模型与预算 | `model_usage`、`model_attempts`、budget policy/reservation |
 | 附件与结果 | `input_attachments`、`artifacts` |
 | Memory | `memories`、`memory_revisions`、`memory_extractions`、`memory_sources`、`memory_conflicts` |
-| 协作 | `agent_profiles`、`collaboration_policies`、`run_delegations` |
+| 协作 | `agent_profiles`、`agent_teams`、`collaboration_policies`、`run_delegations`、`collaboration_tasks`、`collaboration_task_runs`、`collaboration_comments`、`collaboration_activities`、`collaboration_triggers`、`collaboration_stage_barriers`、`collaboration_route_decisions` |
 | Plan | `plans`、`plan_steps`、`plan_edges`、`plan_revisions`、`plan_events` |
 | 异步与验证 | `async_jobs`、`validation_checks`、`agent_feedback` |
 | 长期效率 | `task_templates`、`model_profiles`、`scheduled_tasks`、`notification_channels`、Outbox |
@@ -2188,15 +2213,17 @@ WAL 改善并发，不会把 SQLite 变成多节点数据库。高写入规模�
 
 #### 迁移策略和兼容
 
-当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。当前迁移版本为 1–26，已有迁移覆盖 reasoning、归档、附件、Memory、模型 usage、工作台、评测、生产加固、Plan、租约、资源集合、AgentFeedback、类型化 Edge、协作团队，以及 Run/Agent Profile 的 `execution_shell`。
+当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。当前迁移版本为 1–34：1–27 覆盖基础 Runtime、Plan/Graph、专家团队、Delegation Graph、Memory/RAG、Context Harness 和多 Shell；28 增强 AgentTeam 路由、有效并发和协作评测；29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision；30 增加幂等事件触发和阶段屏障；31 在协作 Run 树执行团队有效并发；32 关闭终态 Run 遗留审批；33 修复仍有活跃阶段 Run 却错误进入 `IN_REVIEW` 的历史任务；34 归并根任务工作区并启用交付证据门禁。
 
 例如旧 `plan_edges` 会兼容为 `DEPENDENCY + ON_SUCCESS`；旧 Baseline Token 口径保留 `TOTAL` 标志，避免升级后把历史数据错误解释为 output Token。
 
 这种迁移比 Flyway 轻，适合单机持续演进，但缺少独立 SQL 脚本、checksum、回滚和多节点迁移锁。进入正式多节点部署前应迁移到 Flyway，并为每个 Store 建立契约测试。
 
+迁移 34 不只改数据库字段，还执行受控文件迁移：递归收集根任务、阶段和委派后代的历史 Run，按创建顺序归并文件；冲突旧版写入 `.paicli/workspace-history`。只有文件阶段成功后才更新 owner，因此失败可以保持旧指向并在下次启动重试。
+
 #### SQLite 与文件的一致性
 
-数据库事务不能和本地文件天然原子提交，因此文件型能力采用“内容先落临时文件、完成校验、原子替换、再更新可见元数据”的顺序，并通过路径、size、SHA-256 做对账。
+数据库事务不能和本地文件天然原子提交，因此文件型能力采用“内容先落临时文件、完成校验、原子替换、再更新可见元数据”的顺序，并通过路径、size、SHA-256 做对账。批量删除反向采用“数据库完整预检并提交元数据删除，再清理受控文件”的顺序；失败不会留下半批数据库记录，文件清理失败则可作为孤儿文件重试，且共享 workspace 不会误删。
 
 备份时要同时考虑主数据库、WAL/SHM 和 Artifact/Knowledge 文件。恢复命令会校验目标路径和备份结构，维护任务负责 checkpoint、保留策略和孤儿文件清理。
 
@@ -2669,6 +2696,18 @@ Plan 表达任务目标、步骤、依赖、条件、资源和验收，是任务
 ### Q37：Run 已经 COMPLETED，为什么 Step 还可能失败？
 
 Run 完成只表示 Agent 给出了最终回答，没有证明 Done Criteria 满足。PlanStep 会进入 `VALIDATING`，检查回答、文件、测试报告等证据；通过才是 `COMPLETED`，否则是 `VALIDATION_FAILED`。这将“模型自述完成”变成“系统基于证据验收”。
+
+### Q37A：为什么同一个协作任务要共享工作区，而不是每个 Run 一个目录？
+
+Run 是执行尝试，Barrier 唤醒 Leader 时可能产生新的 Session/Run。按 runId 隔离会让后续 Agent 看不到前序阶段文件，进而误判未交付并重复派发。当前以根 CollaborationTask 派生稳定 owner，让默认阶段和委派后代共享目录；只有显式 `workspace_ref` 才隔离，不同根任务仍隔离。
+
+### Q37B：Run、阶段任务和根任务的完成语义有什么区别？
+
+Run `COMPLETED` 只表示一次 Agent 执行结束；阶段任务必须有写文件、Artifact 或评论证据才完成 Barrier；Team 根任务还要求 Leader 在最后阶段之后发布结论，才能进入 `IN_REVIEW`；最终只有用户 `ACCEPT` 才进入 `DONE`。Console 据此只在 `DONE` 后显示最终交付。
+
+### Q37C：四类批量删除如何保证真的删除数据库且不会半删？
+
+接口先对最多 100 个 ID 做完整预检，再用一个 SQLite 事务删除；任何记录缺失、Run 非终态或关联委派仍活跃都会整批回滚。Run 删除显式清理关联消息、工具、审批、事件、用量、委派和 Artifact 元数据。文件系统不能加入 SQLite 事务，所以在提交后清理，并保留仍被其他 Run 使用的共享工作区。
 
 ## G. 评测、存储与企业升级
 

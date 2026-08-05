@@ -2,7 +2,59 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-05
+
+### 子专家 reasoning 空终止、旧工具集与重复阶段派发修复
+
+- 变更：OpenAI-compatible 模型在 HTTP 200 但只有 reasoning、没有正文或 ToolCall 时，后续恢复尝试除了追加“停止分析并立即行动”的纠偏消息，还会强制切换到 `thinking=disabled` 且移除 `reasoning_effort`；Kimi 路由在无法关闭思考时降为 `low`，避免每次重试再次耗尽完整 reasoning 窗口。恢复 ToolCall 若没有 `reasoning_content`，其后续轮次保持无思考模式，避免重新切回 enabled 后被 DeepSeek 以混合模式历史非法拒绝。
+- 变更：内置 Agent 模板升级到 v2。读取专家列表时，仍绑定旧内置模板版本的 Profile 会自动刷新为当前提示词和最小工具集，同时保留已有模型方案、思考设置、Shell 和启用状态；这会移除旧代码/测试专家遗留的 `mcp__github__*` 等无关宽工具白名单。
+- 变更：`create_collaboration_subtask` 按父任务、阶段、负责人组合拒绝已有活跃或已交付任务的重复派发；同一组合连续两个 `BLOCKED` 尝试后停止自动创建第三份任务，要求 Leader 报告阻塞并等待人工干预。不同负责人仍可在同一阶段并行。
+- 思路：真实“坦克大战小游戏”任务的三个 Stage 2 Run 都完成了读取任务、目录和 `requirements.md`，没有审批或 Sandbox 错误；每个 Run 的最终模型轮次又各自执行 3 次 HTTP 尝试，合计 9 次均为 HTTP 200，但都以 `Model stream ended after reasoning without content or tool calls` 结束，工作区始终只有 `requirements.md`。Profile 审计还发现代码专家停留在 v1，旧白名单展开了大量 GitHub MCP Schema。恢复必须改变生成模式和上下文，而不是仅原样重试；协作状态机也必须给失败重派设置确定性上限。
+- 验证：SQLite 审计核对 `task_22bf8a65dfb44b84` 的三个 Stage 2 子任务、`run_683de2dc01c54dd6`、`run_febb3cd361314c5d`、`run_5fde128c30b4446f` 的 ToolCall、ModelAttempt、消息与工作区，确认 9 次 reasoning-only 空终止且无 `write_file`。首次真实恢复 Run `run_95b388fab9054755` 在首轮再次耗尽 reasoning 后由禁用 thinking 的恢复请求成功执行 `write_file`，随后准确暴露了无 reasoning ToolCall 切回思考模式的 DeepSeek HTTP 400；补充跨轮模式保持后，`run_763b250b1f904376` 完成 18 个 ToolCall、两条交付评论并进入 `COMPLETED`，Stage 2 转为 `IN_REVIEW`，共享工作区生成 25 KB `index.html` 且内联脚本通过宿主 Node 语法检查。根 Leader `run_ba8f66f6d8ad4bdf` 没有重派 Stage 2，只创建唯一 Stage 3 测试 Run 并进入正常 `WAITING_AGENT`。新增模型请求测试断言恢复请求关闭 thinking及无 reasoning ToolCall 的后续请求继续关闭 thinking，新增协作测试覆盖活跃阶段去重和两次失败上限；最终执行完整 `.\mvnw.cmd test`，Common 3、Server 180、Sandbox 3 项全部通过，并执行 `.\mvnw.cmd package -DskipTests` 生成可执行 JAR。Windows SQLite JDBC 清理旧临时 DLL 的 `AccessDeniedException` 日志不影响结果。本次未修改数据库 Schema、REST API、Sandbox、配置、启动方式、阶段范围或产品站，因此迁移、OpenAPI、Store 测试、`docs/phases.md`、`docs/docker-sandbox.md`、README 配置/运行说明和 `paicli-site/README.md` 不适用。
+
+### 记忆提取降噪与主动 L3 录入
+
+- 变更：自动 Memory 仅在委派树根 Run 完成时创建 extraction job，子 Agent Run 不再独立提取；每个根 Run 总数最多 3 条，并限制 L1≤1、L2≤2、L3≤1。
+- 变更：提取器过滤 Stage、task/agent/run/comment 标识及派发/运行/评论等流程事件（技术结论类候选例外）；候选必须显式引用窗口内有效证据，且至少存在用户陈述或成功工具结果。模型置信度改由模型分数、证据质量、重复出现程度和层级稳定性校准，用户证据上限 0.80，用户加工具证据上限 0.95。
+- 变更：Console 的长期记忆地图新增“新增 L3 长期记忆”入口，复用既有 `POST /v1/memories` 创建默认人工 L3 记录，保存后刷新分层列表。
+- 思路：多 Agent 的过程事件和子 Run 结论会天然重复，长期记忆应以根 Run 的汇总结果为入口，并以可审计的外部证据而非模型自述决定可信度。主动录入维持人工纠错边界，适合稳定偏好和长期约束。
+- 验证：新增 `LayeredMemoryServiceTest` 覆盖根 Run 排队、流程事件过滤、证据门禁与置信度上限；执行定向 Maven 测试、前端 `node --check` 和 `git diff --check`。本次未修改数据库 Schema、REST API、Sandbox、启动配置或产品站，因此迁移、OpenAPI、`docs/docker-sandbox.md`、README 配置/启动说明和 `paicli-site/README.md` 不适用。
+
+### 工作区 HTML 交付安全预览修复
+
+- 变更：工作区 `.html/.htm` 的“打开”不再把单个响应直接导航到临时 `blob:` URL；Console 会解析入口文档，用现有认证头读取同一工作区内的相对 JavaScript、CSS、图片和媒体，将其转换为自包含预览后打开。因此 `index.html` 引用同级 `game-core.js` 等多文件交付可以直接运行。
+- 变更：主 Console 继续维持不允许 inline/data 脚本的严格 CSP。自包含交付文档由不接收 URL 输入的静态预览壳创建独立 `blob:` URL，并载入不含 `allow-same-origin` 的 sandbox iframe；预览壳和交付文档均禁止 `connect-src`、嵌套页面、object 和 form action。这样已打包脚本可以执行，但不能读取 Console 的 `sessionStorage`/API Key、访问父页面或调用 PaiCLI 管理 API，外部 URL 也保持阻断。
+- 思路：原实现只下载入口文件并创建 `blob:` URL，浏览器会把 `./game-core.js` 解析到不存在的 blob 路径；从本地文件夹打开时同级文件存在，所以表现不同。不能简单把工作区 HTML 作为 PaiCLI 同源页面暴露，否则模型生成的脚本可继承 Console 权限；正确边界是“认证读取依赖，自包含打包，隔离执行”。
+- 验证：执行 `node --check paicli-server/src/main/resources/static/app.js`；静态 Web 安全测试补充 HTML 依赖打包、sandbox 和 `connect-src 'none'` 契约。随后执行 Maven 测试与 `git diff --check`。本次未修改数据库 Schema、REST API、Sandbox 执行实现、配置、启动方式、阶段范围或产品站，因此迁移、OpenAPI、Store 测试、`docs/phases.md`、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用。
+
 ## 2026-08-04
+
+### 协作重复唤醒、结论门禁与工作区交付可见性修复
+
+- 变更：协作评论、回复、子专家终态和 Stage Barrier 在创建 Trigger 前按任务树与最终 Agent 身份检查活跃 Run；评论/提及仍持久化，但同一专家或 Team Leader 已经运行时不再并发创建第二个 Run。通用委派的父 Run 会按既有 Agent Graph 继续等待并消费子结果，不再同时追加独立 `RUN_EVENT` Leader。
+- 变更：根 Team Leader 通过 `post_task_comment` 发布 `conclusion=true` 时携带当前 Run id；只要还有其他阶段、委派或并行 Run 未终态，服务端拒绝“最终结论”。这避免 Leader 在代码审查/测试专家仍 `WAITING_MODEL` 时提前写“最终验收”，同时保留根任务必须由人工 `ACCEPT` 才能进入 `DONE` 的边界。
+- 变更：显式 `workspace_ref` 仍可建立隔离目录，但若模型误把包含当前 collaboration workspace owner 的 Windows/Linux 文件系统路径填入该字段，则按继承当前共享工作区处理并将有效引用保存为空，避免委派元数据写“共享工作区”而子专家实际看到空目录；Tool schema 同步明确禁止传文件系统路径。
+- 变更：Console 整页刷新固定回到“普通对话 / 新对话”，不恢复上次会话、协作任务或执行详情；协作执行页在任务未完成时也展示“当前工作区产物”，将其标为可能继续变化，并把 `WAITING_AGENT` 解释为 Leader 等待子专家，避免与最终验收混淆。
+- 思路：真实五子棋任务 `task_6c64c9229b11448c` 中，一条 PowerShell 5 请求在发送前把中文编码成字节 `0x3F`，数据库因此持久化了问号而非前端渲染乱码；该用户回复又在已有 Leader Run 时产生 `MENTION`，第二个 Leader 随后通过 `spawn_agent` 再派一个测试专家。测试专家评论、子 Run 终态与 Stage 3/4 Barrier 又分别产生 `REPLY`、`RUN_EVENT` 和 `STAGE_BARRIER` Leader，形成截图中的重复项。通用委派还把“共享工作区：绝对路径”当成隔离 key，导致第二个测试专家实际工作区为空。正确边界是审计事件持久存在，但同一负责人只有一个活跃执行槽，父 Run 自己消费委派结果，最终结论受整个执行树约束。
+- 验证：真实数据审计覆盖根任务/阶段 `collaboration_task_runs`、Trigger 来源、`run_delegations`、模型消息、`model_attempts`、ToolCall、Artifact 与 workspace owner；确认正常 Stage 3/4 专家能读取共享文件，重复通用委派专家因错误 owner 看到空目录，Local Sandbox 下三个测试/审查 Run 的 `execute_command` 均按设计失败，真实可执行证据来自宿主 Node v20.19.6。宿主再次执行 `node --test tests/game-core.test.js`，T1-T16 共 16/16 通过；`node --check paicli-server/src/main/resources/static/app.js` 通过。新增 Service 测试覆盖评论、子 Run 终态、Barrier 去重和 Leader 结论门禁，Store 测试覆盖共享目录路径归一化。最终两次 `.\mvnw.cmd clean package` 均通过，Common 3、Server 173、Sandbox 3，共 179 项测试通过；Windows SQLite JDBC 清理旧临时 DLL 的 `AccessDeniedException` 日志不影响结果。Docker 29.6.1 可用，已重建 `paicli-sandbox-agent:0.6.0` 并以 `sandboxMode=docker` 启动健康服务。修复后的真实任务由唯一 Leader Run `run_4dbc60303dfc41b3` 复核 5 个工作区文件并发布门禁后的结论 `comment_6689bc72c68945c3`，根任务正确进入 `IN_REVIEW`；损坏评论已替换为可读 ASCII 验证文本，历史 Run 未删除。浏览器回归确认执行页显示“等待人工验收”和 `README.md`、`requirements.md`、`game-core.js`、`index.html`、`tests/game-core.test.js`，从任务页整页刷新后 `普通对话` 重新选中且标题为“新对话”。API 评论响应结构未变，仅补充 OpenAPI 触发语义；未修改数据库 Schema、配置项或 Sandbox 实现，因此迁移、`docs/docker-sandbox.md` 与产品站文档不适用。
+
+### 模型空终态与截断工具参数恢复修复
+
+- 变更：`OpenAiCompatibleModelClient` 不再把 HTTP 200 且只有 reasoning、没有最终正文和 ToolCall 的 SSE 终态记为成功；该尝试会持久化为 `RETRY`，并在原请求后追加停止重复分析、立即调用工具或返回最终答案的纠偏消息后重试。
+- 变更：流后的 ToolCall 参数被截断、不是有效 JSON 或缺少调用标识时，下一次尝试不再原样重复请求，而是要求模型保持参数小而有效、每轮只写一个文件并把大内容拆到多个 ToolCall/轮次，避免连续耗尽全部重试预算。
+- 变更：启动阶段屏障对账改为列表读取和逐屏障隔离。SQLite 短时锁、历史屏障求值或 Leader 补唤醒异常会记录 task/stage 警告并继续，不再从 `ApplicationReadyEvent` 抛出并终止已经开始监听的 Server；未处理屏障保持持久化状态供后续幂等恢复。
+- 变更：恢复路径继续服从现有 `maxAttempts`、指数退避、取消、熔断和模型尝试审计；达到上限后仍由 Run 空响应门禁进入 `FAILED`，不放宽 ToolCall 先持久化、协作阶段交付证据或最终完成边界。
+- 思路：本机“写一个五子棋游戏”最新协作任务的 Stage 2 Run `run_c916927bb20c4413` 首次工具参数流在 JSON 字符串中途截断，流级重试随后生成 1,154 段 reasoning 并规划了实现与测试，但未产生正文或工具调用。首次修复后的真实重跑又连续两次截断大体积 `write_file` 参数，耗尽了空终态纠偏前的尝试预算；同时两次部署都复现启动对账与 Worker 写事务竞争导致 `SQLITE_BUSY` 终止应用。模型已经生成思路但未越过持久化执行边界时，应尽早用可审计的协议级纠偏改变下一次生成策略；启动恢复则必须保留错误证据但不能把单项对账升级为整站不可用。
+- 验证：定向执行 `.\mvnw.cmd -pl paicli-server -am "-Dtest=OpenAiCompatibleModelClientTest,RunProcessorTest,CollaborationServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test`，32 项通过；全量 `.\mvnw.cmd clean package` 通过，Common 3、Server 168、Sandbox 3，共 174 项测试通过并生成可执行 JAR。新增本地 SSE 用例覆盖 reasoning 空终态恢复、截断 ToolCall 参数后的拆分写入纠偏，启动测试覆盖单屏障异常不逃逸；原有真正空响应不能误报完成的门禁继续通过。最终 JAR 启动超过此前 30 秒锁竞争窗口后仍健康监听 `8080`；真实五子棋任务恢复后连续完成 3 个小参数 `write_file`，共享工作区的 `game-core.js`、`index.html`、`tests/game-core.test.js` 已落地，宿主执行 `node --test tests/game-core.test.js` 最终 16/16 通过并把 ASCII 验证评论持久化到 Stage 3。Windows SQLite JDBC 清理既有临时 DLL 时仍记录 `AccessDeniedException`，不影响结果。本次未修改数据库 Schema、REST API、Sandbox、配置、启动方式、阶段范围或产品站，因此迁移与 Store 测试、OpenAPI、`docs/phases.md`、`docs/docker-sandbox.md`、README 配置/运行说明和 `paicli-site/README.md` 不适用。
+
+### 技术架构与面试文档同步
+
+- 变更：同步更新根目录《PaiCLI Platform Lite 技术架构与面试讲解》和《PaiCLI Platform Lite 技术架构与面试指南》，补齐阶段 22–24 的持久化 CollaborationTask、根/子任务展示边界、评论与幂等 Trigger、StageBarrier、人工验收和最终交付门禁。
+- 变更：把旧的“每 Run 独立工作区”修正为“容器租约按 Run、挂载目录按有效 workspace owner”。文档说明同一根协作任务的 Leader 唤醒、默认阶段 Run 和委派后代共享稳定任务工作区，显式 `workspace_ref` 才隔离，并补充迁移 34 的历史目录归并和冲突版本保存策略。
+- 变更：将两份文档的 Schema 版本从 1–26 更新到 1–34，补齐协作任务相关持久化表；同时补充 Run 队列、长期记忆地图、Artifact 工作台和持久化审批策略的批量物理删除 API、100 ID 上限、完整预检、SQLite 单事务回滚和提交后受控文件清理语义。
+- 变更：更新当前能力边界、Console/API 说明和高频面试问答，明确 Run `COMPLETED`、阶段交付、根任务 `IN_REVIEW` 与人工 `ACCEPT -> DONE` 是四个不同层次，协作中的过程文件不能提前标记为最终产物；更新最近完整回归统计为 Server 165、Common 3、Sandbox 3 项。
+- 思路：这两份面试材料必须与 README、`docs/architecture.md` 和当前实现保持同一事实口径，重点解释用户实际遇到的状态不流转、子任务文件不可见、重复派发和前端伪删除为什么发生，以及当前通过任务层状态机、共享工作区、证据门禁和事务删除如何解决。
+- 验证：执行关键词一致性扫描，确认两份文档不再保留 Schema 1–26、`workspaces/{runId}` 固定挂载或 113 项测试等旧口径；执行 `git diff --check`。本次仅同步说明文档，不改变代码、数据库 Schema、REST/OpenAPI、Sandbox、配置、启动方式、阶段范围或产品站，因此不运行 Maven 测试，README、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md`、OpenAPI 和 `paicli-site/README.md` 不适用。
 
 ### 协作任务统一工作区与空交付循环修复
 

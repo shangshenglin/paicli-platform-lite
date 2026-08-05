@@ -92,7 +92,7 @@ public class CollaborationToolProvider implements ServerToolProvider {
                                 "runs", store.taskRuns(stage.id()))).toList());
                 case "post_task_comment" -> service.comment(task.id(), null, "AGENT",
                         agentId(request.runId()), string(request.arguments(), "content"),
-                        bool(request.arguments(), "conclusion"), List.of());
+                        bool(request.arguments(), "conclusion"), List.of(), request.runId());
                 case "update_collaboration_task" -> service.updateStatus(task.id(),
                         string(request.arguments(), "status"), "AGENT", agentId(request.runId()),
                         string(request.arguments(), "reason"));

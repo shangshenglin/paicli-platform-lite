@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -138,6 +139,65 @@ class CollaborationServiceTest {
     }
 
     @Test
+    void userCommentDoesNotStartDuplicateRunForActiveAssignee() {
+        var task = task("IN_PROGRESS", "AGENT", "agent-a");
+        Instant now = task.createdAt();
+        var activeRun = new CollaborationStore.TaskRun(task.id(), "run-active", "trigger-a", "TRIGGERED",
+                "session-a", "WAITING_MODEL", "agent-a", null, null, null, now, null);
+        var comment = new CollaborationStore.CollaborationComment("comment-a", task.id(), null,
+                "USER", null, "additional evidence", false, false, now);
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(activeRun));
+        when(collaboration.addComment(eq(task.id()), nullable(String.class), eq("USER"),
+                nullable(String.class), eq("additional evidence"), eq(false), any())).thenReturn(comment);
+
+        var result = service.comment(task.id(), null, "USER", null,
+                "additional evidence", false, List.of());
+
+        assertThat(result.mentions()).containsExactly(new CollaborationStore.MentionTarget("AGENT", "agent-a"));
+        assertThat(result.executions()).isEmpty();
+        verify(collaboration, org.mockito.Mockito.never()).createOrGetTrigger(
+                any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void teamMemberCompletionDoesNotStartAnotherLeaderWhileLeaderRunIsActive() {
+        var task = task("IN_PROGRESS", "TEAM", "team-a");
+        var child = run("run-child", "session-child", RunStatus.COMPLETED, "member-a");
+        Instant now = task.createdAt();
+        when(collaboration.taskForRun(child.id())).thenReturn(Optional.of(task));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(
+                new CollaborationStore.TaskRun(task.id(), "run-leader", "trigger-leader", "TRIGGERED",
+                        "session-leader", "WAITING_AGENT", "leader-a", null, null, null, now, null),
+                new CollaborationStore.TaskRun(task.id(), child.id(), null, "DELEGATION",
+                        child.sessionId(), "COMPLETED", "member-a", null, null, null, now, now)));
+
+        service.onRunTerminal(child, "COMPLETED");
+
+        verify(collaboration, org.mockito.Mockito.never()).createOrGetTrigger(
+                any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void leaderCannotPublishFinalConclusionWhileAnotherRunIsActive() {
+        var task = task("IN_PROGRESS", "TEAM", "team-a");
+        Instant now = task.createdAt();
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(
+                new CollaborationStore.TaskRun(task.id(), "run-leader", "trigger-leader", "TRIGGERED",
+                        "session-leader", "RUNNING", "leader-a", null, null, null, now, null),
+                new CollaborationStore.TaskRun(task.id(), "run-review", null, "STAGE_DELEGATION",
+                        "session-review", "WAITING_MODEL", "reviewer-a", null, null, null, now, null)));
+
+        assertThatThrownBy(() -> service.comment(task.id(), null, "AGENT", "leader-a",
+                "final delivery", true, List.of(), "run-leader"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("all delegated, staged, and parallel Runs");
+    }
+
+    @Test
     void createsAndDispatchesStageAsDirectChildRun() {
         var parent = task("IN_PROGRESS", "TEAM", "team-a");
         var agent = agent("agent-a");
@@ -168,6 +228,36 @@ class CollaborationServiceTest {
     }
 
     @Test
+    void rejectsDuplicateActiveStageForTheSameAssignee() {
+        var parent = task("IN_PROGRESS", "TEAM", "team-a");
+        var active = stageTask("task-stage-active", parent.id(), 2, "agent-a", "IN_PROGRESS");
+        when(collaboration.task(parent.id())).thenReturn(Optional.of(parent));
+        when(productivity.resolveAgentProfile("default", "agent-a")).thenReturn(Optional.of(agent("agent-a")));
+        when(collaboration.childTasks(parent.id())).thenReturn(List.of(active));
+
+        assertThatThrownBy(() -> service.createAndDispatchSubtask(parent.id(), "run-parent", "tool-b",
+                stageCommand(parent.id(), 2, "agent-a")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already has an active task");
+    }
+
+    @Test
+    void stopsAutomatedRedispatchAfterTwoBlockedAttemptsForTheSameStageAndAssignee() {
+        var parent = task("IN_PROGRESS", "TEAM", "team-a");
+        when(collaboration.task(parent.id())).thenReturn(Optional.of(parent));
+        when(productivity.resolveAgentProfile("default", "agent-a")).thenReturn(Optional.of(agent("agent-a")));
+        when(collaboration.childTasks(parent.id())).thenReturn(List.of(
+                stageTask("task-stage-1", parent.id(), 2, "agent-a", "BLOCKED"),
+                stageTask("task-stage-2", parent.id(), 2, "agent-a", "BLOCKED")));
+
+        assertThatThrownBy(() -> service.createAndDispatchSubtask(parent.id(), "run-parent", "tool-c",
+                stageCommand(parent.id(), 2, "agent-a")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already failed 2 automated attempts")
+                .hasMessageContaining("human intervention");
+    }
+
+    @Test
     void completedStageRunIsSubmittedForReviewWithoutTriggeringAnotherLeaderRun() {
         var stage = new CollaborationStore.CollaborationTask("task-stage", "default", "Stage 1", "Implement",
                 "IN_PROGRESS", 0, "AGENT", "agent-a", "Done", "task-parent", 1,
@@ -189,6 +279,39 @@ class CollaborationServiceTest {
         verify(collaboration).updateStatus(eq(stage.id()), eq("IN_REVIEW"), eq("SYSTEM"), eq(null), any());
         verify(collaboration).evaluateStageBarrier(stage.parentId(), stage.stage());
         verify(modelClient, org.mockito.Mockito.never()).cancel(any());
+    }
+
+    @Test
+    void startupBarrierReconciliationDoesNotFailApplicationWhenOneBarrierIsLocked() {
+        Instant now = Instant.parse("2026-08-04T00:00:00Z");
+        var barrier = new CollaborationStore.StageBarrier("task-parent", 2, "WAITING", null, now);
+        when(collaboration.waitingStageBarriers()).thenReturn(List.of(barrier));
+        when(collaboration.evaluateStageBarrier(barrier.parentTaskId(), barrier.stage()))
+                .thenThrow(new IllegalStateException("database is locked"));
+        when(collaboration.completedStageBarriersWithoutTrigger()).thenReturn(List.of());
+
+        assertThatCode(service::reconcileWaitingStageBarriers).doesNotThrowAnyException();
+
+        verify(collaboration).completedStageBarriersWithoutTrigger();
+    }
+
+    @Test
+    void completedStageBarrierDoesNotStartAnotherLeaderWhileLeaderRunIsActive() {
+        Instant now = Instant.parse("2026-08-04T00:00:00Z");
+        var root = task("IN_PROGRESS", "TEAM", "team-a");
+        var barrier = new CollaborationStore.StageBarrier(root.id(), 3, "COMPLETED", now, now);
+        when(collaboration.waitingStageBarriers()).thenReturn(List.of());
+        when(collaboration.completedStageBarriersWithoutTrigger()).thenReturn(List.of(barrier));
+        when(collaboration.task(root.id())).thenReturn(Optional.of(root));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.taskTreeRuns(root.id())).thenReturn(List.of(
+                new CollaborationStore.TaskRun(root.id(), "run-leader", "trigger-leader", "TRIGGERED",
+                        "session-leader", "WAITING_AGENT", "leader-a", null, null, null, now, null)));
+
+        service.reconcileWaitingStageBarriers();
+
+        verify(collaboration, org.mockito.Mockito.never()).createOrGetTrigger(
+                any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -286,6 +409,19 @@ class CollaborationServiceTest {
                 task.description(), status, task.priority(), task.assigneeType(), task.assigneeId(),
                 task.acceptanceCriteria(), task.parentId(), task.stage(), task.latestPlanId(), task.createdBy(),
                 task.createdAt(), task.updatedAt());
+    }
+
+    private static CollaborationStore.CollaborationTask stageTask(String id, String parentId, int stage,
+                                                                   String agentId, String status) {
+        Instant now = Instant.parse("2026-08-02T00:00:00Z");
+        return new CollaborationStore.CollaborationTask(id, "default", "Stage " + stage, "Implement",
+                status, 0, "AGENT", agentId, "Done", parentId, stage,
+                null, "AGENT:leader-a", now, now);
+    }
+
+    private static CollaborationService.TaskCommand stageCommand(String parentId, int stage, String agentId) {
+        return new CollaborationService.TaskCommand("default", "Stage " + stage, "Implement", "TODO", 0,
+                "AGENT", agentId, "Done", parentId, stage, null, "AGENT:leader-a");
     }
 
     private static ProductivityStore.AgentTeam team(String id, String leaderId) {

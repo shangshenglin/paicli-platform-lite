@@ -480,6 +480,25 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void collaborationDelegationTreatsCurrentWorkspacePathAsInheritance() throws Exception {
+        SqliteRuntimeStore store = store();
+        String owner = SqliteRuntimeStore.collaborationWorkspaceOwner("task-root");
+        var parentSession = store.createSession("leader");
+        var parent = store.createRunInWorkspace(parentSession.id(), "coordinate", "auto", "", List.of(),
+                null, null, 0, 0, "bash", owner);
+        var tool = store.createToolCall(parent.id(), "provider-agent", "spawn_agent", "{}", "shared-path");
+        String currentWorkspacePath = "shared workspace: C:\\data\\workspaces\\" + owner;
+
+        var child = store.createOrGetDelegation(parent.id(), tool.id(), "runner", "run tests",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of(), List.of(),
+                        "BLOCK_GRAPH", currentWorkspacePath));
+
+        assertThat(store.workspaceOwnerRunId(child.childRunId())).isEqualTo(owner);
+        assertThat(child.workspaceRef()).isNull();
+    }
+
+    @Test
     void startupMovesExistingCollaborationRunsIntoTaskWorkspace() throws Exception {
         SqliteRuntimeStore first = store();
         var session = first.createSession("legacy collaboration");

@@ -361,4 +361,134 @@ class OpenAiCompatibleModelClientTest {
         assertThat(response.content()).isEqualTo("recovered");
         assertThat(response.toolCalls()).isEmpty();
     }
+
+    @Test
+    void retriesInvalidToolArgumentsWithSplitWriteInstruction() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<String> recoveryBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String stream;
+            if (requests.incrementAndGet() == 1) {
+                stream = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                        + "\"id\":\"call_cut\",\"function\":{\"name\":\"write_file\","
+                        + "\"arguments\":\"{\\\"path\\\":\\\"game.js\\\",\\\"content\\\":\\\"unterminated\"}}]}}]}\n\n"
+                        + "data: [DONE]\n\n";
+            } else {
+                recoveryBody.set(body);
+                stream = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                        + "\"id\":\"call_write\",\"function\":{\"name\":\"write_file\","
+                        + "\"arguments\":\"{\\\"path\\\":\\\"game.js\\\",\\\"content\\\":\\\"ok\\\"}\"}}]}}]}\n\n"
+                        + "data: [DONE]\n\n";
+            }
+            byte[] bytes = stream.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "test-model",
+                8_000, 1_000, 0.75, 6, 1_000, 30, "auto", "",
+                2, 1, 10_000, "", 30, 200_000);
+        ObjectMapper mapper = new ObjectMapper();
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, mapper);
+        client.initialize();
+
+        ModelResponse response = client.complete(new ModelRequest(
+                List.of(ModelMessage.user("write the game")), List.of(), 1_000));
+
+        assertThat(requests).hasValue(2);
+        assertThat(response.toolCall()).isEqualTo(new ModelResponse.ToolPlan(
+                "call_write", "write_file", Map.of("path", "game.js", "content", "ok")));
+        assertThat(mapper.readTree(recoveryBody.get()).path("messages").get(1).path("content").asText())
+                .contains("truncated or contained invalid JSON")
+                .contains("write one file per turn");
+    }
+
+    @Test
+    void retriesReasoningOnlyTerminalResponseWithRecoveryInstruction() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<String> recoveryBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String stream;
+            if (requests.incrementAndGet() == 1) {
+                stream = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"long analysis\"}}]}\n\n"
+                        + "data: [DONE]\n\n";
+            } else {
+                recoveryBody.set(body);
+                stream = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                        + "\"id\":\"call_write\",\"function\":{\"name\":\"write_file\","
+                        + "\"arguments\":\"{\\\"path\\\":\\\"game.js\\\",\\\"content\\\":\\\"ok\\\"}\"}}]}}]}\n\n"
+                        + "data: [DONE]\n\n";
+            }
+            byte[] bytes = stream.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "test-model",
+                8_000, 1_000, 0.75, 6, 1_000, 30, "auto", "",
+                2, 1, 10_000, "", 30, 200_000);
+        ObjectMapper mapper = new ObjectMapper();
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, mapper);
+        client.initialize();
+
+        ModelResponse response = client.complete(new ModelRequest(
+                List.of(ModelMessage.user("implement the game")), List.of(), 1_000));
+
+        assertThat(requests).hasValue(2);
+        assertThat(response.toolCall()).isEqualTo(new ModelResponse.ToolPlan(
+                "call_write", "write_file", Map.of("path", "game.js", "content", "ok")));
+        var messages = mapper.readTree(recoveryBody.get()).path("messages");
+        assertThat(messages).hasSize(2);
+        assertThat(messages.get(1).path("content").asText())
+                .contains("without final content or tool calls")
+                .contains("issue the necessary tool call(s) immediately")
+                .contains("Reasoning is disabled");
+        var recovery = mapper.readTree(recoveryBody.get());
+        assertThat(recovery.path("thinking").path("type").asText()).isEqualTo("disabled");
+        assertThat(recovery.has("reasoning_effort")).isFalse();
+    }
+
+    @Test
+    void keepsThinkingDisabledAfterARecoveryToolCallWithoutReasoning() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] bytes = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        ModelProperties properties = new ModelProperties("openai-compatible",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "test-key", "deepseek-v4-flash",
+                8_000, 1_000, 0.75, 6, 1_000, 30, "enabled", "high");
+        ObjectMapper mapper = new ObjectMapper();
+        OpenAiCompatibleModelClient client = new OpenAiCompatibleModelClient(properties, mapper);
+        client.initialize();
+        var toolCall = new ModelResponse.ToolPlan("call_write", "write_file",
+                Map.of("path", "index.html", "content", "ok"));
+
+        client.complete(new ModelRequest(List.of(
+                ModelMessage.user("implement"),
+                new ModelMessage("assistant", "", null, List.of(toolCall), ""),
+                ModelMessage.tool("call_write", "written")), List.of(), 1_000,
+                "enabled", "high"));
+
+        var body = mapper.readTree(requestBody.get());
+        assertThat(body.path("thinking").path("type").asText()).isEqualTo("disabled");
+        assertThat(body.has("reasoning_effort")).isFalse();
+    }
 }

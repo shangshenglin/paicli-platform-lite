@@ -1,22 +1,14 @@
 const $ = id => document.getElementById(id);
 
-function storedCollaborationTaskReturn() {
-  try {
-    const value = JSON.parse(sessionStorage.getItem('paicli_collaboration_task_return') || 'null');
-    if (!value?.taskId || !value?.sessionId) return null;
-    return {
-      taskId: String(value.taskId),
-      taskTitle: String(value.taskTitle || '协作任务'),
-      sessionId: String(value.sessionId),
-      view: ['task', 'collaboration', 'execution'].includes(value.view) ? value.view : 'execution'
-    };
-  } catch (_) { return null; }
-}
+// A full page load always starts from the neutral composer; history remains available in the sidebar.
+localStorage.removeItem('paicli_session');
+localStorage.setItem('paicli_home_mode', 'chat');
+sessionStorage.removeItem('paicli_collaboration_task_return');
 
 const state = {
   sessions: [],
   groups: [],
-  sessionId: localStorage.getItem('paicli_session') || '',
+  sessionId: '',
   runId: '',
   runStatus: '',
   planStatus: '',
@@ -43,14 +35,14 @@ const state = {
   collaborationTaskListSignature: '',
   collaborationTaskRefreshTimer: 0,
   collaborationTaskRefreshPending: false,
-  collaborationTaskReturn: storedCollaborationTaskReturn(),
+  collaborationTaskReturn: null,
   availableSkills: [],
   managedMemories: [],
   toolCallNames: new Map(),
   editingAgentProfileId: '',
   editingAgentTeamId: '',
   selectedAgentTeamId: '',
-  homeMode: localStorage.getItem('paicli_home_mode') || 'chat',
+  homeMode: 'chat',
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
   agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
   executionShell: localStorage.getItem('paicli_execution_shell') || 'bash',
@@ -1191,12 +1183,31 @@ async function submitCollaborationComment(event, taskId) {
 
 function renderTaskExecutionLayer(detail) {
   const root = element('div', 'task-execution-layer');
+  const activeRuns = detail.runs.filter(run => !terminal.has(run.status));
+  const statePanel = element('section', 'task-section');
   if (detail.finalDeliveryReady) {
+    statePanel.append(element('h3', '', '任务已完成'),
+      element('p', 'hint', '最终交付已通过人工验收，以下工作区文件为当前交付版本。'));
+  } else if (detail.task.status === 'IN_REVIEW') {
+    statePanel.append(element('h3', '', '等待人工验收'),
+      element('p', 'hint', 'Leader 已形成最终结论且关联执行全部结束；用户验收通过后，当前工作区产物才标记为最终交付。'));
+  } else if (activeRuns.length) {
+    statePanel.append(element('h3', '', '任务尚未最终交付'),
+      element('p', 'hint', `${activeRuns.length} 个执行仍未结束。WAITING_AGENT 表示 Leader 正在等待子专家；全部 Run 终态后才能发布最终结论并进入人工验收。`));
+  } else {
+    statePanel.append(element('h3', '', '等待最终收口'),
+      element('p', 'hint', '关联执行已结束，仍需 Leader 形成最终结论，并由用户执行验收。'));
+  }
+  root.append(statePanel);
+
+  const files = detail.workspaceFiles || [];
+  if (files.length || detail.finalDeliveryReady) {
     const deliverables = element('section', 'task-section task-deliverables');
-    deliverables.append(element('h3', '', '最终交付'));
-    const files = detail.workspaceFiles || [];
+    deliverables.append(element('h3', '', detail.finalDeliveryReady ? '最终交付' : '当前工作区产物'));
     if (files.length) {
-      deliverables.append(element('p', 'hint', '根任务和阶段专家共用的工作区文件。可直接预览或下载。'));
+      deliverables.append(element('p', 'hint', detail.finalDeliveryReady
+        ? '根任务和阶段专家共用的最终工作区文件。可直接预览或下载。'
+        : '以下文件已经落入共享工作区，但在任务完成前仍可能被后续阶段修改。'));
       const grid = element('div', 'deliverable-grid');
       files.forEach(file => grid.append(renderWorkspaceFileCard(file.runId, file.path, file)));
       deliverables.append(grid);
@@ -1211,8 +1222,12 @@ function renderTaskExecutionLayer(detail) {
     const copy = element('div');
     const stage = (detail.children || []).find(child => child.id === run.taskId);
     const label = stage ? `阶段 ${stage.stage} · ${stage.title}` : run.relationship;
-    copy.append(element('strong', '', `${label} · ${run.status}`),
+    const runStatus = statusNames[run.status] || run.status;
+    copy.append(element('strong', '', `${label} · ${runStatus}`),
       element('small', '', `${agentProfileName(run.agentProfileId, '未指定专家')} · ${taskRunModelName(run)} · ${new Date(run.createdAt).toLocaleString()}`));
+    if (run.status === 'WAITING_AGENT') {
+      copy.append(element('small', 'hint', '当前 Leader Run 正在等待已派发的子专家返回，不代表任务已经完成。'));
+    }
     const open = element('button', 'secondary', '打开会话');
     open.onclick = () => openCollaborationTaskSession(detail.task, run.sessionId);
     row.append(copy, open);
@@ -2259,11 +2274,11 @@ async function loadSidebarHistory() {
   renderSessions();
 }
 
-async function refreshSessions() {
+async function refreshSessions(selectFallback = true) {
   try {
     await loadSidebarHistory();
     if (!state.sessions.some(item => item.id === state.sessionId)) {
-      state.sessionId = state.sessions[0]?.id || '';
+      state.sessionId = selectFallback ? state.sessions[0]?.id || '' : '';
     }
     if (state.sessionId) await selectSession(state.sessionId, false);
     else renderEmpty();
@@ -4798,6 +4813,11 @@ async function openWorkspaceFilePreview(runId, path) {
   try {
     const response = await fetch(workspaceFileUrl(runId, path), {headers: headers(false)});
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    if (/\.html?$/i.test(path)) {
+      const html = await bundleWorkspaceHtmlPreview(runId, path, await response.text());
+      await renderSandboxedHtmlPreview(preview, path, html);
+      return;
+    }
     await openBlobResponse(response, path.split('/').pop() || 'workspace-file', preview);
   } catch (error) {
     preview.close();
@@ -4805,15 +4825,147 @@ async function openWorkspaceFilePreview(runId, path) {
   }
 }
 
+function openLongTermMemory() {
+  $('longTermMemoryForm').reset();
+  setFormError('longTermMemoryError');
+  $('longTermMemoryDialog').showModal();
+  $('longTermMemoryKey').focus();
+}
+
+async function submitLongTermMemory(event) {
+  event.preventDefault();
+  setFormError('longTermMemoryError');
+  const button = $('saveLongTermMemory'); button.disabled = true;
+  try {
+    await api('/v1/memories', {method: 'POST', body: JSON.stringify({
+      projectKey: currentProjectKey(),
+      memoryKey: $('longTermMemoryKey').value.trim(),
+      content: $('longTermMemoryContent').value.trim(),
+      tags: $('longTermMemoryTags').value.trim()
+    })});
+    $('longTermMemoryDialog').close();
+    await loadManagedMemories();
+    showNotice('已新增 L3 长期记忆');
+  } catch (error) { setFormError('longTermMemoryError', error.message); }
+  finally { button.disabled = false; }
+}
+
+async function bundleWorkspaceHtmlPreview(runId, entryPath, html) {
+  const document = new DOMParser().parseFromString(html, 'text/html');
+  document.querySelectorAll('base, meta[http-equiv="Content-Security-Policy" i]').forEach(node => node.remove());
+
+  for (const script of document.querySelectorAll('script[src]')) {
+    const asset = await fetchWorkspacePreviewAsset(runId, entryPath, script.getAttribute('src'));
+    if (!asset) continue;
+    script.src = await blobDataUrl(await asset.response.blob());
+    script.removeAttribute('integrity');
+    script.removeAttribute('crossorigin');
+  }
+  for (const link of document.querySelectorAll('link[rel~="stylesheet"][href]')) {
+    const asset = await fetchWorkspacePreviewAsset(runId, entryPath, link.getAttribute('href'));
+    if (!asset) continue;
+    const style = document.createElement('style');
+    style.textContent = await inlineWorkspaceCssAssets(runId, asset.path, await asset.response.text());
+    if (link.media) style.media = link.media;
+    link.replaceWith(style);
+  }
+  for (const style of document.querySelectorAll('style')) {
+    style.textContent = await inlineWorkspaceCssAssets(runId, entryPath, style.textContent || '');
+  }
+  const resourceAttributes = [
+    ['img[src]', 'src'], ['source[src]', 'src'], ['audio[src]', 'src'],
+    ['video[src]', 'src'], ['video[poster]', 'poster'], ['input[type="image"][src]', 'src']
+  ];
+  for (const [selector, attribute] of resourceAttributes) {
+    for (const node of document.querySelectorAll(selector)) {
+      const asset = await fetchWorkspacePreviewAsset(runId, entryPath, node.getAttribute(attribute));
+      if (asset) node.setAttribute(attribute, await blobDataUrl(await asset.response.blob()));
+    }
+  }
+
+  const policy = document.createElement('meta');
+  policy.httpEquiv = 'Content-Security-Policy';
+  policy.content = "default-src 'none'; script-src data: 'unsafe-inline'; style-src data: 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+  document.head.prepend(policy);
+  return `<!doctype html>\n${document.documentElement.outerHTML}`;
+}
+
+async function inlineWorkspaceCssAssets(runId, ownerPath, css) {
+  const matches = [...css.matchAll(/url\(\s*(['"]?)([^'"\)]+)\1\s*\)/gi)];
+  let result = css;
+  for (const match of matches) {
+    const asset = await fetchWorkspacePreviewAsset(runId, ownerPath, match[2]);
+    if (!asset) continue;
+    result = result.replace(match[0], `url("${await blobDataUrl(await asset.response.blob())}")`);
+  }
+  return result;
+}
+
+async function fetchWorkspacePreviewAsset(runId, ownerPath, reference) {
+  const path = resolveWorkspaceReference(ownerPath, reference);
+  if (!path) return null;
+  const response = await fetch(workspaceFileUrl(runId, path), {headers: headers(false)});
+  if (!response.ok) throw new Error(`依赖文件 ${path} 读取失败：${response.status}`);
+  return {path, response};
+}
+
+function resolveWorkspaceReference(ownerPath, reference) {
+  let value = (reference || '').trim().replaceAll('\\', '/');
+  if (!value || value.startsWith('#') || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) return '';
+  value = value.split('#', 1)[0].split('?', 1)[0];
+  try { value = decodeURIComponent(value); } catch (_) { return ''; }
+  const parts = value.startsWith('/') ? [] : ownerPath.replaceAll('\\', '/').split('/').slice(0, -1);
+  for (const part of value.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return '';
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  return parts.join('/');
+}
+
+function blobDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('工作区依赖读取失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function renderSandboxedHtmlPreview(preview, path, html) {
+  const frame = await waitForPreviewFrame(preview);
+  const document = preview.document;
+  document.title = `${path} · PaiCLI 安全预览`;
+  frame.title = `${path} 安全预览`;
+  frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-downloads');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  const previewUrl = preview.URL.createObjectURL(new preview.Blob([html], {type: 'text/html'}));
+  frame.src = previewUrl;
+  frame.hidden = false;
+  document.getElementById('previewLoading')?.remove();
+  frame.onload = () => setTimeout(() => preview.URL.revokeObjectURL(previewUrl), 1000);
+}
+
+async function waitForPreviewFrame(preview) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (preview.closed) throw new Error('预览窗口已关闭');
+    try {
+      const frame = preview.document?.getElementById('workspacePreviewFrame');
+      if (frame) return frame;
+    } catch (_) { }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('预览窗口初始化超时');
+}
+
 function preparePreviewWindow(message) {
-  const preview = window.open('about:blank', '_blank');
+  const preview = window.open('/workspace-preview.html', '_blank');
   if (!preview) return null;
   preview.opener = null;
-  try {
-    preview.document.title = 'PaiCLI 成果预览';
-    preview.document.body.style.cssText = 'margin:0;padding:18px;font:14px system-ui;background:#0f1115;color:#edf1f7;';
-    preview.document.body.textContent = message;
-  } catch (_) { }
   return preview;
 }
 
@@ -5287,6 +5439,7 @@ $('closeEvaluationCenter').onclick = () => $('evaluationDialog').close();
 $('searchAll').onclick = searchAll;
 $('globalSearch').onkeydown = event => { if (event.key === 'Enter') searchAll(); };
 $('refreshMemories').onclick = loadManagedMemories;
+$('addLongTermMemory').onclick = openLongTermMemory;
 $('selectAllMemories').onclick = event => toggleWorkbenchBatchSelection('memories', event);
 $('deleteSelectedMemories').onclick = event => deleteWorkbenchSelection('memories', event);
 $('openMemoryWiki').onclick = () => openMemoryWiki().catch(error => showNotice(`Wiki 加载失败：${error.message}`, true));
@@ -5351,8 +5504,10 @@ $('scheduleAgentTeam').onchange = () => {
 $('notificationType').onchange = () => updateNotificationFields(true);
 $('cancelMemoryMerge').onclick = () => $('memoryMergeDialog').close();
 $('cancelMemoryRevision').onclick = () => $('memoryRevisionDialog').close();
+$('cancelLongTermMemory').onclick = () => $('longTermMemoryDialog').close();
 $('memoryMergeForm').onsubmit = submitMemoryMerge;
 $('memoryRevisionForm').onsubmit = submitMemoryRevision;
+$('longTermMemoryForm').onsubmit = submitLongTermMemory;
 $('memoryMergeTarget').onchange = updateMemoryMergePreview;
 $('refreshMemoryRevisions').onclick = loadMemoryRevisionHistory;
 $('templateName').oninput = () => {
@@ -5411,6 +5566,6 @@ selectExecutionShell(state.executionShell);
 syncCollaborationTaskReturnAction();
 renderEmpty();
 refreshComposerOptions();
-refreshSessions();
+refreshSessions(false);
 refreshApprovalInbox();
 state.approvalInboxRefreshTimer = setInterval(refreshApprovalInbox, 3000);

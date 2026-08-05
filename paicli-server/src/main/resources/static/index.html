@@ -163,7 +163,7 @@
   <section class="capability-section"><div class="section-title"><h3>定时任务</h3><button class="primary" id="addSchedule">新建定时任务</button></div><div class="managed-list" id="scheduleList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>完成通知</h3><button class="primary" id="addNotification">新增通知</button></div><div class="managed-list" id="notificationList"></div></section>
   <section class="capability-section"><h3>Session 导入导出</h3><div class="portability-actions"><button class="secondary" data-export="markdown">导出 Markdown</button><button class="secondary" data-export="json">导出 JSON</button><button class="secondary" data-export="audit">完整审计包</button><label class="secondary file-action">导入 JSON<input id="sessionImport" type="file" accept="application/json,.json" hidden></label><label><input id="redactExport" type="checkbox"> 隐私脱敏</label></div></section>
-  <section class="capability-section"><div class="section-title"><div><h3>长期记忆地图</h3><p class="hint">标题由记忆内容概括生成；内部 key 只保留为稳定标识。</p></div><div class="section-actions"><button class="secondary" id="openMemoryWiki">打开地图</button><button class="secondary" id="selectAllMemories">全选</button><button class="danger batch-delete" id="deleteSelectedMemories" disabled>永久删除已选</button><button class="secondary" id="refreshMemories">刷新</button></div></div><div class="managed-list" id="memoryList"></div></section>
+  <section class="capability-section"><div class="section-title"><div><h3>长期记忆地图</h3><p class="hint">标题由记忆内容概括生成；内部 key 只保留为稳定标识。</p></div><div class="section-actions"><button class="primary" id="addLongTermMemory">新增 L3 长期记忆</button><button class="secondary" id="openMemoryWiki">打开地图</button><button class="secondary" id="selectAllMemories">全选</button><button class="danger batch-delete" id="deleteSelectedMemories" disabled>永久删除已选</button><button class="secondary" id="refreshMemories">刷新</button></div></div><div class="managed-list" id="memoryList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>Artifact 工作台</h3><div class="section-actions"><button class="secondary" id="selectAllArtifacts">全选</button><button class="danger batch-delete" id="deleteSelectedArtifacts" disabled>永久删除已选</button><button class="secondary" id="refreshArtifacts">刷新</button></div></div><div class="managed-list" id="artifactList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>Plan 工作台</h3><button class="secondary" id="refreshPlans">刷新</button></div><p class="hint">查看持久化 Plan、Step DAG、Async Job 和 Validation Check；启动后由后端调度器复用普通 ReAct Run。</p><div class="managed-list" id="planList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>持久化审批策略</h3><div class="section-actions"><button class="secondary" id="selectAllPolicies">全选</button><button class="danger batch-delete" id="deleteSelectedPolicies" disabled>永久删除已选</button><button class="secondary" id="refreshPolicies">刷新</button></div></div><p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p><div class="managed-list" id="policyList"></div></section>
@@ -409,6 +409,19 @@
     </section>
   </form>
 </dialog>
+<dialog id="longTermMemoryDialog" class="form-dialog">
+  <form id="longTermMemoryForm" class="entity-form">
+    <div class="dialog-title"><strong>新增 L3 长期记忆</strong><button type="button" class="secondary" id="cancelLongTermMemory">取消</button></div>
+    <p class="hint">仅录入稳定的个人偏好、长期约束或可长期复用的背景。这会创建一条人工确认的 L3 Memory。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>Memory Key *</span><input id="longTermMemoryKey" maxlength="120" placeholder="例如：preferred-language" required></label>
+      <label class="form-field"><span>标签</span><input id="longTermMemoryTags" maxlength="500" placeholder="逗号分隔，例如：preference,java"></label>
+      <label class="form-field full"><span>长期记忆 *</span><textarea id="longTermMemoryContent" rows="6" maxlength="32000" placeholder="例如：用户长期偏好使用 Java 17 和 Maven Wrapper。" required></textarea></label>
+    </div>
+    <div class="form-error" id="longTermMemoryError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveLongTermMemory">保存 L3 记忆</button></div>
+  </form>
+</dialog>
 <dialog id="memoryWikiDialog" class="wide-dialog memory-wiki-dialog">
   <div class="dialog-title"><strong>LLM Memory Wiki</strong><button type="button" class="secondary" id="closeMemoryWiki">关闭</button></div>
   <p class="hint">这是现有 Memory 的导航层，不会升级、覆盖或删除任何记忆。点击页面可查看关联、来源与审计信息。</p>
@@ -425,6 +438,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260804-workbench-batch-delete-1"></script>
+<script src="/app.js?v=20260805-workspace-html-preview-2"></script>
 </body>
 </html>

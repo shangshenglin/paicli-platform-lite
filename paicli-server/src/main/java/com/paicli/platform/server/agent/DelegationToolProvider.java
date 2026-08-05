@@ -306,7 +306,7 @@ public class DelegationToolProvider implements ServerToolProvider {
         properties.put("resource_write_set", Map.of("type", "array", "items", Map.of("type", "string"),
                 "description", "Files or logical resources written by this child"));
         properties.put("workspace_ref", Map.of("type", "string",
-                "description", "Optional isolated workspace reference"));
+                "description", "Optional logical key for an isolated workspace. Omit it to inherit the current workspace. Never pass a filesystem path or the current shared workspace path."));
         properties.put("failure_policy", Map.of("type", "string",
                 "enum", List.of("BLOCK_GRAPH", "DEGRADE", "REQUIRE_HUMAN"),
                 "description", "Behavior when an upstream dependency fails"));

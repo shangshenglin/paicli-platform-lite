@@ -1389,8 +1389,10 @@ public class SqliteRuntimeStore {
                 Instant now = Instant.now();
                 String childSessionId = id("session");
                 String childRunId = id("run");
+                String effectiveWorkspaceRef = effectiveDelegationWorkspaceRef(
+                        graph.workspaceRef(), parentWorkspaceOwner);
                 String delegatedWorkspaceOwner = resolveDelegatedWorkspaceOwner(
-                        connection, parentRunId, graph.workspaceRef(), parentWorkspaceOwner, childRunId);
+                        connection, parentRunId, effectiveWorkspaceRef, parentWorkspaceOwner, childRunId);
                 try (PreparedStatement session = connection.prepareStatement(
                         "INSERT INTO sessions(id,title,project_key,group_id,status,is_internal,created_at,updated_at) " +
                                 "VALUES(?,?,?,?,?,?,?,?)")) {
@@ -1448,7 +1450,7 @@ public class SqliteRuntimeStore {
                     delegation.setString(12, initialStatus);
                     delegation.setString(13, graph.failurePolicy());
                     delegation.setString(14, blockedReason);
-                    delegation.setString(15, nullableText(graph.workspaceRef()));
+                    delegation.setString(15, nullableText(effectiveWorkspaceRef));
                     delegation.setString(16, now.toString());
                     delegation.executeUpdate();
                 }
@@ -4249,6 +4251,18 @@ public class SqliteRuntimeStore {
                 return rs.next() ? rs.getString(1) : childRunId;
             }
         }
+    }
+
+    private static String effectiveDelegationWorkspaceRef(String workspaceRef, String parentWorkspaceOwner) {
+        if (workspaceRef == null || workspaceRef.isBlank()) return null;
+        if (parentWorkspaceOwner != null && parentWorkspaceOwner.startsWith("collaboration_")) {
+            String normalized = workspaceRef.replace('\\', '/');
+            if (normalized.equals(parentWorkspaceOwner)
+                    || List.of(normalized.split("/")).contains(parentWorkspaceOwner)) {
+                return null;
+            }
+        }
+        return workspaceRef;
     }
 
     private static void insertDelegationDependencies(Connection connection, String delegationId,

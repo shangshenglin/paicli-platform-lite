@@ -15,6 +15,10 @@ public class SecurityHeadersFilter extends OncePerRequestFilter {
             + "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
             + "img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             + "script-src 'self'; connect-src 'self'";
+    private static final String PREVIEW_CSP = "default-src 'none'; base-uri 'none'; object-src 'none'; "
+            + "frame-ancestors 'none'; frame-src blob:; script-src data: 'unsafe-inline'; "
+            + "style-src data: 'unsafe-inline'; img-src data: blob:; font-src data:; "
+            + "media-src data: blob:; connect-src 'none'; form-action 'none'";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -25,6 +29,8 @@ public class SecurityHeadersFilter extends OncePerRequestFilter {
         response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
         if (isConsoleResource(request.getRequestURI())) {
             response.setHeader("Content-Security-Policy", CONSOLE_CSP);
+        } else if (request.getRequestURI().equals("/workspace-preview.html")) {
+            response.setHeader("Content-Security-Policy", PREVIEW_CSP);
         }
         filterChain.doFilter(request, response);
     }
