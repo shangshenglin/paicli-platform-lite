@@ -162,7 +162,8 @@ public class CollaborationController {
     @ResponseStatus(HttpStatus.CREATED)
     @Operation(summary = "Post a collaboration comment",
             description = "Explicit mentions create idempotent Agent triggers. A plain reply to an Agent comment routes back to that Agent. "
-                    + "The comment and mention remain durable, but no parallel Run is created when the same target already has an active Run in this task tree.")
+                    + "The comment and mention remain durable; when the mentioned target already has an active Run in this task tree, "
+                    + "no parallel Run is created and the comment is delivered into that Run's session so the running Agent reacts to it on its next turn.")
     public CollaborationService.CommentResult comment(@PathVariable String id,
             @Valid @RequestBody CommentRequest request) {
         requireTask(id);

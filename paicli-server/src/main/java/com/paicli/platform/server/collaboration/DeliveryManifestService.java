@@ -1,0 +1,106 @@
+package com.paicli.platform.server.collaboration;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.server.domain.AcceptedSnapshotRecord;
+import com.paicli.platform.server.domain.DeliveryRecord;
+import com.paicli.platform.server.store.CollaborationStore;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
+import org.springframework.stereotype.Service;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * PR7: durable delivery manifests per stage (changed files, artifacts, test
+ * evidence, criteria evidence, content hash) and an immutable snapshot when the
+ * human accepts the whole task, so "what was accepted" never drifts from the
+ * workspace later.
+ */
+@Service
+public class DeliveryManifestService {
+    private final CollaborationStore collaboration;
+    private final SqliteRuntimeStore store;
+    private final ObjectMapper mapper;
+
+    public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper) {
+        this.collaboration = collaboration;
+        this.store = store;
+        this.mapper = mapper;
+    }
+
+    public DeliveryRecord recordStageDelivery(String taskId, int stage, String runId,
+                                              List<String> changedFiles, List<String> artifacts,
+                                              List<String> testEvidence, Map<String, Object> criteriaEvidence) {
+        int attempt = store.deliveriesForTask(taskId).stream()
+                .filter(delivery -> delivery.stage() == stage)
+                .map(DeliveryRecord::attempt).max(Comparator.naturalOrder()).orElse(0) + 1;
+        String contentHash = sha256(List.of(
+                String.join("\n", changedFiles == null ? List.of() : changedFiles),
+                String.join("\n", artifacts == null ? List.of() : artifacts),
+                String.join("\n", testEvidence == null ? List.of() : testEvidence)));
+        Map<String, Object> manifest = new LinkedHashMap<>();
+        manifest.put("taskId", taskId);
+        manifest.put("stage", stage);
+        manifest.put("attempt", attempt);
+        manifest.put("runId", runId);
+        manifest.put("changedFiles", changedFiles == null ? List.of() : changedFiles);
+        manifest.put("artifacts", artifacts == null ? List.of() : artifacts);
+        manifest.put("testEvidence", testEvidence == null ? List.of() : testEvidence);
+        manifest.put("criteriaEvidence", criteriaEvidence == null ? Map.of() : criteriaEvidence);
+        manifest.put("knownLimitations", List.of());
+        manifest.put("contentHash", contentHash);
+        manifest.put("createdAt", Instant.now().toString());
+        return store.saveDelivery(taskId, stage, attempt, runId, write(manifest), contentHash, "DELIVERED");
+    }
+
+    /** Immutable snapshot created when the human ACCEPTs the task. */
+    public AcceptedSnapshotRecord accept(String taskId, String conclusionContent) {
+        CollaborationStore.CollaborationTask task = collaboration.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("collaboration task not found: " + taskId));
+        List<CollaborationStore.CollaborationTask> stages = collaboration.descendantTasks(taskId);
+        List<CollaborationStore.CollaborationComment> comments = collaboration.comments(taskId);
+        List<CollaborationStore.TaskRun> runs = collaboration.taskTreeRuns(taskId);
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("task_id", task.id());
+        snapshot.put("title", task.title());
+        snapshot.put("status", task.status());
+        snapshot.put("accepted_at", Instant.now().toString());
+        snapshot.put("conclusion", conclusionContent == null ? "" : conclusionContent);
+        snapshot.put("comments", comments.stream().map(comment -> Map.of(
+                "id", comment.id(), "author", comment.authorType(), "conclusion", comment.conclusion(),
+                "at", comment.createdAt().toString())).toList());
+        snapshot.put("stages", stages.stream().map(stage -> Map.of(
+                "id", stage.id(), "stage", stage.stage(), "title", stage.title(), "status", stage.status())).toList());
+        snapshot.put("deliveries", store.deliveriesForTask(taskId).stream().map(delivery -> Map.of(
+                "stage", delivery.stage(), "attempt", delivery.attempt(), "status", delivery.status(),
+                "content_hash", delivery.contentHash(), "at", delivery.createdAt().toString())).toList());
+        snapshot.put("run_ids", runs.stream().map(CollaborationStore.TaskRun::runId).distinct().toList());
+        snapshot.put("agent_profile_ids", runs.stream().map(CollaborationStore.TaskRun::agentProfileId)
+                .filter(value -> value != null && !value.isBlank()).distinct().toList());
+        return store.saveAcceptedSnapshot(taskId, write(snapshot));
+    }
+
+    private String write(Object value) {
+        try {
+            return mapper.writeValueAsString(value);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to serialize delivery data", e);
+        }
+    }
+
+    private static String sha256(List<String> values) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (String value : values) digest.update(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            return "";
+        }
+    }
+}

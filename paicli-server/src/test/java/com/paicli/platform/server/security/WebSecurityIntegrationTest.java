@@ -115,7 +115,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"memoryRevisionForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"memoryWikiGraph\"")))
+                        "id=\"memoryWikiSearch\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"openMemoryWiki\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -187,7 +187,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openConnectionSettings")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "renderMemoryWikiGraph")))
+                        "renderMemoryWikiIndex")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "renderHomeModelPicker")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

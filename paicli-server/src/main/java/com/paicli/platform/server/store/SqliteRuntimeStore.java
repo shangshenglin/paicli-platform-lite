@@ -7,18 +7,23 @@ import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.common.ApprovalStatus;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.domain.AcceptedSnapshotRecord;
 import com.paicli.platform.server.domain.ApprovalRecord;
 import com.paicli.platform.server.domain.ArtifactRecord;
+import com.paicli.platform.server.domain.DeliveryRecord;
 import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.domain.InputAttachmentRecord;
 import com.paicli.platform.server.domain.MemoryRecord;
 import com.paicli.platform.server.domain.RunEventRecord;
 import com.paicli.platform.server.domain.RunDelegationRecord;
+import com.paicli.platform.server.domain.ReflectionRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.domain.TaskDigestRecord;
 import com.paicli.platform.server.domain.TaskTitle;
 import com.paicli.platform.server.domain.SessionGroupRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
+import com.paicli.platform.server.domain.WorkingPlanRecord;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Repository;
 
@@ -294,6 +299,31 @@ public class SqliteRuntimeStore {
                     "max_estimated_cost REAL NOT NULL DEFAULT 0, allow_expert_delegation INTEGER NOT NULL DEFAULT 0, " +
                     "require_reviewer INTEGER NOT NULL DEFAULT 0, require_runner INTEGER NOT NULL DEFAULT 0, " +
                     "created_at TEXT NOT NULL, FOREIGN KEY(run_id) REFERENCES runs(id))");
+
+            statement.execute("CREATE TABLE IF NOT EXISTS run_working_plans (" +
+                    "run_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, objective TEXT NOT NULL, " +
+                    "items_json TEXT NOT NULL, status TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_reflections (" +
+                    "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, failure_class TEXT NOT NULL, " +
+                    "diagnosis TEXT NOT NULL, decision TEXT NOT NULL, plan_patch_json TEXT NOT NULL, " +
+                    "evidence_refs_json TEXT NOT NULL, next_action TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_run_reflections_run ON run_reflections(run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_task_digests (" +
+                    "task_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, digest_json TEXT NOT NULL, " +
+                    "last_activity_id TEXT, updated_at TEXT NOT NULL)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_deliveries (" +
+                    "id TEXT PRIMARY KEY, task_id TEXT NOT NULL, stage INTEGER NOT NULL, attempt INTEGER NOT NULL, " +
+                    "run_id TEXT NOT NULL, manifest_json TEXT NOT NULL, content_hash TEXT NOT NULL, " +
+                    "status TEXT NOT NULL, created_at TEXT NOT NULL, accepted_at TEXT)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_deliveries_task " +
+                    "ON collaboration_deliveries(task_id, stage, attempt)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_accepted_snapshots (" +
+                    "id TEXT PRIMARY KEY, task_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_snapshots_task " +
+                    "ON collaboration_accepted_snapshots(task_id, created_at)");
             SqliteSchemaMigrator.ensureColumn(connection, "run_collaboration_policies", "max_concurrent_agent_runs",
                     "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE TABLE IF NOT EXISTS task_templates (" +
@@ -2590,6 +2620,43 @@ public class SqliteRuntimeStore {
         }
     }
 
+    /**
+     * Commits one tool outcome (message + event) without touching the Run status.
+     * Used by the read-only batch path, which marks all calls RUNNING up front and
+     * requeues the Run once after all outcomes are committed in model order.
+     */
+    public boolean commitToolMessage(String sessionId, String runId, ToolCallRecord call, boolean success,
+                                     String modelContent, String error, String eventJson) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, toolStatus.name());
+                    ps.setString(2, success ? modelContent : null);
+                    ps.setString(3, success ? null : error);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, call.id());
+                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
+                }
+                insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
+                        null, call.providerCallId(), null, false);
+                insertEvent(connection, runId, success ? "tool.completed" : "tool.failed",
+                        eventJson == null ? "{}" : eventJson);
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("commit tool message", e);
+        }
+    }
+
     public boolean commitToolOutcome(String sessionId, String runId, ToolCallRecord call,
                                      boolean success, String modelContent, String error,
                                      String eventJson, int currentStep) {
@@ -3020,6 +3087,242 @@ public class SqliteRuntimeStore {
             if (cancelRun(runId)) canceled.add(runId);
         }
         return List.copyOf(canceled);
+    }
+
+    public Optional<WorkingPlanRecord> latestWorkingPlan(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_working_plans WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new WorkingPlanRecord(rs.getString("run_id"),
+                        rs.getInt("revision"), rs.getString("objective"), rs.getString("items_json"),
+                        rs.getString("status"), instant(rs.getString("created_at")),
+                        instant(rs.getString("updated_at")))) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read latest working plan", e);
+        }
+    }
+
+    /** Upserts the latest working plan of a Run; every save bumps the revision. */
+    public WorkingPlanRecord saveWorkingPlan(String runId, String objective, String itemsJson, String status) {
+        String now = Instant.now().toString();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO run_working_plans(run_id,revision,objective,items_json,status,created_at,updated_at) "
+                            + "VALUES(?,1,?,?,?,?,?) "
+                            + "ON CONFLICT(run_id) DO UPDATE SET revision=revision+1,objective=excluded.objective,"
+                            + "items_json=excluded.items_json,status=excluded.status,updated_at=excluded.updated_at")) {
+                ps.setString(1, runId);
+                ps.setString(2, objective == null ? "" : objective);
+                ps.setString(3, itemsJson == null ? "[]" : itemsJson);
+                ps.setString(4, status == null ? "ACTIVE" : status);
+                ps.setString(5, now);
+                ps.setString(6, now);
+                ps.executeUpdate();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            throw failure("save working plan", e);
+        }
+        return latestWorkingPlan(runId).orElseThrow();
+    }
+
+    public Optional<ReflectionRecord> latestReflection(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_reflections WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 1")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new ReflectionRecord(rs.getString("id"),
+                        rs.getString("run_id"), rs.getString("failure_class"), rs.getString("diagnosis"),
+                        rs.getString("decision"), rs.getString("plan_patch_json"),
+                        rs.getString("evidence_refs_json"), rs.getString("next_action"),
+                        instant(rs.getString("created_at")))) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read latest reflection", e);
+        }
+    }
+
+    public ReflectionRecord saveReflection(String runId, String failureClass, String diagnosis, String decision,
+                                           String planPatchJson, String evidenceRefsJson, String nextAction) {
+        String id = "reflection_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO run_reflections(id,run_id,failure_class,diagnosis,decision,plan_patch_json,"
+                        + "evidence_refs_json,next_action,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            ps.setString(1, id);
+            ps.setString(2, runId);
+            ps.setString(3, failureClass == null ? "FAILURE" : failureClass);
+            ps.setString(4, diagnosis == null ? "" : diagnosis);
+            ps.setString(5, decision == null ? "CHANGE_APPROACH" : decision);
+            ps.setString(6, planPatchJson == null ? "[]" : planPatchJson);
+            ps.setString(7, evidenceRefsJson == null ? "[]" : evidenceRefsJson);
+            ps.setString(8, nextAction == null ? "" : nextAction);
+            ps.setString(9, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("save reflection", e);
+        }
+        return new ReflectionRecord(id, runId, failureClass == null ? "FAILURE" : failureClass,
+                diagnosis == null ? "" : diagnosis, decision == null ? "CHANGE_APPROACH" : decision,
+                planPatchJson == null ? "[]" : planPatchJson,
+                evidenceRefsJson == null ? "[]" : evidenceRefsJson,
+                nextAction == null ? "" : nextAction, Instant.parse(now));
+    }
+
+    public long countRunEvents(String runId, String eventType) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM run_events WHERE run_id=? AND event_type=?")) {
+            ps.setString(1, runId);
+            ps.setString(2, eventType);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        } catch (SQLException e) {
+            throw failure("count run events", e);
+        }
+    }
+
+    public Optional<TaskDigestRecord> latestTaskDigest(String taskId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM collaboration_task_digests WHERE task_id=?")) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new TaskDigestRecord(rs.getString("task_id"),
+                        rs.getInt("revision"), rs.getString("digest_json"), rs.getString("last_activity_id"),
+                        instant(rs.getString("updated_at")))) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read latest task digest", e);
+        }
+    }
+
+    public TaskDigestRecord saveTaskDigest(String taskId, String digestJson, String lastActivityId) {
+        String now = Instant.now().toString();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO collaboration_task_digests(task_id,revision,digest_json,last_activity_id,updated_at) "
+                            + "VALUES(?,1,?,?,?) "
+                            + "ON CONFLICT(task_id) DO UPDATE SET revision=revision+1,digest_json=excluded.digest_json,"
+                            + "last_activity_id=excluded.last_activity_id,updated_at=excluded.updated_at")) {
+                ps.setString(1, taskId);
+                ps.setString(2, digestJson == null ? "{}" : digestJson);
+                ps.setString(3, lastActivityId);
+                ps.setString(4, now);
+                ps.executeUpdate();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            throw failure("save task digest", e);
+        }
+        return latestTaskDigest(taskId).orElseThrow();
+    }
+
+    public List<DeliveryRecord> deliveriesForTask(String taskId) {
+        List<DeliveryRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM collaboration_deliveries WHERE task_id=? ORDER BY stage,attempt,created_at")) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(new DeliveryRecord(rs.getString("id"), rs.getString("task_id"),
+                        rs.getInt("stage"), rs.getInt("attempt"), rs.getString("run_id"),
+                        rs.getString("manifest_json"), rs.getString("content_hash"), rs.getString("status"),
+                        instant(rs.getString("created_at")), instant(rs.getString("accepted_at"))));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list collaboration deliveries", e);
+        }
+    }
+
+    public DeliveryRecord saveDelivery(String taskId, int stage, int attempt, String runId,
+                                       String manifestJson, String contentHash, String status) {
+        String id = "delivery_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO collaboration_deliveries(id,task_id,stage,attempt,run_id,manifest_json,"
+                        + "content_hash,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            ps.setString(1, id);
+            ps.setString(2, taskId);
+            ps.setInt(3, stage);
+            ps.setInt(4, attempt);
+            ps.setString(5, runId);
+            ps.setString(6, manifestJson == null ? "{}" : manifestJson);
+            ps.setString(7, contentHash == null ? "" : contentHash);
+            ps.setString(8, status == null ? "DELIVERED" : status);
+            ps.setString(9, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("save delivery", e);
+        }
+        return deliveriesForTask(taskId).stream()
+                .filter(delivery -> delivery.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    public Optional<AcceptedSnapshotRecord> latestAcceptedSnapshot(String taskId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM collaboration_accepted_snapshots WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1")) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(new AcceptedSnapshotRecord(rs.getString("id"),
+                        rs.getString("task_id"), rs.getString("snapshot_json"),
+                        instant(rs.getString("created_at")))) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read latest accepted snapshot", e);
+        }
+    }
+
+    public AcceptedSnapshotRecord saveAcceptedSnapshot(String taskId, String snapshotJson) {
+        String id = "snapshot_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        String now = Instant.now().toString();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO collaboration_accepted_snapshots(id,task_id,snapshot_json,created_at) VALUES(?,?,?,?)")) {
+            ps.setString(1, id);
+            ps.setString(2, taskId);
+            ps.setString(3, snapshotJson == null ? "{}" : snapshotJson);
+            ps.setString(4, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw failure("save accepted snapshot", e);
+        }
+        return new AcceptedSnapshotRecord(id, taskId, snapshotJson == null ? "{}" : snapshotJson, Instant.parse(now));
+    }
+
+    /** Historical pass rate for an agent from plan validation feedback (PR8 routing signal). */
+    public double agentPassRate(String projectKey, String agentProfileId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) AS total, "
+                        + "SUM(CASE WHEN validation_status IN ('PASSED','VALIDATED','PASS','COMPLETED') THEN 1 ELSE 0 END) "
+                        + "FROM agent_feedback WHERE project_key=? AND agent_profile_id=?")) {
+            ps.setString(1, projectKey);
+            ps.setString(2, agentProfileId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return 0.5;
+                long total = rs.getLong("total");
+                if (total == 0) return 0.5;
+                return Math.min(1.0, Math.max(0.0, (double) rs.getLong(2) / total));
+            }
+        } catch (SQLException e) {
+            throw failure("read agent pass rate", e);
+        }
+    }
+
+    /** Active (non-terminal) run count for an agent (PR8 availability signal). */
+    public long activeRunsForAgent(String agentProfileId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM runs WHERE agent_profile_id=? "
+                        + "AND status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+            ps.setString(1, agentProfileId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        } catch (SQLException e) {
+            throw failure("count active runs for agent", e);
+        }
     }
 
     public Path databasePath() {

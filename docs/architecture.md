@@ -110,11 +110,11 @@ Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`r
 
 Collaboration Runtime 位于 Plan 与 Run 之外，解决“工作项跨多次执行持续存在”的问题。`collaboration_tasks` 保存标题、说明、状态、优先级、Agent/AgentTeam 负责人、可选完成条件、父任务、阶段和可选 Plan 引用；`collaboration_task_runs` 把一次 Trigger Run 或 delegated child Run 关联回任务。每个根任务派生稳定的 task workspace owner；所有 Trigger Leader Run、默认阶段 Run 和委派后代在创建时继承该 owner，因此阶段 Barrier 即使通过新 Session/new Run 唤醒 Leader，仍读取同一目录。显式逻辑 `workspace_ref` 保留为有意隔离边界，不自动合并；若模型误传包含当前 collaboration workspace owner 的文件系统路径，则规范化为继承，避免元数据声称共享而子 Run 实际挂载空目录。Run 终态仅表示一次执行结束；阶段进入 `IN_REVIEW` 前还必须存在归属于该 Run 的写文件证据、Artifact 或阶段评论，空模型终态与只读检查不能推进 Barrier，最终只有人工 `ACCEPT` 可以进入 `DONE`。
 
-评论、回复、子专家终态和 Stage Barrier 都可能要求唤醒同一负责人。调度前按任务树和最终 Agent 身份检查活跃 Run：目标已经处于非终态时只保留持久评论/阶段状态，由现有父 Run 消费子结果，不并发创建第二个 Leader 或专家 Run；没有活跃目标时才创建幂等 Trigger。根 Team Leader 的 `conclusion=true` 还携带当前 Run id 校验，只有其他阶段、委派和并行 Run 全部终态后才允许持久化，防止“最终验收”评论早于审查或测试交付。历史重复 Run 继续保留用于审计，不在 Console 中伪装折叠。
+评论、回复、子专家终态和 Stage Barrier 都可能要求唤醒同一负责人。调度前按任务树和最终 Agent 身份检查活跃 Run：目标已经处于非终态时只保留持久评论/阶段状态，由现有父 Run 消费子结果，不并发创建第二个 Leader 或专家 Run；父 Run 在子 Run 终态后原地恢复并继续推进，提示词明确禁止在未派发下一阶段或未发布结论时空转结束。若 Leader Run 仍提前终态且未发布结论，平台对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次幂等唤醒，仍无进展才置 `BLOCKED`。没有活跃目标时才创建幂等 Trigger。根 Team Leader 的 `conclusion=true` 还携带当前 Run id 校验，只有其他阶段、委派和并行 Run 全部终态后才允许持久化，防止“最终验收”评论早于审查或测试交付。历史重复 Run 继续保留用于审计，不在 Console 中伪装折叠。
 
 增强后的 `agent_teams` 保存团队指令、成员角色说明、能力标签、路由策略、完成策略、回退 Agent 和最大并发。`CollaborationRoutingService` 以团队成员范围、角色描述、任务词、复杂度和风险生成结构化 Route Preview；复杂度和风险是文本启发式推断，Preview 只返回 Leader、候选、原因与预计并发，不写 Run。Trigger 真正执行时把同一结果写入 `collaboration_route_decisions`，并将有效并发写入根 `run_collaboration_policies`。Worker 领取排队 Run 时以递归委派树统计活动子 Run，根 Leader 不占小队配额，活动子 Run 不超过该值；`budget_policies.max_concurrent_runs` 仍是项目级外层总上限。旧策略的兼容值为 `0`，表示不额外施加团队限流。随后创建普通 Session/Run，并继续复用 Agent Profile、模型方案、审批、预算、Sandbox 和恢复路径。长期协作任务没有独立的首页临时模型选择：最终负责人 Agent/Team Leader 的模型方案优先，未绑定时使用项目默认，项目无默认方案时回退服务端默认；委派子专家有自己的模型方案时覆盖父 Run，否则继承父模型。Task-Run 查询同时返回 Agent、模型方案引用与最近一次 `model_usage.model_name`，既能解释使用服务端默认模型的历史 Run，也让 Console 只在展示边界映射业务名称；持久化关联仍使用稳定 ID。
 
-协作事件使用统一持久化 Trigger：`MANUAL`、`HUMAN_ACTION`、`MENTION`、`REPLY`、`RUN_EVENT` 和 `STAGE_BARRIER` 共用全局 idempotency key。评论、结论、回复和 Mention 分别写入 `collaboration_comments`、`collaboration_mentions` 与 `collaboration_activities`；用户评论默认唤醒任务负责人，回复 Agent 评论路由回原 Agent，成员评论或终态事件唤醒团队 Leader。人工在所有任务节点都可通过评论追加上下文；没有活跃 Run 时还可执行 `START/CONTINUE/RESUME/BLOCK/REQUEST_REWORK/ACCEPT/CANCEL/REOPEN`，避免任意状态下拉框绕过状态机。服务恢复或 SSE 重放只读取已有 Trigger/Run，不会再次派发。
+协作事件使用统一持久化 Trigger：`MANUAL`、`HUMAN_ACTION`、`MENTION`、`REPLY`、`RUN_EVENT` 和 `STAGE_BARRIER` 共用全局 idempotency key。评论、结论、回复和 Mention 分别写入 `collaboration_comments`、`collaboration_mentions` 与 `collaboration_activities`；用户评论默认唤醒任务负责人，回复 Agent 评论路由回原 Agent，成员评论或终态事件唤醒团队 Leader。人工在所有任务节点都可通过评论追加上下文；没有活跃 Run 时还可执行 `START/CONTINUE/RESUME/BLOCK/REQUEST_REWORK/ACCEPT/CANCEL/REOPEN`，避免任意状态下拉框绕过状态机。服务恢复或 SSE 重放只读取已有 Trigger/Run，不会再次派发。目标已有活跃 Run 时，新评论/提及不创建并发 Run，而是注入该活跃 Run 的会话，让运行中的专家在下一轮读到并回应；返工/评论理由进入新 Run 指令，并要求 Leader 原样写入其派发的阶段子任务。
 
 子任务以 `parent_id + stage` 组成阶段边界。`collaboration_stage_barriers` 在创建阶段子任务时登记，同阶段全部子任务进入 `IN_REVIEW/DONE/CANCELED` 后原子变为 `COMPLETED`，并用固定幂等键触发父负责人；这里的完成表示执行阶段已交付，不替代每个任务的最终人工验收。Agent 通过 `get_collaboration_task`、`post_task_comment`、`update_collaboration_task` 和 `create_collaboration_subtask` 操作同一工作层；阶段创建会立即返回子 Run 绑定关系而非孤立的 TODO 卡片，阶段 Run 成功结束且通过交付证据门禁后由平台将子任务提交为 `IN_REVIEW`。状态工具只允许 Agent 报告 `IN_PROGRESS/BLOCKED`，不能直接写 `IN_REVIEW/DONE/CANCELED`；单 Agent 任务只接受被分配 Agent、Team 任务只接受 Team Leader 的状态更新，成员进展通过评论回报，并继续受 Profile 白名单、Effect 和 Approval 约束。
 
@@ -126,10 +126,10 @@ Console 不把所有信息塞进聊天看板，而是提供 Master-Detail 工作
 
 ### 协作任务树、验收与交付补充
 
-- 阶段 Run 完成必须通过 `CollaborationService.persistStatus` 收敛，而不能直接写 Store 状态；该路径负责求值 Barrier，并以 `STAGE_BARRIER` 的幂等 Trigger 新建后续 Leader Run。服务就绪时会重新求值所有 `WAITING` Barrier，并扫描已完成但没有对应固定幂等键 Trigger 的 Barrier，补偿旧生命周期遗漏的唤醒。
-- Team 根任务提交 `IN_REVIEW` 还需满足两个证据门槛：存在至少一个 `IN_REVIEW` 或 `DONE` 的阶段交付，且被分配的 Leader 在最后一个阶段交付之后发布了结论评论。这样“Leader 已派发”或“子专家已结束”不会被误显示为完整交付。
+- 阶段 Run 完成必须通过 `CollaborationService.persistStatus` 收敛，而不能直接写 Store 状态；该路径负责求值 Barrier，并以 `STAGE_BARRIER` 的幂等 Trigger 新建后续 Leader Run。服务就绪时会重新求值所有 `WAITING` Barrier，并扫描已完成但没有对应固定幂等键 Trigger 的 Barrier，补偿旧生命周期遗漏的唤醒；Leader Run 提前终态且未发布结论时，`onRunTerminal` 也会先执行同样的补唤醒补偿，而不是直接 `BLOCKED`。
+- Team 根任务提交 `IN_REVIEW` 还需满足两个证据门槛：存在至少一个 `IN_REVIEW` 或 `DONE` 的阶段交付，且被分配的 Leader 在最后一个阶段交付之后发布了结论评论。这样“Leader 已派发”或“子专家已结束”不会被误显示为完整交付。Leader Run 无结论提前结束时，平台先补发一次阶段屏障唤醒；无法唤醒时才保持 `BLOCKED`。
 - 任务树只有根节点是用户可操作的长期工作项；阶段节点只表达根任务内部的执行分解，不能进入根任务列表或统一历史。
-- `IN_REVIEW` 的含义是执行树已经停止，不是某个仍在运行的 Agent 的主观判断。Agent 状态工具只用于进度和阻塞；平台在阶段 Run 或根任务 Run 树终态时推进交付状态，人工仍是唯一可将根任务 `ACCEPT` 至 `DONE` 的角色。
+- `IN_REVIEW` 的含义是执行树已经停止，不是某个仍在运行的 Agent 的主观判断。Agent 状态工具只用于进度和阻塞；平台在阶段 Run 或根任务 Run 树终态时推进交付状态，人工仍是唯一可将根任务 `ACCEPT` 至 `DONE` 的角色。审批拒绝与 Run 取消同样是终态路径，必须收敛到协作状态：拒绝会触发 `onRunTerminal(FAILED)` 使阶段任务转为 `BLOCKED`，整体取消会把仍处活跃态的后代阶段任务一并置为 `CANCELED`。
 - 阶段 Run 复用根任务的稳定 workspace owner，而不是某一次 Leader Run 的临时 owner。启动迁移会归并历史任务 Run/委派后代目录并保留冲突前版本；任务详情从统一受控 workspace 列出文件。普通文件沿用认证预览/下载，HTML 入口会额外解析同一 workspace 中的相对脚本、样式与媒体并生成隔离预览，避免单文件 `blob:` URL 丢失同级依赖。
 - 删除终态任务只移除协作工作项及其级联协作数据，不删除已经终态的 Run、Session 和 Artifact；正在执行的任务仍必须先取消，避免删掉任务入口后留下活跃执行。
 
@@ -156,6 +156,31 @@ DeepSeek Thinking 的 `reasoning_content`、assistant `tool_calls` 和对应工�
 扩展工具使用两段式发现。默认模型请求只带文件/命令/Artifact 和 `tool_search` 等核心 Schema；Knowledge、Skill、Web、MCP 与 Multi-Agent Provider 仍在 Server 目录注册，但只有模型调用 `tool_search` 命中后才在下一轮注入完整 Schema。显式 Agent Profile 工具白名单仍定义能力上限，发现结果不能扩大权限。这样既降低工具 Schema Token，也避免未使用 Provider 的 Schema 变化破坏缓存前缀。
 
 ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计划状态、已验证事实、未验证假设、技术决策、失败尝试、待办与下一步、证据引用。模型摘要必须通过节名、顺序和字符预算校验；否则使用同 Schema 的确定性降级摘要。证据引用包含 message id/sequence/tool call id，使摘要后的续作仍能区分证据和假设。
+
+## 轻量 WorkingPlan（Harness Loop v2 · PR1）
+
+普通 Run 使用一个轻量、Run 内、随 Run 结束归档的工作清单，而不是把每一步都变成正式 PlanStep：
+
+- `run_working_plans` 每 Run 单行（迁移 35），`update_working_plan` 以 upsert + revision 自增落库；主 Agent 用 objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目维护，`evidenceRefs` 可选引用 ToolCall/Artifact。
+- `ContextManager` 每轮只注入最新修订（`<working_plan>` 块，位于 Run 动态上下文内并计入预算），不注入全部历史；Worker 重启后从最新 revision 恢复。
+- 简单问答不创建计划：工具不在普通路径自动触发，只有模型调用 `update_working_plan` 才落库；该工具加入核心上下文工具，专家 Profile 走 `tool_search` 激活。
+- 与 Formal Plan 的分界：Formal Plan 仍保留多步依赖、跨时长、并行、人工节点、失败回流与严格验收；WorkingPlan 不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。
+
+语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答）。协作任务复唤醒的 Leader Run 同样遵守。
+
+完成验证（PR2）：最终答案先经 `RunVerificationService` 校验再完成。写操作无工作区变化、或测试命令失败时判定 `REPAIRABLE`，验证结果写入 `run.verification` Event 并作为 `<verification>` 用户消息注入下一轮重新排队；连续 2 次仍不过才 `FAILED`。普通问答（TEXT_ONLY）行为不变。
+
+失败反思（PR3）：`run_reflections`（迁移 36）持久化结构化失败分类与决策（`TEST_FAILURE`/`TOOL_ERROR`/`DUPLICATE_CALL`/`VERIFICATION_FAILURE`），不保存隐藏思维链；重复相同工具+参数超限时记录反思后停止 Run；`ContextManager` 每轮注入最新 `<reflection>`，Worker 重启可恢复修复流程。
+
+只读工具批次（PR4）：`RunProcessor` 对同一响应中连续、无需审批的只读 ToolCall 在单次领取内并行执行（≤4 并发），按模型原始顺序提交 Tool Message（`commitToolMessage` 不触碰 Run 状态，批处理结束后统一重新排队一次）；写工具与审批工具仍是顺序执行屏障。步骤计数与恢复语义不变。
+
+专家交付协议（PR5）：`DelegationEnvelopeBuilder` 服务端统一构建委派信封（目标/范围/约束/允许文件工具/输入 Artifact/done criteria/工作区模式/父证据引用）；`AgentResultValidator` 校验子结果——无证据 `COMPLETED`、无测试证据的通过声明、无错误的失败都会被标记，`get_agent_result` 返回 `validation`。普通 Expert 默认禁止嵌套委派（既有 `enforceParentDelegationRole` 守卫）。
+
+工作区写隔离（PR6）：`WorkspaceMode`（SHARED_READONLY/SHARED_SERIAL/ISOLATED_WORKTREE）按角色默认映射并写入委派信封；`WorkspaceMergeService` 对并行子交付的变更文件做冲突检测，冲突路径必须先仲裁再合并，未合并变更不能由 Leader 直接宣称为最终交付。
+
+任务摘要与交付清单（PR7）：迁移 37 新增 `collaboration_task_digests`、`collaboration_deliveries`、`collaboration_accepted_snapshots`。`TaskDigestService` 构建 Leader 复唤醒摘要并注入 `<task_digest>`；`DeliveryManifestService` 在阶段交付时记录清单（变更文件/Artifact/测试证据/内容哈希），`ACCEPT` 时生成不可变验收快照；返工聚焦失败阶段。
+
+路由评分与评测（PR8）：`CollaborationRoutingService` 在能力匹配基础上引入历史验证通过率与当前活跃负载综合评分，候选携带 `score`；官方评测集新增“官方·08 Harness Loop”用例；`GET /runs/{runId}/audit` 返回 workingPlan/reflection/verifications，Run 审计页展示 Harness 状态；效率工作台“长期记忆”“持久化审批策略”“Artifact 工作台”列表默认收缩；长期记忆移除关系地图（图谱）视图，保留 Wiki 页面浏览。
 
 ## Prompt Cache 命中率优化
 
@@ -221,4 +246,4 @@ Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真
 
 Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定映射到 `/bin/sh -lc`、`/bin/bash -lc` 或 `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command`，模型不能传解释器路径。Run 与 Agent Profile 持久化默认 Shell；RunProcessor 在同轮 ToolCall 原子落库前补齐缺省 Shell，因此审批参数、幂等键和恢复执行一致。
 
-命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。危险工具在任何容器调用前创建持久化 Approval，批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作。
+命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。`execute_command` 在 ToolCall 原子持久化后按已落库的 `command` 分类：读取、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署等风险命令在任何容器调用前创建持久化 Approval。批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作；无法解析或缺少命令时按风险命令处理。服务初始化会重新分类历史未决命令，安全命令原 Approval 自动批准并重新排队，危险命令保持等待。全部 MCP 工具和 Provider 自行声明的危险工具仍强制审批。

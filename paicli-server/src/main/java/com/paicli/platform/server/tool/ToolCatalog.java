@@ -14,7 +14,11 @@ import java.util.Set;
 @Component
 public class ToolCatalog {
     private static final Set<String> CORE_CONTEXT_TOOLS = Set.of(
-            "list_dir", "read_file", "write_file", "execute_command", "read_artifact", "tool_search");
+            "list_dir", "read_file", "write_file", "execute_command", "read_artifact", "tool_search",
+            "update_working_plan");
+    /** Web-provider tools that become directly visible once {@code paicli.web.enabled=true}. */
+    private static final Set<String> WEB_PROVIDER_TOOLS = Set.of(
+            "web_search", "web_fetch", "github_repo_fetch");
     private final List<ServerToolProvider> providers;
 
     @Autowired
@@ -45,7 +49,9 @@ public class ToolCatalog {
             return allDefinitions(expanded);
         }
         List<ModelToolDefinition> all = allDefinitions(Set.of());
-        return all.stream().filter(definition -> CORE_CONTEXT_TOOLS.contains(definition.name())
+        Set<String> visible = new HashSet<>(CORE_CONTEXT_TOOLS);
+        all.stream().map(ModelToolDefinition::name).filter(WEB_PROVIDER_TOOLS::contains).forEach(visible::add);
+        return all.stream().filter(definition -> visible.contains(definition.name())
                 || activated.contains(definition.name())).toList();
     }
 
@@ -73,11 +79,11 @@ public class ToolCatalog {
                         "type", "object", "properties", Map.of("path", stringProperty()), "required", List.of("path"))),
                 tool("read_file", "Read a UTF-8 workspace file", Map.of(
                         "type", "object", "properties", Map.of("path", stringProperty()), "required", List.of("path"))),
-                tool("write_file", "Write a UTF-8 workspace file; requires approval. Use this for file writes instead of execute_command; parent directories are handled by the file tool when possible.", Map.of(
+                tool("write_file", "Write a UTF-8 workspace file. Use this for file writes instead of execute_command; parent directories are handled by the file tool when possible.", Map.of(
                         "type", "object", "properties", Map.of(
                                 "path", stringProperty(), "content", stringProperty()),
                         "required", List.of("path", "content"))),
-                tool("execute_command", "Execute a shell command in the workspace; requires approval. Do not use this as a fallback for ordinary file writes when write_file can satisfy the request.", Map.of(
+                tool("execute_command", "Execute a shell command in the workspace. Read, build, and test commands run directly; destructive, privileged, remote, install, publish, and deployment commands require approval. Do not use this as a fallback for ordinary file writes when write_file can satisfy the request.", Map.of(
                         "type", "object", "properties", Map.of(
                                 "command", stringProperty(),
                                 "shell", Map.of("type", "string",

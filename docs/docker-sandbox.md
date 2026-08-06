@@ -22,6 +22,8 @@ Run 完成 / 失败 / 取消
 
 Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤儿并清理。工作区保留在磁盘，因此持久化 ToolCall 可在新容器中继续。
 
+本机 Docker 模式使用 `scripts/start-docker.ps1` 启动。脚本发现 8080 已有 PaiCLI 时默认幂等返回；需要重建并重启时使用 `-Restart`，脚本会先停止旧服务再打包，避免 Windows 对运行中 Server JAR 的文件锁。日常启动构建默认跳过测试，完整回归测试由 Maven 命令显式执行；独立的 `build-sandbox.ps1` 仅构建 Common 与 Sandbox Agent，可用 `-RunTests` 运行这两个模块的测试。
+
 ## 容器限制
 
 - 使用专用 Docker `--internal` 网络，不提供外部路由。
@@ -38,6 +40,7 @@ Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤�
 - 命令进程清空继承环境后再注入固定基础变量和已校验的 `env`，不会继承 Sandbox Agent Token。
 - stdout/stderr 分开限额收集并持续排空；结果包含退出码、实际 Shell、耗时、超时和截断元数据，长结果由 Server 外置为 Artifact。
 - 超时会终止 Shell 进程树；取消 Run 会 `docker rm -f`，中断容器内活跃命令。
+- 普通读取、构建和测试命令在 ToolCall 持久化后直接执行；删除/清空、提权、权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署命令必须先完成持久化审批。命令缺失或参数无法解析时按危险命令处理。
 
 ## 配置
 

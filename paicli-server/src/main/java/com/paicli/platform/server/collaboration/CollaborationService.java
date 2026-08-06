@@ -33,10 +33,13 @@ public class CollaborationService {
     private final ObjectMapper mapper;
     private final ModelClient modelClient;
     private final SandboxDriver sandboxDriver;
+    private final TaskDigestService taskDigestService;
+    private final DeliveryManifestService deliveryManifestService;
 
     public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
                                 ProductivityStore productivity, CollaborationRoutingService routing,
-                                ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver) {
+                                ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver,
+                                TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService) {
         this.collaboration = collaboration;
         this.runtime = runtime;
         this.productivity = productivity;
@@ -44,6 +47,8 @@ public class CollaborationService {
         this.mapper = mapper;
         this.modelClient = modelClient;
         this.sandboxDriver = sandboxDriver;
+        this.taskDigestService = taskDigestService;
+        this.deliveryManifestService = deliveryManifestService;
     }
 
     public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
@@ -208,7 +213,10 @@ public class CollaborationService {
                 authorType, authorId, content, conclusion, mentions);
         List<TriggerExecution> executions = new ArrayList<>();
         for (CollaborationStore.MentionTarget mention : mentions.stream().distinct().toList()) {
-            if (hasActiveRunForTarget(taskId, mention)) continue;
+            if (hasActiveRunForTarget(taskId, mention)) {
+                deliverCommentToActiveRuns(taskId, mention, comment, content);
+                continue;
+            }
             executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
                     "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
         }
@@ -217,7 +225,9 @@ public class CollaborationService {
             if (team != null && !team.leaderAgentProfileId().equals(authorId)) {
                 CollaborationStore.MentionTarget leader = new CollaborationStore.MentionTarget(
                         "AGENT", team.leaderAgentProfileId());
-                if (!hasActiveRunForTarget(taskId, leader)) {
+                if (hasActiveRunForTarget(taskId, leader)) {
+                    deliverCommentToActiveRuns(taskId, leader, comment, content);
+                } else {
                     executions.add(trigger(taskId, "REPLY", comment.id(), leader.type(), leader.id(), content,
                             "agent-comment:" + comment.id() + ":leader:" + leader.id()));
                 }
@@ -248,8 +258,10 @@ public class CollaborationService {
         HumanActionResult result = switch (normalizedAction) {
             case "ACCEPT" -> {
                 requireStatus(task, "IN_REVIEW", normalizedAction);
-                yield new HumanActionResult(persistStatus(task, "DONE", "USER", null,
-                        normalizedReason, normalizedAction), null);
+                CollaborationStore.CollaborationTask accepted = persistStatus(task, "DONE", "USER", null,
+                        normalizedReason, normalizedAction);
+                recordAcceptedSnapshot(accepted, normalizedReason);
+                yield new HumanActionResult(accepted, null);
             }
             case "REQUEST_REWORK" -> {
                 requireStatus(task, "IN_REVIEW", normalizedAction);
@@ -286,6 +298,7 @@ public class CollaborationService {
             case "CANCEL" -> {
                 if (List.of("DONE", "CANCELED").contains(task.status())) throw invalidAction(task, normalizedAction);
                 cancelActiveTaskRuns(task);
+                cancelDescendantStages(task);
                 yield new HumanActionResult(persistStatus(task, "CANCELED", "USER", null,
                         normalizedReason, normalizedAction), null);
             }
@@ -300,6 +313,33 @@ public class CollaborationService {
                 write(Map.of("action", normalizedAction, "reason", normalizedReason,
                         "fromStatus", task.status(), "toStatus", result.task().status())));
         return result;
+    }
+
+    /**
+     * Propagates a root-level cancellation to descendant stage tasks that still look active
+     * (BACKLOG/TODO/IN_PROGRESS). Their Runs are already terminal/canceled by
+     * {@link #cancelActiveTaskRuns}; leaving the task status IN_PROGRESS would make the tree
+     * appear as if the subtask were still executing under a canceled root. Delivered (IN_REVIEW),
+     * failed (BLOCKED) and finished (DONE) stages keep their evidence.
+     */
+    private void cancelDescendantStages(CollaborationStore.CollaborationTask task) {
+        List<CollaborationStore.CollaborationTask> descendants;
+        try {
+            descendants = collaboration.descendantTasks(task.id());
+        } catch (Exception error) {
+            log.warn("Unable to list descendant stages while canceling task={}", task.id(), error);
+            return;
+        }
+        for (CollaborationStore.CollaborationTask child : descendants) {
+            if (!List.of("BACKLOG", "TODO", "IN_PROGRESS").contains(child.status())) continue;
+            try {
+                collaboration.updateStatus(child.id(), "CANCELED", "SYSTEM", null,
+                        write(Map.of("reason", "parent collaboration task canceled", "parentTaskId", task.id())));
+            } catch (Exception error) {
+                log.warn("Unable to cancel descendant stage task={} under canceled task={}",
+                        child.id(), task.id(), error);
+            }
+        }
     }
 
     private void cancelActiveTaskRuns(CollaborationStore.CollaborationTask task) {
@@ -368,8 +408,9 @@ public class CollaborationService {
                                 write(Map.of("reason", reason, "stageTaskId", task.id()))));
                 return;
             }
-            persistStatus(task, "IN_REVIEW", "SYSTEM", null,
+            CollaborationStore.CollaborationTask reviewed = persistStatus(task, "IN_REVIEW", "SYSTEM", null,
                     "linked stage run completed: " + run.id(), null);
+            recordStageDeliveryManifest(reviewed, run);
             return;
         }
         if ("TEAM".equals(task.assigneeType())) {
@@ -391,7 +432,7 @@ public class CollaborationService {
                 if (readyForHumanReview(task)) {
                     collaboration.updateStatus(task.id(), "IN_REVIEW", "SYSTEM", null,
                             write(Map.of("reason", "all linked Runs completed", "runId", run.id())));
-                } else {
+                } else if (!wakeLeaderForUndispatchedStage(task)) {
                     updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
                             "Team execution ended without a Leader conclusion after the latest staged delivery");
                 }
@@ -446,17 +487,48 @@ public class CollaborationService {
                 .ifPresent(this::triggerLeaderForCompletedStage);
     }
 
-    private void triggerLeaderForCompletedStage(CollaborationStore.StageBarrier barrier) {
+    private boolean triggerLeaderForCompletedStage(CollaborationStore.StageBarrier barrier) {
         CollaborationStore.CollaborationTask parent = collaboration.task(barrier.parentTaskId()).orElse(null);
         if (parent == null || List.of("DONE", "CANCELED").contains(parent.status())
-                || "HUMAN".equals(parent.assigneeType()) || blank(parent.assigneeId())) return;
+                || "HUMAN".equals(parent.assigneeType()) || blank(parent.assigneeId())) return false;
         CollaborationStore.MentionTarget target = new CollaborationStore.MentionTarget(
                 parent.assigneeType(), parent.assigneeId());
-        if (hasActiveRunForTarget(parent.id(), target)) return;
+        if (hasActiveRunForTarget(parent.id(), target)) return false;
         trigger(parent.id(), "STAGE_BARRIER", parent.id() + ":" + barrier.stage(),
                 parent.assigneeType(), parent.assigneeId(),
                 "Stage " + barrier.stage() + " is delivered. Read the staged delivery evidence, then dispatch the next required stage or publish the final Leader conclusion.",
                 "stage:" + parent.id() + ":" + barrier.stage());
+        return true;
+    }
+
+    /**
+     * When the Team Leader Run terminates without a conclusion, a completed StageBarrier whose
+     * idempotent STAGE_BARRIER wake-up was skipped while the Leader Run was still active would
+     * otherwise leave the task stuck. Re-wake the Leader for those barriers (the Leader Run is now
+     * terminal, so the active-run guard no longer applies). Returns true only when a new Leader Run
+     * was actually created; otherwise the caller keeps the existing BLOCKED fallback.
+     */
+    private boolean wakeLeaderForUndispatchedStage(CollaborationStore.CollaborationTask task) {
+        if (!"TEAM".equals(task.assigneeType())) return false;
+        List<CollaborationStore.StageBarrier> pending;
+        try {
+            pending = collaboration.completedStageBarriersWithoutTrigger().stream()
+                    .filter(barrier -> task.id().equals(barrier.parentTaskId()))
+                    .toList();
+        } catch (Exception error) {
+            log.warn("Unable to read completed stage barriers after Leader Run terminated task={}", task.id(), error);
+            return false;
+        }
+        boolean woke = false;
+        for (CollaborationStore.StageBarrier barrier : pending) {
+            try {
+                woke |= triggerLeaderForCompletedStage(barrier);
+            } catch (Exception error) {
+                log.warn("Unable to wake Leader for completed stage barrier task={} stage={}",
+                        task.id(), barrier.stage(), error);
+            }
+        }
+        return woke;
     }
 
     private boolean readyForHumanReview(CollaborationStore.CollaborationTask task) {
@@ -482,6 +554,35 @@ public class CollaborationService {
                 .anyMatch(file -> !file.modifiedAt().isBefore(threshold))) return true;
         return collaboration.comments(task.id()).stream().anyMatch(comment ->
                 !blank(comment.content()) && !comment.createdAt().isBefore(threshold));
+    }
+
+    private void recordStageDeliveryManifest(CollaborationStore.CollaborationTask task, RunRecord run) {
+        if (deliveryManifestService == null) return;
+        try {
+            Instant threshold = run.createdAt().minusSeconds(1);
+            List<String> changedFiles = runtime.workspaceFiles(run.id(), 200).stream()
+                    .filter(file -> file.modifiedAt() != null && !file.modifiedAt().isBefore(threshold))
+                    .map(file -> file.path()).toList();
+            List<String> artifacts = runtime.artifactsForRun(run.id()).stream()
+                    .map(artifact -> artifact.id()).toList();
+            List<String> testEvidence = runtime.toolCallsForRun(run.id()).stream()
+                    .filter(call -> "execute_command".equals(call.toolName())
+                            && call.arguments() != null && call.arguments().toLowerCase().contains("test"))
+                    .map(call -> call.status().name() + ":" + (call.error() == null ? "" : call.error())).toList();
+            deliveryManifestService.recordStageDelivery(task.id(), task.stage(), run.id(),
+                    changedFiles, artifacts, testEvidence, Map.of());
+        } catch (Exception error) {
+            log.warn("Unable to record stage delivery manifest task={} run={}", task.id(), run.id(), error);
+        }
+    }
+
+    private void recordAcceptedSnapshot(CollaborationStore.CollaborationTask task, String reason) {
+        if (deliveryManifestService == null) return;
+        try {
+            deliveryManifestService.accept(task.id(), blank(reason) ? "" : reason);
+        } catch (Exception error) {
+            log.warn("Unable to record accepted snapshot task={}", task.id(), error);
+        }
     }
 
     private CollaborationStore.CollaborationTask rootTask(CollaborationStore.CollaborationTask task) {
@@ -546,6 +647,39 @@ public class CollaborationService {
                 .anyMatch(link -> !TERMINAL_RUN_STATUSES.contains(link.status()));
     }
 
+    /**
+     * Delivers a durable comment into the session of every active Run owned by the mentioned
+     * agent/Leader, so the running expert actually reads and reacts to it on its next model turn.
+     * Without this, a comment posted while the target is already running would only be persisted and
+     * silently dropped (no concurrent second Run is created by design, and the running Run has no
+     * way to learn about the new comment).
+     */
+    private void deliverCommentToActiveRuns(String taskId, CollaborationStore.MentionTarget mention,
+                                            CollaborationStore.CollaborationComment comment, String content) {
+        String targetAgentId = mention.id();
+        if ("TEAM".equalsIgnoreCase(mention.type())) {
+            targetAgentId = productivity.findAgentTeam(mention.id())
+                    .map(ProductivityStore.AgentTeam::leaderAgentProfileId).orElse(null);
+        }
+        if (blank(targetAgentId)) return;
+        String agentId = targetAgentId;
+        String message = "用户追加评论（collaboration task " + taskId + "，comment " + comment.id() + "）：\n"
+                + (content == null ? "" : content)
+                + "\n请先通过 get_collaboration_task 读取该评论及最新证据，再决定是否调整当前执行。";
+        collaboration.taskTreeRuns(taskId).stream()
+                .filter(link -> agentId.equals(link.agentProfileId()))
+                .filter(link -> !TERMINAL_RUN_STATUSES.contains(link.status()))
+                .map(CollaborationStore.TaskRun::runId)
+                .distinct()
+                .forEach(runId -> runtime.findRun(runId).ifPresent(run -> {
+                    try {
+                        runtime.appendMessage(run.sessionId(), run.id(), "user", message);
+                    } catch (Exception error) {
+                        log.warn("Unable to deliver user comment to active run={} task={}", runId, taskId, error);
+                    }
+                }));
+    }
+
     private boolean hasActiveRunForTarget(String taskId, CollaborationStore.MentionTarget target) {
         String targetAgentId = target.id();
         if ("TEAM".equalsIgnoreCase(target.type())) {
@@ -607,13 +741,20 @@ public class CollaborationService {
                 .append("使用协作工具发布进度、阻塞或结论；阶段交付必须至少产生工作区文件变更、Artifact 或任务评论，Run 完成不等于任务 DONE。\n");
         if ("TEAM".equals(preview.targetType())) {
             ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElseThrow();
-            value.append("你是小队 Leader。评估后按能力派发，派发后停止；成员结果或阶段屏障会重新唤醒你。\n")
+            value.append("你是小队 Leader。评估后按能力派发阶段子任务；派发后你的 Run 会等待该子 Run，子 Run 终态后同一 Run 会自动恢复，你必须在恢复回合继续推进而不是停止等待：先读取阶段交付证据（get_collaboration_task、list_agents/get_agent_result 或共享工作区），再派发下一必需阶段，或发布最终结论。用户追加的评论或返工理由必须原样写进你派发的阶段子任务 description/acceptance_criteria，让执行专家直接看到，而不是只停留在你的上下文里。\n")
                     .append("team_instructions:\n").append(team.teamInstructions()).append("\n")
                     .append("member_roles_json: ").append(team.memberRolesJson()).append("\n")
                     .append("completion_policy: ").append(team.completionPolicy()).append("\n");
         }
         if ("TEAM".equals(preview.targetType())) {
-            value.append("\nTeam completion gate: create durable staged subtasks. After a stage barrier wakes you, read the staged delivery evidence, dispatch the next required stage, and only publish a final response after posting a conclusion comment for the completed delivery.\n");
+            value.append("\n阶段交付门禁：使用持久的阶段子任务推进交付。阶段子 Run 完成后，你的 Run 会原地恢复（或由阶段屏障唤醒新 Run）；无论哪种方式，都必须先读取阶段交付证据，再派发下一必需阶段，最后发布结论评论后才能结束本轮。不要在没有派发下一阶段、也没有发布结论时空转结束。\n");
+        }
+        if (taskDigestService != null) {
+            try {
+                value.append("\n").append(taskDigestService.prompt(task.id())).append("\n");
+            } catch (Exception error) {
+                log.warn("Unable to append task digest run={} task={}", task.id(), error);
+            }
         }
         return value.toString();
     }

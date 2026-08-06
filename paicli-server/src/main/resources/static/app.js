@@ -1,14 +1,13 @@
 const $ = id => document.getElementById(id);
 
-// A full page load always starts from the neutral composer; history remains available in the sidebar.
-localStorage.removeItem('paicli_session');
-localStorage.setItem('paicli_home_mode', 'chat');
-sessionStorage.removeItem('paicli_collaboration_task_return');
+// After a refresh, restore the last viewed page (session, home mode, selected collaboration task)
+// instead of always starting from the neutral composer. The child-session return pointer is kept
+// in sessionStorage and is intentionally scoped to the tab lifetime.
 
 const state = {
   sessions: [],
   groups: [],
-  sessionId: '',
+  sessionId: localStorage.getItem('paicli_session') || '',
   runId: '',
   runStatus: '',
   planStatus: '',
@@ -27,8 +26,9 @@ const state = {
   agentTeams: [],
   collaborationTasks: [],
   collaborationTaskHistory: [],
-  selectedCollaborationTaskId: '',
-  collaborationTaskView: 'task',
+  selectedCollaborationTaskId: localStorage.getItem('paicli_selected_task') || '',
+  collaborationTaskView: ['task', 'execution', 'collaboration'].includes(localStorage.getItem('paicli_task_view'))
+    ? localStorage.getItem('paicli_task_view') : 'task',
   collaborationTaskNotice: '',
   collaborationReplyToId: '',
   collaborationTaskSignature: '',
@@ -42,7 +42,8 @@ const state = {
   editingAgentProfileId: '',
   editingAgentTeamId: '',
   selectedAgentTeamId: '',
-  homeMode: 'chat',
+  homeMode: ['chat', 'collaboration', 'tasks'].includes(localStorage.getItem('paicli_home_mode'))
+    ? localStorage.getItem('paicli_home_mode') : 'chat',
   modelProfileId: localStorage.getItem('paicli_model_profile') || '',
   agentProfileId: localStorage.getItem('paicli_agent_profile') || '',
   executionShell: localStorage.getItem('paicli_execution_shell') || 'bash',
@@ -662,6 +663,8 @@ async function createCollaborationTask(event) {
     })});
     state.selectedCollaborationTaskId = task.id;
     state.collaborationTaskNotice = '';
+    localStorage.setItem('paicli_selected_task', task.id);
+    localStorage.setItem('paicli_task_view', 'task');
     event.target.reset();
     fillCollaborationAssignees($('collaborationTaskAssignee'), $('collaborationTaskAssigneeType').value);
     $('collaborationTaskCreate').open = false;
@@ -766,6 +769,8 @@ function renderCollaborationTaskList() {
       state.collaborationTaskView = 'task';
       state.collaborationTaskNotice = '';
       state.collaborationTaskSignature = '';
+      localStorage.setItem('paicli_selected_task', task.id);
+      localStorage.setItem('paicli_task_view', 'task');
       renderCollaborationTaskList();
       await renderCollaborationTaskDetail();
     };
@@ -814,7 +819,11 @@ async function renderCollaborationTaskDetail(options = {}) {
     const tabs = element('div', 'task-detail-tabs');
     [['task', '任务'], ['collaboration', '协作'], ['execution', '执行']].forEach(([id, label]) => {
       const button = element('button', state.collaborationTaskView === id ? 'primary' : 'secondary', label);
-      button.onclick = () => { state.collaborationTaskView = id; renderCollaborationTaskDetail(); };
+      button.onclick = () => {
+        state.collaborationTaskView = id;
+        localStorage.setItem('paicli_task_view', id);
+        renderCollaborationTaskDetail();
+      };
       tabs.append(button);
     });
     const body = element('div', 'task-detail-body');
@@ -2099,6 +2108,8 @@ function returnToCollaborationTask() {
   state.collaborationTaskView = origin.view;
   state.homeMode = 'tasks';
   localStorage.setItem('paicli_home_mode', 'tasks');
+  localStorage.setItem('paicli_selected_task', origin.taskId);
+  localStorage.setItem('paicli_task_view', origin.view);
   clearCollaborationTaskReturn();
   showHome();
 }
@@ -2264,6 +2275,8 @@ function openCollaborationTaskHistory(task, notice = '') {
   state.collaborationTaskSignature = '';
   state.homeMode = 'tasks';
   localStorage.setItem('paicli_home_mode', 'tasks');
+  localStorage.setItem('paicli_selected_task', task.id);
+  localStorage.setItem('paicli_task_view', 'task');
   showHome();
 }
 
@@ -2425,6 +2438,8 @@ async function deleteCollaborationTask(task) {
       state.selectedCollaborationTaskId = '';
       state.collaborationTaskNotice = '';
       state.collaborationTaskSignature = '';
+      localStorage.removeItem('paicli_selected_task');
+      localStorage.removeItem('paicli_task_view');
     }
     await loadSidebarHistory();
     if (state.homeMode === 'tasks' && $('collaborationTaskWorkspace')) {
@@ -4397,12 +4412,10 @@ async function loadManagedMemories() {
 
 let memoryWikiPages = [];
 let memoryWikiSelectedId = '';
-let memoryWikiView = 'pages';
 
 async function openMemoryWiki() {
   $('memoryWikiSearch').value = '';
   $('memoryWikiDialog').showModal();
-  setMemoryWikiView('pages');
   await loadMemoryWiki();
   $('memoryWikiSearch').focus();
 }
@@ -4414,8 +4427,7 @@ async function loadMemoryWiki() {
     memoryWikiPages = await api(`/v1/memories/wiki?projectKey=${encodeURIComponent(currentProjectKey())}&query=${encodeURIComponent(query)}&limit=200`);
     renderMemoryWikiIndex();
     const selected = memoryWikiPages.find(page => page.id === memoryWikiSelectedId) || memoryWikiPages[0];
-    if (memoryWikiView === 'graph') renderMemoryWikiGraph();
-    else if (selected) await showMemoryWikiPage(selected.id);
+    if (selected) await showMemoryWikiPage(selected.id);
     else $('memoryWikiPage').replaceChildren(element('div', 'hint', '没有匹配的 Memory 页面。已有 Memory 会自动保留，并在这里显示。'));
   } catch (error) {
     $('memoryWikiIndex').replaceChildren(element('div', 'form-error', `Wiki 加载失败：${error.message}`));
@@ -4433,82 +4445,6 @@ function renderMemoryWikiIndex() {
     index.append(button);
   });
   if (!memoryWikiPages.length) index.append(element('div', 'hint', '暂无页面'));
-}
-
-function setMemoryWikiView(view) {
-  memoryWikiView = view;
-  const graph = view === 'graph';
-  $('memoryWikiGraph').hidden = !graph;
-  $('memoryWikiPagesLayout').hidden = graph;
-  $('showMemoryWikiGraph').classList.toggle('primary', graph);
-  $('showMemoryWikiPages').classList.toggle('primary', !graph);
-  if (graph) renderMemoryWikiGraph();
-}
-
-function renderMemoryWikiGraph() {
-  const container = $('memoryWikiGraph');
-  container.replaceChildren();
-  if (!memoryWikiPages.length) {
-    container.append(element('div', 'hint', '暂无可绘制的 Memory 页面'));
-    return;
-  }
-  const pages = memoryWikiGraphPages();
-  const lanes = [
-    {layer: 'L1', label: 'L1 · 当前事实', note: '近期上下文与正在推进的事项'},
-    {layer: 'L2', label: 'L2 · 项目知识', note: '决策、过程经验与可复用方法'},
-    {layer: 'L3', label: 'L3 · 长期偏好', note: '稳定约束、偏好与长期背景'}
-  ];
-  const atlas = element('div', 'memory-atlas');
-  atlas.append(element('div', 'memory-atlas-note', pages.length < memoryWikiPages.length
-    ? `展示 ${pages.length}/${memoryWikiPages.length} 页；点卡片可查看来源和全部关联。`
-    : '点卡片可查看来源和全部关联。'));
-  lanes.forEach(lane => {
-    const laneElement = element('section', `memory-atlas-lane ${lane.layer.toLowerCase()}`);
-    laneElement.append(element('h3', '', lane.label), element('p', '', lane.note));
-    const list = element('div', 'memory-atlas-list');
-    pages.filter(page => page.layer === lane.layer).forEach(page => list.append(memoryAtlasCard(page)));
-    if (!list.childElementCount) list.append(element('div', 'hint', '暂无记忆'));
-    laneElement.append(list); atlas.append(laneElement);
-  });
-  container.append(atlas);
-}
-
-function memoryAtlasCard(page) {
-  const card = element('button', `memory-atlas-card ${page.id === memoryWikiSelectedId ? 'selected' : ''}`);
-  card.type = 'button';
-  card.append(element('strong', '', graphLabel(page.title, 34)), element('small', '',
-    `${page.memoryType} · ${Math.round(Number(page.confidence || 0) * 100)}%`));
-  const links = (page.outgoingLinks || []).slice(0, 2);
-  const relation = element('div', 'memory-atlas-links');
-  if (links.length) links.forEach(link => relation.append(element('span', '',
-    `${String(link.relation).startsWith('tag:') ? '≈' : '→'} ${graphLabel(link.title, 16)}`)));
-  else relation.append(element('span', '', '独立页面'));
-  card.append(relation);
-  card.onclick = () => {
-    memoryWikiSelectedId = page.id;
-    setMemoryWikiView('pages');
-    showMemoryWikiPage(page.id).catch(error => showNotice(`Wiki 页面加载失败：${error.message}`, true));
-  };
-  return card;
-}
-
-function memoryWikiGraphPages() {
-  const selected = memoryWikiPages.find(page => page.id === memoryWikiSelectedId);
-  const layers = ['L1', 'L2', 'L3'];
-  const pages = [];
-  layers.forEach(layer => {
-    const group = memoryWikiPages.filter(page => page.layer === layer).slice(0, 9);
-    if (selected && selected.layer === layer && !group.some(page => page.id === selected.id)) {
-      if (group.length >= 9) group[group.length - 1] = selected;
-      else group.push(selected);
-    }
-    pages.push(...group);
-  });
-  return pages.length ? pages : memoryWikiPages.slice(0, 27);
-}
-
-function graphLabel(value, limit) {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 }
 
 async function showMemoryWikiPage(id) {
@@ -5197,6 +5133,24 @@ async function openPlanStepRun(plan, step) {
     content.append(auditListSection('验证证据', (audit.validationChecks || []).map(check =>
       auditCard(`${check.status} · ${check.name}`, check.kind,
         check.evidence || check.actual || check.expected || check.error || ''))));
+    if (audit.workingPlan) {
+      content.append(auditTextSection('执行计划（WorkingPlan）',
+        `${audit.workingPlan.objective || ''}
+
+${audit.workingPlan.itemsJson || '[]'}
+（修订 ${audit.workingPlan.revision} · ${audit.workingPlan.status}）`));
+    }
+    if (audit.reflection) {
+      content.append(auditTextSection('失败反思（Reflection）',
+        `${audit.reflection.failureClass} · ${audit.reflection.decision}
+${audit.reflection.diagnosis || ''}
+下一步：${audit.reflection.nextAction || ''}`));
+    }
+    const harnessVerifications = audit.verifications || [];
+    if (harnessVerifications.length) {
+      content.append(auditListSection('完成验证（Verification）', harnessVerifications.map(event =>
+        auditCard('run.verification', event.createdAt || '', formatAuditValue(event.data)))));
+    }
     content.append(auditListSection('Run 事件', (audit.events || []).map(event =>
       auditCard(event.type, event.createdAt || '', formatAuditValue(event.data)))));
     if (!$('runAuditDialog').open) $('runAuditDialog').showModal();
@@ -5445,8 +5399,6 @@ $('deleteSelectedMemories').onclick = event => deleteWorkbenchSelection('memorie
 $('openMemoryWiki').onclick = () => openMemoryWiki().catch(error => showNotice(`Wiki 加载失败：${error.message}`, true));
 $('closeMemoryWiki').onclick = () => $('memoryWikiDialog').close();
 $('searchMemoryWiki').onclick = () => loadMemoryWiki();
-$('showMemoryWikiGraph').onclick = () => setMemoryWikiView('graph');
-$('showMemoryWikiPages').onclick = () => setMemoryWikiView('pages');
 $('memoryWikiSearch').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); loadMemoryWiki(); } };
 $('refreshArtifacts').onclick = loadArtifacts;
 $('selectAllArtifacts').onclick = event => toggleWorkbenchBatchSelection('artifacts', event);

@@ -1,5 +1,19 @@
 # 交付阶段
 
+## 2026-08-06 Harness Loop v2 · PR1：轻量 WorkingPlan 与交互修复
+
+- [x] 迁移 35：`run_working_plans`（每 Run 单行、revision 自增）；`update_working_plan` 工具（objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目 + evidenceRefs）。
+- [x] `ContextManager` 每轮只注入最新 WorkingPlan；简单问答不自动产生计划；Worker 重启从最新 revision 恢复。
+- [x] 语言一致性：系统提示按用户语言作答；按当前 Run 用户消息中/英占比注入 `<language>` 指令（中文问中文答、英文问英文答）。
+- [x] Console 整页刷新恢复上次页面（最后打开的 Session / 选中的协作任务与视图），不再固定回到中性首页。
+- [x] Harness Loop v2 PR2：CompletionVerifier（写操作无工作区变化或测试失败时进入 repair，连续 2 次不过才 FAILED；普通问答行为不变）。
+- [x] Harness Loop v2 PR3：失败反思（迁移 36 `run_reflections`，结构化失败分类/决策/证据引用，不含隐藏思维链；测试/工具失败与重复工具调用自动记录，Worker 重启可恢复）。
+- [x] Harness Loop v2 PR4：只读工具批次并行（同轮连续只读 ToolCall 单次领取并行执行 ≤4，按模型顺序写 Message；写/审批工具保持顺序屏障）。
+- [x] Harness Loop v2 PR5：结构化专家交付（DelegationEnvelopeBuilder + AgentResultValidator，无证据 COMPLETED/虚假测试通过被拒绝；普通 Expert 默认禁止嵌套委派）。
+- [x] Harness Loop v2 PR6：工作区写隔离与冲突检测（WorkspaceMode 按角色默认映射；WorkspaceMergeService 检测并行写冲突）。
+- [x] Harness Loop v2 PR7：任务摘要与交付清单（迁移 37：task_digests / deliveries / accepted_snapshots；Leader 复唤醒注入摘要；阶段交付记录清单；ACCEPT 生成不可变快照；返工聚焦失败阶段）。
+- [x] Harness Loop v2 PR8：路由综合评分（能力+历史通过率+负载）、官方评测集“官方·08 Harness Loop”、Run 审计页 Harness 状态面板、效率工作台“长期记忆”“持久化审批策略”“Artifact 工作台”列表默认收缩，长期记忆移除关系地图视图。
+
 ## 2026-08-04 协作阶段收敛修复
 
 - [x] 阶段子 Run 的终态统一通过阶段屏障唤醒 Leader；启动恢复会补偿旧的 `WAITING` Barrier 及已完成但未触发 Leader 的 Barrier。

@@ -3,6 +3,7 @@ package com.paicli.platform.server.agent;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.common.WorkspaceMode;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.domain.MessageRecord;
@@ -32,14 +33,19 @@ public class DelegationToolProvider implements ServerToolProvider {
     private final ObjectMapper mapper;
     private final PlanStore plans;
     private final CollaborationStore collaboration;
+    private final DelegationEnvelopeBuilder envelopeBuilder;
+    private final AgentResultValidator resultValidator;
 
     public DelegationToolProvider(SqliteRuntimeStore store, ProductivityStore productivity,
-                                  ObjectMapper mapper, PlanStore plans, CollaborationStore collaboration) {
+                                  ObjectMapper mapper, PlanStore plans, CollaborationStore collaboration,
+                                  DelegationEnvelopeBuilder envelopeBuilder, AgentResultValidator resultValidator) {
         this.store = store;
         this.productivity = productivity;
         this.mapper = mapper;
         this.plans = plans;
         this.collaboration = collaboration;
+        this.envelopeBuilder = envelopeBuilder;
+        this.resultValidator = resultValidator;
     }
 
     @Override public String id() { return "agent"; }
@@ -124,7 +130,8 @@ public class DelegationToolProvider implements ServerToolProvider {
         String planId = planStep == null ? stringArg(request.arguments(), "plan_id") : planStep.planId();
         String planStepId = planStep == null ? stringArg(request.arguments(), "plan_step_id") : planStep.id();
         Map<String, Object> envelope = delegationEnvelope(request, session.projectKey(), planStep,
-                profile == null ? null : profile.outputSchema());
+                profile == null ? null : profile.outputSchema(),
+                profile == null ? null : profile.collaborationRole());
         String envelopeJson = writeJson(envelope);
         List<String> readSet = listArg(request.arguments().get("resource_read_set"));
         List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
@@ -241,6 +248,8 @@ public class DelegationToolProvider implements ServerToolProvider {
         if (child.error() != null && !child.error().isBlank()) value.put("error", child.error());
         Map<String, Object> agentResult = persistedAgentResult(delegation);
         if (agentResult.isEmpty()) agentResult = agentResult(delegation, child);
+        AgentResultValidator.ValidationResult validation = resultValidator.validate(child, agentResult);
+        value.put("validation", Map.of("valid", validation.valid(), "issues", validation.issues()));
         if (child.status().terminal()) {
             String answer = store.messages(delegation.childSessionId()).stream()
                     .filter(message -> "assistant".equals(message.role()))
@@ -307,6 +316,9 @@ public class DelegationToolProvider implements ServerToolProvider {
                 "description", "Files or logical resources written by this child"));
         properties.put("workspace_ref", Map.of("type", "string",
                 "description", "Optional logical key for an isolated workspace. Omit it to inherit the current workspace. Never pass a filesystem path or the current shared workspace path."));
+        properties.put("workspace_mode", Map.of("type", "string",
+                "enum", List.of("SHARED_READONLY", "SHARED_SERIAL", "ISOLATED_WORKTREE"),
+                "description", "Optional workspace isolation mode; defaults from the agent role (implementer/expert -> ISOLATED_WORKTREE, runner -> SHARED_SERIAL, explore/review -> SHARED_READONLY)."));
         properties.put("failure_policy", Map.of("type", "string",
                 "enum", List.of("BLOCK_GRAPH", "DEGRADE", "REQUIRE_HUMAN"),
                 "description", "Behavior when an upstream dependency fails"));
@@ -322,42 +334,51 @@ public class DelegationToolProvider implements ServerToolProvider {
     }
 
     private Map<String, Object> delegationEnvelope(ToolRequest request, String projectKey, PlanStore.PlanStep step,
-                                                   String profileOutputSchema) {
-        Map<String, Object> value = new LinkedHashMap<>();
-        value.put("version", 1);
+                                                   String profileOutputSchema, String collaborationRole) {
+        List<String> doneCriteria = listArg(request.arguments().get("done_criteria"));
+        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
+        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
+        String workspaceRef = stringArg(request.arguments(), "workspace_ref");
+        if (workspaceRef.isBlank() && step != null) workspaceRef = nullToBlank(step.workspaceRef());
+        String expectedSchema = stringArg(request.arguments(), "expected_output_schema");
+        WorkspaceMode mode = WorkspaceMode.parse(stringArg(request.arguments(), "workspace_mode"));
+        if (WorkspaceMode.SHARED_READONLY.equals(mode) && modeRequestedBlank(request)) {
+            mode = DelegationEnvelopeBuilder.defaultMode(collaborationRole);
+        }
+        Map<String, Object> value = new LinkedHashMap<>(envelopeBuilder.build(
+                new DelegationEnvelopeBuilder.EnvelopeInput(
+                        stringArg(request.arguments(), "task"),
+                        stringArg(request.arguments(), "scope"),
+                        List.of(), List.of(),
+                        listArg(request.arguments().get("allowed_files")),
+                        listArg(request.arguments().get("allowed_tools")),
+                        listArg(request.arguments().get("input_artifacts")),
+                        List.of(),
+                        expectedSchema.isBlank() ? nullToBlank(profileOutputSchema) : expectedSchema,
+                        doneCriteria.isEmpty() && step != null ? List.of(step.doneCriteriaJson()) : doneCriteria,
+                        stringArg(request.arguments(), "budget"),
+                        stringArg(request.arguments(), "deadline"),
+                        listArg(request.arguments().get("dependencies")),
+                        List.of(), mode, workspaceRef,
+                        stringArg(request.arguments(), "failure_policy"),
+                        listArg(request.arguments().get("forbidden_operations")))));
         value.put("parent_run_id", request.runId());
         value.put("project_key", projectKey);
-        value.put("objective", stringArg(request.arguments(), "task"));
-        value.put("scope", stringArg(request.arguments(), "scope"));
         value.put("plan_id", step == null ? stringArg(request.arguments(), "plan_id") : step.planId());
         value.put("plan_step_id", step == null ? stringArg(request.arguments(), "plan_step_id") : step.id());
         value.put("plan_step_title", step == null ? "" : step.title());
         value.put("plan_step_type", step == null ? "" : step.type());
         value.put("execution_mode", step == null ? "" : step.executionMode());
-        value.put("allowed_files", listArg(request.arguments().get("allowed_files")));
-        value.put("allowed_tools", listArg(request.arguments().get("allowed_tools")));
-        value.put("input_artifacts", listArg(request.arguments().get("input_artifacts")));
-        String expectedSchema = stringArg(request.arguments(), "expected_output_schema");
-        value.put("expected_output_schema", expectedSchema.isBlank() ? nullToBlank(profileOutputSchema) : expectedSchema);
-        List<String> doneCriteria = listArg(request.arguments().get("done_criteria"));
-        value.put("done_criteria", doneCriteria.isEmpty() && step != null
-                ? List.of(step.doneCriteriaJson()) : doneCriteria);
-        value.put("budget", stringArg(request.arguments(), "budget"));
-        value.put("deadline", stringArg(request.arguments(), "deadline"));
-        value.put("dependencies", listArg(request.arguments().get("dependencies")));
-        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
-        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
         value.put("resource_read_set", readSet.isEmpty() && step != null
                 ? jsonList(step.resourceReadSetJson()) : readSet);
         value.put("resource_write_set", writeSet.isEmpty() && step != null
                 ? jsonList(step.resourceWriteSetJson()) : writeSet);
-        String workspaceRef = stringArg(request.arguments(), "workspace_ref");
-        value.put("workspace_ref", workspaceRef.isBlank() && step != null
-                ? nullToBlank(step.workspaceRef()) : workspaceRef);
-        String failurePolicy = stringArg(request.arguments(), "failure_policy");
-        value.put("failure_policy", failurePolicy.isBlank() ? "BLOCK_GRAPH" : failurePolicy.toUpperCase());
-        value.put("forbidden_operations", listArg(request.arguments().get("forbidden_operations")));
         return value;
+    }
+
+    private static boolean modeRequestedBlank(ToolRequest request) {
+        Object value = request.arguments().get("workspace_mode");
+        return value == null || String.valueOf(value).isBlank();
     }
 
     private Map<String, Object> agentResult(RunDelegationRecord delegation,

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.store.CollaborationStore;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -18,12 +19,14 @@ public class CollaborationRoutingService {
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() { };
     private final ProductivityStore productivity;
     private final CollaborationStore collaboration;
+    private final SqliteRuntimeStore runtime;
     private final ObjectMapper mapper;
 
     public CollaborationRoutingService(ProductivityStore productivity, CollaborationStore collaboration,
-                                       ObjectMapper mapper) {
+                                       SqliteRuntimeStore runtime, ObjectMapper mapper) {
         this.productivity = productivity;
         this.collaboration = collaboration;
+        this.runtime = runtime;
         this.mapper = mapper;
     }
 
@@ -54,7 +57,7 @@ public class CollaborationRoutingService {
                 productivity.resolveAgentProfile(projectKey, memberId).filter(ProductivityStore.AgentProfile::enabled)
                         .ifPresent(candidates::add);
             }
-            candidates = rank(input, candidates, roles);
+            candidates = rank(projectKey, input, candidates, roles);
             reasons.add("团队路由策略：" + team.routingPolicy());
             if (!readList(team.capabilityTagsJson()).isEmpty()) {
                 reasons.add("团队能力标签命中候选范围：" + String.join("、", readList(team.capabilityTagsJson())));
@@ -79,8 +82,11 @@ public class CollaborationRoutingService {
         reasons.add("预览只展示将被唤醒的 Leader 与可委派候选，不创建 Run");
         return new RoutePreview(targetType, team == null ? requestedTargetId : team.id(),
                 leader.id(), leader.name(),
-                candidates.stream().map(value -> new RouteCandidate(value.id(), value.name(),
-                        value.collaborationRole(), matchReason(input, value, routeRoles))).toList(),
+                candidates.stream().map(value -> {
+                    int combined = combinedScore(projectKey, input, value, routeRoles.get(value.id()));
+                    return new RouteCandidate(value.id(), value.name(), value.collaborationRole(),
+                            matchReason(input, value, routeRoles, combined), combined);
+                }).toList(),
                 complexity, risk, Math.max(1, maxConcurrency), List.copyOf(reasons));
     }
 
@@ -98,11 +104,26 @@ public class CollaborationRoutingService {
         }
     }
 
-    private static List<ProductivityStore.AgentProfile> rank(String input,
-                                                              List<ProductivityStore.AgentProfile> values,
-                                                              Map<String, String> roles) {
+    private List<ProductivityStore.AgentProfile> rank(String projectKey, String input,
+                                                       List<ProductivityStore.AgentProfile> values,
+                                                       Map<String, String> roles) {
         return values.stream().sorted((left, right) -> Integer.compare(
-                score(input, right, roles.get(right.id())), score(input, left, roles.get(left.id())))).toList();
+                combinedScore(projectKey, input, right, roles.get(right.id())),
+                combinedScore(projectKey, input, left, roles.get(left.id())))).toList();
+    }
+
+    /**
+     * PR8: weighted routing score. Capability match stays the primary signal;
+     * historical validation pass rate and current availability (active runs) are
+     * additive signals so a repeatedly-failing or overloaded expert ranks lower.
+     */
+    private int combinedScore(String projectKey, String input, ProductivityStore.AgentProfile profile,
+                              String roleDescription) {
+        int capability = score(input, profile, roleDescription);
+        double passRate = runtime.agentPassRate(projectKey, profile.id());
+        long active = runtime.activeRunsForAgent(profile.id());
+        double availability = Math.max(0.0, 1.0 - active / 3.0);
+        return (int) Math.round(capability * 100.0 + (passRate - 0.5) * 30.0 + availability * 15.0);
     }
 
     private static int score(String input, ProductivityStore.AgentProfile profile, String roleDescription) {
@@ -118,9 +139,10 @@ public class CollaborationRoutingService {
     }
 
     private static String matchReason(String input, ProductivityStore.AgentProfile profile,
-                                      Map<String, String> roles) {
+                                      Map<String, String> roles, int combined) {
         int score = score(input, profile, roles.get(profile.id()));
-        return score == 0 ? "小队成员候选" : "能力与任务词匹配，score=" + score;
+        return score == 0 ? "小队成员候选（综合评分 " + combined + "）"
+                : "能力与任务词匹配（综合评分 " + combined + "）";
     }
 
     private static List<String> terms(String input) {
@@ -162,7 +184,7 @@ public class CollaborationRoutingService {
 
     private static boolean blank(String value) { return value == null || value.isBlank(); }
 
-    public record RouteCandidate(String agentProfileId, String name, String role, String reason) { }
+    public record RouteCandidate(String agentProfileId, String name, String role, String reason, int score) { }
     public record RoutePreview(String targetType, String targetId, String leaderAgentProfileId,
                                String leaderName, List<RouteCandidate> candidates,
                                String complexity, String risk, int estimatedConcurrency,

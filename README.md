@@ -11,7 +11,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 普通 Agent 原型通常是“拼 Prompt → 调模型 → 执行工具 → 把结果再发给模型”。PaiCLI Platform Lite 重点补齐模型 API 之外的工程问题：
 
 - 服务或 Worker 中断后，Run 如何恢复，而不是从头猜测执行到了哪里。
-- 写文件、执行命令等副作用如何先持久化、再审批、最后执行。
+- 写文件、执行命令等副作用如何先持久化、按风险审批、再执行。
 - 一轮多个 ToolCall 如何原子落库，并保持模型给出的顺序。
 - 复杂任务的计划、步骤、依赖和修订如何从模型文本变成可恢复的持久化对象。
 - 模型密钥如何只留在 Server，不进入 Docker Sandbox。
@@ -110,6 +110,14 @@ Local 模式用于开发和读取类工具验证，故意不允许真正执行�
 .\scripts\start-docker.ps1
 ```
 
+脚本默认跳过测试并构建 Server 与 Sandbox 镜像。8080 已有 PaiCLI 服务时会直接返回；修改代码后需要重建并重启时使用：
+
+```powershell
+.\scripts\start-docker.ps1 -Restart
+```
+
+这样会先停止旧服务，再重打包 Server，避免 Windows 锁定运行中 JAR 导致 Spring Boot `repackage` 失败。完整回归测试仍使用 `.\mvnw.cmd clean test` 显式执行。
+
 也可以分步执行：
 
 ```powershell
@@ -117,6 +125,8 @@ Local 模式用于开发和读取类工具验证，故意不允许真正执行�
 java -jar .\paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar `
   --paicli.sandbox-mode=docker
 ```
+
+`build-sandbox.ps1` 只构建 `paicli-common` 与 `paicli-sandbox-agent`，默认跳过测试；需要同时运行这两个模块的测试时传入 `-RunTests`。
 
 详细边界见 [docs/docker-sandbox.md](docs/docker-sandbox.md)。
 
@@ -233,7 +243,7 @@ X-API-Key: your-key
 - 不再在每轮调用的早期 Prompt 中写入 `Instant.now()`；同一 Run 始终使用持久化的创建时间作为基准时间。
 - 将既有摘要和历史移动到 RAG、Memory、工作区等 Run 动态块之前，使同一会话的新 Run 仍可复用已有长前缀。
 - 基础 Prompt、专家指令、项目规则和 Skill 索引使用稳定顺序与系统消息角色；内容或规则真正变化时才合理失效。
-- Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、Web、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
+- Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
 - 必需指令、历史、当前 Run 消息和工具 Schema 先占预算；RAG 与 Memory 共享剩余动态预算，超限时写入明确标记并有界裁剪。
 - 每轮在 `run_events` 写入 `context.prepared` Context Manifest，记录可复用前缀 Token 和 SHA-256、工具 Token、各消息分区 Token、Plan 状态、RAG citation/命中理由、实际选择的 Memory id/理由、完整工具名/选择理由、动态激活工具和被丢弃来源，便于解释后续命中率与上下文选择。
 
@@ -244,6 +254,24 @@ X-API-Key: your-key
 ```
 
 历史累计数据会长期稀释优化后的结果。同一 Run 的多轮 ReAct、包含稳定历史的连续 Run 最容易获得提升；短于供应商最小缓存前缀、模型/工具集频繁切换、项目规则实际变化或供应商不支持 Prompt Cache 时，命中率仍可能较低。
+
+### 轻量 WorkingPlan 与语言一致性
+
+- **WorkingPlan**：普通 Run 内可维护一个轻量工作清单（目标 + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目）。主 Agent 通过 `update_working_plan` 创建/修订；`run_working_plans` 每 Run 单行、revision 自增，`ContextManager` 每轮只注入最新修订，随 Run 结束自然归档。它不是 Formal Plan：不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。简单问答不产生计划，避免额外 Token 与状态负担；复杂多步任务由模型按需建立。
+- **语言一致性**：系统提示不再固定用中文作答，而是要求与用户最近一条消息语言一致，并显式要求“用户中文时全程中文（代码/命令/标识符/专有名词除外）”；`ContextManager` 按当前 Run 用户消息的中/英占比注入显式 `<language>` 指令（中文问中文答、英文问英文答，短中文指令也覆盖），协作任务复唤醒的 Leader Run 同样遵守。前端展示固定为中文。
+
+### 完成验证、失败反思与只读工具批次（Harness Loop v2 PR2–PR4）
+
+- **CompletionVerifier**：最终答案非空不再等于完成。Run 执行过写操作但工作区无变化、或测试命令失败时，平台把验证结果注入下一轮并要求修复，连续 2 次仍不过才 `FAILED`；普通问答仍直接完成。验证结果持久化为 `run.verification` Event。
+- **失败反思**：测试/工具失败与重复工具调用会记录结构化 `run_reflections`（失败分类、诊断、决策、证据引用、下一步），每轮注入最新 `<reflection>`，不保存模型隐藏思维链；重复相同工具+参数超限后停止 Run。
+- **只读工具批次**：同一模型响应中连续的只读 ToolCall 单次领取并行执行（≤4 并发），按模型原始顺序写 Tool Message；写工具与审批工具保持顺序执行屏障。
+
+### 专家交付协议、写隔离与任务摘要（Harness Loop v2 PR5–PR8）
+
+- **结构化专家交付（PR5）**：服务端统一构建委派信封（`DelegationEnvelopeBuilder`），`AgentResultValidator` 校验子结果——无证据 `COMPLETED`、无证据的测试通过声明、无错误的 `FAILED` 都会被标记；`get_agent_result` 返回 `validation` 结论。普通 Expert 默认不能嵌套委派。
+- **工作区写隔离与冲突检测（PR6）**：新增 `WorkspaceMode`（SHARED_READONLY/SHARED_SERIAL/ISOLATED_WORKTREE）并按角色默认映射；`WorkspaceMergeService` 检测并行子交付的变更文件冲突，冲突必须先仲裁再合并。
+- **任务摘要与交付清单（PR7）**：Leader 复唤醒注入 `<task_digest>`（目标、状态、阶段、阻塞、最近人工指令、增量活动、交付），无需重读全量历史；阶段交付记录 `collaboration_deliveries` 清单（变更文件/Artifact/测试证据/内容哈希）；人工 `ACCEPT` 生成不可变验收快照。
+- **路由评分、评测与前端（PR8）**：路由综合评分引入历史验证通过率与当前负载；官方评测集新增“官方·08 Harness Loop”用例；Run 审计页展示 WorkingPlan/反思/完成验证；效率工作台“长期记忆”“持久化审批策略”“Artifact 工作台”列表默认收缩；长期记忆移除关系地图（图谱）视图，保留 Wiki 页面浏览。
 
 ### Context 与 Memory Harness 补齐
 
@@ -287,7 +315,7 @@ X-API-Key: your-key
 - `execute_command` 支持固定白名单 `sh`、`bash`、`powershell`（PowerShell Core / `pwsh`），并支持受控 `cwd`、请求级 `timeoutSeconds`、`maxOutputBytes` 与显式非敏感 `env`；不接受任意解释器路径。
 - Run 和 Agent Profile 都持久化默认 Shell。模型省略 `shell` 时，Server 会在同轮 ToolCall 原子落库前补入 Run 默认值，使 Approval、幂等键与恢复执行复用同一组最终参数。
 - stdout/stderr 分开收集并持续排空，结果记录实际 Shell、退出码、耗时、超时、字节数和截断状态；超过模型内联预算的输出由既有 Artifact Store 保存并可通过 `read_artifact` 分段读取。
-- `write_file` 和 `execute_command` 先创建持久化 Approval；工具和审批写入 JSONL Audit。
+- `write_file` 与普通读取、构建、测试命令在 ToolCall 持久化后直接执行；`execute_command` 中的删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署命令先创建持久化 Approval。工具调用和实际审批均写入 JSONL Audit。
 - Server 启动时清理带 PaiCLI label 的孤儿容器，并覆盖 Fake Docker 与真实 Docker 验收。
 
 危险工具审批示例：
@@ -304,6 +332,8 @@ Content-Type: application/json
 ```
 
 `runId` 可选；传入后返回当前 Run 所属整棵父子委派树的待审批项。`projectKey` 可选；不传 `runId` 时返回该项目全部待审批项，供 Console 的全局审批入口汇总专家和子专家操作。`rememberScope` 可为仅本次、不创建策略，或 `SESSION`、`PROJECT`。持久化策略只复用相同工具名和完全相同的参数 SHA-256，参数变化后必须重新审批。
+
+服务升级后会重新检查历史未决的 `execute_command` Approval：按当前风险规则属于普通读取、构建或测试的命令自动批准并重新排队，危险命令继续等待人工确认。该恢复只处理已持久化的原参数，不会让模型重新生成命令。
 
 ### 阶段 3：真实模型与上下文工程
 
@@ -366,7 +396,7 @@ data/workspaces/{runId}/PAI.md
 #### 历史会话检索与联网
 
 - `session_search` 仅在 Agent 主动调用时，对当前项目的用户可见历史消息执行 BM25 检索，排除内部子会话与当前 Run。
-- 联网默认关闭。启用 `PAICLI_WEB_ENABLED` 和 SearXNG-compatible 搜索端点后提供 `web_search`、`web_fetch`、`github_repo_fetch`。
+- 联网默认关闭。启用 `PAICLI_WEB_ENABLED` 和 SearXNG-compatible 搜索端点后提供 `web_search`、`web_fetch`、`github_repo_fetch`，并在普通会话中**默认直接可见**（无需先 `tool_search`），仍受 Server 侧 SSRF 防护（`web_fetch` 只允许公网 HTTP(S)，私有/内网目标被阻断）。
 - 网页抓取限制响应大小，并在每次重定向时重新拒绝 loopback、链路本地和私网地址；GitHub 仓库首页会优先走 GitHub API，`github.com/.../blob/...` 会优先转换为 `raw.githubusercontent.com`，避免抓取 GitHub HTML 页面。
 
 #### MCP
@@ -467,7 +497,7 @@ data/workspaces/{runId}/PAI.md
 Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.2.0` 包含 7 个套件、28 个用例：
 
 - **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
-- **工具与审批**：写文件、执行命令、破坏性命令拒绝和写后读取；危险工具会真实等待 Approval。
+- **工具与审批**：写文件、普通读取/构建/测试命令、危险命令等待审批、破坏性命令拒绝和写后读取；只有风险分类命中的命令会真实等待 Approval。
 - **上下文与受管能力**：Knowledge、Session Search、Skill、Web 和 Multi-Agent；依赖项目数据或外部配置，默认停用，可在 Console 按需启用。
 - **稳定性与预算**：默认 3 Trial，检查固定指令、随机工具调用、输出 Token 和耗时预算。
 - **Plan DAG 与验证**：结构化计划和验证证据模板，默认停用。
@@ -509,25 +539,25 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–34：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁。
+SQLite `schema_migrations` 当前记录版本 1–35：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
-- 阶段子 Run 成功结束后，平台必须通过 `persistStatus` 完成对应 `StageBarrier`，再以幂等 `STAGE_BARRIER` Trigger 唤醒 Leader。Leader 的唤醒输入要求读取阶段交付证据，继续派发后续阶段或发布根任务结论；服务启动会补偿旧版本遗留的 `WAITING` Barrier，以及已完成但尚未持久化 Leader Trigger 的 Barrier。
-- Team 根任务不能仅凭所有关联 Run 终态进入 `IN_REVIEW`：至少要有一个已交付的阶段，并且 Team Leader 必须在最后一个阶段交付之后发布结论评论。否则任务保持 `BLOCKED`，不会把未汇总的阶段成果错误交给人工验收。
+- 阶段子 Run 成功结束后，平台必须通过 `persistStatus` 完成对应 `StageBarrier`，再以幂等 `STAGE_BARRIER` Trigger 唤醒 Leader。Leader 派发阶段后同一 Run 原地等待该子 Run，子 Run 终态后原地恢复并继续推进；若 Leader Run 在未发布结论时提前终态，平台会先对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次唤醒（每个阶段最多一次），只有无法唤醒时才置 `BLOCKED`。Leader 的唤醒输入要求读取阶段交付证据，继续派发后续阶段或发布根任务结论；服务启动会补偿旧版本遗留的 `WAITING` Barrier，以及已完成但尚未持久化 Leader Trigger 的 Barrier。
+- Team 根任务不能仅凭所有关联 Run 终态进入 `IN_REVIEW`：至少要有一个已交付的阶段，并且 Team Leader 必须在最后一个阶段交付之后发布结论评论。Leader Run 提前结束且无结论时，平台先补发阶段屏障唤醒；仍无进展才保持 `BLOCKED`，不会把未汇总的阶段成果错误交给人工验收。
 - 根协作任务是左侧列表与历史中的唯一任务记录。由 Leader 创建的阶段 1、阶段 2 等任务必须带有 `parentId`，只在根任务的“子任务与阶段”区域显示，不能作为独立任务出现。
 - Agent 只能报告 `IN_PROGRESS` 或 `BLOCKED`。阶段子 Run 结束后由平台标为已交付并等待 Leader 汇总；根任务及其全部阶段 Run 都已终态后，平台才可将根任务置为 `IN_REVIEW`，随后由人工 `ACCEPT` 完成最终验收。
 - 同一父任务、阶段和负责人只能存在一个活跃或已交付的阶段任务；同一组合连续两次进入 `BLOCKED` 后，Leader 不能再自动复制第三个阶段任务，必须报告明确阻塞原因并等待人工干预。不同负责人仍可在同一阶段并行执行独立工作。
 - “执行”页的“最终交付”只在根任务完成并通过最终交付门禁后显示，列出根 Leader 与阶段专家共享 workspace 中的真实文件，可直接预览或下载；任务仍处于协作或验收过程中时不会提前暴露为“最终交付”。HTML 预览会读取并内联工作区内的相对脚本、样式和图片，再运行于无同源权限的 iframe；因此多文件网页可直接运行，但不能借交付页面读取 Console 凭据、调用 PaiCLI API 或访问外部网络。
-- 已取消、失败或完成的协作任务可以删除协作层记录：任务树、评论、动态、Trigger、Route Decision 和 Task-Run 关联会移除，而已结束的 Run、会话和交付文件继续保留。仍有活跃 Run 时必须先使用“取消任务”。
+- 已取消、失败或完成的协作任务可以删除协作层记录：任务树、评论、动态、Trigger、Route Decision 和 Task-Run 关联会移除，而已结束的 Run、会话和交付文件继续保留。仍有活跃 Run 时必须先使用“取消任务”。整体取消会先取消任务树内全部活跃 Run，并把仍处于 `BACKLOG/TODO/IN_PROGRESS` 的后代阶段任务一并置为 `CANCELED`，避免子树残留“执行中”状态。
 
 ### 阶段 22–24：持久化专家协作工作层
 
 - `CollaborationTask` 是跨 Run 长期存在的工作项，保存 Agent 或 AgentTeam 负责人、状态、优先级、可选完成条件、父子关系、阶段和可选 Plan 引用；Run 只表示一次执行尝试，二者通过 `collaboration_task_runs` 多对多关联。人工不是任务负责人，而是可以在任意阶段追加评论/指令，并通过显式动作启动、继续、阻塞、返工、验收、取消或重新打开任务。
 - Route Preview 使用团队能力、成员角色、任务词、复杂度与风险生成结构化候选、Leader、原因和预计并发；复杂度/风险是当前文本启发式路由推断，不是任务表单的固定配置。预览不创建 Run，真实 Trigger 会同时持久化 Route Decision，并把有效并发写入根协作策略；同一委派树的活动子 Run 不会超过该上限，且仍受项目最大并发约束。
-- 评论、结论、回复和显式 Mention 写入任务时间线。用户评论默认唤醒任务负责人，回复 Agent 评论回到原 Agent，成员结果事件唤醒团队 Leader；Trigger 以 idempotency key 去重，恢复不会重复派发。
+- 评论、结论、回复和显式 Mention 写入任务时间线。用户评论默认唤醒任务负责人，回复 Agent 评论回到原 Agent，成员结果事件唤醒团队 Leader；Trigger 以 idempotency key 去重，恢复不会重复派发。若目标负责人已有活跃 Run，不并发创建第二个 Run，而是把评论直接注入该活跃 Run 的会话，让执行中的专家在下一轮读取并回应；返工/评论理由会进入新 Run 的指令，并要求 Leader 原样写入其派发的阶段子任务。
 - Agent 可通过受 ToolCall/Approval/幂等边界约束的协作工具读取任务、发评论、报告进度/阻塞和创建阶段子任务。`create_collaboration_subtask` 会原子创建子任务、派发直接专家 Run 并绑定二者；根任务的全部 Leader 唤醒 Run、默认阶段 Run 和委派后代使用同一个稳定任务工作区，即使 Barrier 在新 Session 中唤醒新的 Leader Run，也能读取此前交付。只有显式逻辑 `workspace_ref` 才建立隔离目录，适合需要独立产物和后续显式合并的并行工作；误把当前协作工作区的文件系统路径填入该字段时按继承处理，避免子专家落入空目录。评论和提及始终持久化，但同一任务树中的目标 Agent/Team Leader 已有活跃 Run 时，不再并发创建第二个评论、回复、子专家终态或阶段屏障 Run。阶段 Run 必须留下本 Run 的写文件证据、Artifact 或任务评论，否则阶段和父任务转为 `BLOCKED`，不完成 Barrier。单 Agent 任务只能由被分配 Agent 更新任务级状态，Team 任务只能由 Team Leader 更新；根 Team Leader 只有在除当前 Run 外的阶段、委派和并行 Run 全部终态后才能发布最终结论。Run 完成不会自动把顶层任务改为完成，只有人工 `ACCEPT` 才能进入 `DONE`。
-- Console 的“协作任务”工作区分为任务、协作、执行三层：创建区默认只展示标题和 Agent/AgentTeam 负责人，任务说明与完成条件收在“更多设置”；任务层按当前状态展示可执行的人工动作和 Route Preview；协作层把任务建立、执行派发、专家协作、人工验收组织为阶段进度，并展示参与角色/关联执行/评论指标、评论与决策、中文语义协作动态。任务详情每 3 秒从同一响应同步评论、活动、Run 和状态，输入评论时暂停重绘以保留草稿。执行层在任务未完成时也展示“当前工作区产物”，明确其仍可能被后续阶段修改；`WAITING_AGENT` 显示为 Leader 等待子专家，不再与最终验收混淆。整页刷新固定回到“普通对话 / 新对话”的中性首页，不恢复上次选中的会话、协作任务或执行详情，历史仍保留在左栏按需打开。主 Header 还会汇总当前项目的待审批项，专家或子专家请求审批时无需进入会话即可直接处理。三模式切换位于始终可见的主 Header，不再只存在于首页内容；左侧历史按项目和既有自定义分组统一展示普通对话、专家协作与协作任务，并使用类型标签区分。一个协作任务树下的根 Leader 会话、阶段子任务会话和复唤醒会话都会折叠到同一条任务记录，不再混入普通/专家对话历史。原“新建对话”按钮已移除，用户通过全局模式切换返回普通对话首页，首次发送时按原有惰性逻辑创建会话。普通/专家会话保留移动分组、删除和打开能力；无 Run 历史的协作任务可以永久删除，已有 Run 历史的任务只能通过“取消任务”保留审计链路。由任务打开关联会话时，顶部固定提供“返回协作任务”，返回后恢复原任务的执行层。执行层把 `agentProfileId`、`modelProfileId` 映射为专家名称和“模型方案 · 实际模型”，评论作者、提及目标、工具、队列、计划审计与审批等常规界面也优先展示业务名称，不把内部 ID 作为主文案。
+- Console 的“协作任务”工作区分为任务、协作、执行三层：创建区默认只展示标题和 Agent/AgentTeam 负责人，任务说明与完成条件收在“更多设置”；任务层按当前状态展示可执行的人工动作和 Route Preview；协作层把任务建立、执行派发、专家协作、人工验收组织为阶段进度，并展示参与角色/关联执行/评论指标、评论与决策、中文语义协作动态。任务详情每 3 秒从同一响应同步评论、活动、Run 和状态，输入评论时暂停重绘以保留草稿。执行层在任务未完成时也展示“当前工作区产物”，明确其仍可能被后续阶段修改；`WAITING_AGENT` 显示为 Leader 等待子专家，不再与最终验收混淆。整页刷新会恢复上次查看的页面：普通/专家对话回到最后打开的 Session，协作任务回到选中的任务及其视图（任务/协作/执行层），仅在没有持久化记录时才落到中性首页；历史仍保留在左栏按需打开。主 Header 还会汇总当前项目的待审批项，专家或子专家请求审批时无需进入会话即可直接处理。三模式切换位于始终可见的主 Header，不再只存在于首页内容；左侧历史按项目和既有自定义分组统一展示普通对话、专家协作与协作任务，并使用类型标签区分。一个协作任务树下的根 Leader 会话、阶段子任务会话和复唤醒会话都会折叠到同一条任务记录，不再混入普通/专家对话历史。原“新建对话”按钮已移除，用户通过全局模式切换返回普通对话首页，首次发送时按原有惰性逻辑创建会话。普通/专家会话保留移动分组、删除和打开能力；无 Run 历史的协作任务可以永久删除，已有 Run 历史的任务只能通过“取消任务”保留审计链路。由任务打开关联会话时，顶部固定提供“返回协作任务”，返回后恢复原任务的执行层。执行层把 `agentProfileId`、`modelProfileId` 映射为专家名称和“模型方案 · 实际模型”，评论作者、提及目标、工具、队列、计划审计与审批等常规界面也优先展示业务名称，不把内部 ID 作为主文案。
 - 协作任务触发时不读取首页当前模型选择：单 Agent 使用该负责人，AgentTeam 使用路由选出的 Leader；负责人绑定模型优先，否则使用项目默认模型，项目未配置默认方案时使用服务端默认模型。团队子专家绑定模型时使用自己的模型，未绑定时继承父 Run。取消 Run 会自动拒绝其未决审批，启动恢复也会清理已终态 Run 遗留的 `PENDING` 审批，避免全局待审批计数滞留。`GET /v1/collaboration/tasks/{taskId}` 的 `runs[]` 同时返回 Agent/模型方案引用、模型方案名称和最近一次真实调用记录的 `modelName`，Console 因此可以展示最终执行者和实际模型；例如服务端默认最终路由到 Kimi 时显示 `kimi-k3`，而不是含糊的内部 ID。
 - 启动时会重新求值等待中的阶段屏障并补发缺失的 Leader Trigger；SQLite 短时写锁或单个历史屏障异常只记录警告并跳过该项，不会从 `ApplicationReadyEvent` 终止整个 Server。未完成项仍保留在持久化表中，可在后续运行或下次启动继续对账。
 

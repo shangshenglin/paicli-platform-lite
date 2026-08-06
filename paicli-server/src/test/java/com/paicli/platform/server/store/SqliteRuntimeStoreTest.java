@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37);
         }
     }
 
@@ -1095,6 +1095,81 @@ class SqliteRuntimeStoreTest {
         assertThat(delivery.channel()).isEqualTo(channel);
         productivity.finishNotification(delivery.id(), true, delivery.attempts(), null);
         assertThat(productivity.claimNotification()).isEmpty();
+    }
+
+    @Test
+    void savesAndBumpsWorkingPlanPerRun() throws Exception {
+        var store = store();
+        var session = store.createSession("working plan");
+        var run = store.createRun(session.id(), "multi step task");
+
+        assertThat(store.latestWorkingPlan(run.id())).isEmpty();
+
+        var first = store.saveWorkingPlan(run.id(), "fix the validator",
+                "[{\"id\":\"s1\",\"title\":\"inspect\",\"status\":\"IN_PROGRESS\"}]", "ACTIVE");
+        assertThat(first.revision()).isEqualTo(1);
+        assertThat(first.itemsJson()).contains("\"IN_PROGRESS\"");
+
+        var second = store.saveWorkingPlan(run.id(), "fix the validator",
+                "[{\"id\":\"s1\",\"title\":\"inspect\",\"status\":\"COMPLETED\"}]", "ACTIVE");
+        assertThat(second.revision()).isEqualTo(2);
+        assertThat(second.objective()).isEqualTo("fix the validator");
+
+        assertThat(store.latestWorkingPlan(run.id())).hasValueSatisfying(plan -> {
+            assertThat(plan.revision()).isEqualTo(2);
+            assertThat(plan.itemsJson()).contains("\"COMPLETED\"");
+        });
+
+        var otherSession = store.createSession("working plan other");
+        var other = store.createRun(otherSession.id(), "another");
+        assertThat(store.latestWorkingPlan(other.id())).isEmpty();
+    }
+
+    @Test
+    void savesAndLoadsLatestReflection() throws Exception {
+        var store = store();
+        var session = store.createSession("reflections");
+        var run = store.createRun(session.id(), "reflect");
+
+        assertThat(store.latestReflection(run.id())).isEmpty();
+
+        store.saveReflection(run.id(), "TOOL_ERROR", "read failed", "CHANGE_ARGUMENTS", "[]", "[\"tool-1\"]", "retry differently");
+        var latest = store.latestReflection(run.id()).orElseThrow();
+        assertThat(latest.failureClass()).isEqualTo("TOOL_ERROR");
+        assertThat(latest.decision()).isEqualTo("CHANGE_ARGUMENTS");
+        assertThat(latest.evidenceRefsJson()).contains("tool-1");
+
+        store.saveReflection(run.id(), "TEST_FAILURE", "test red", "CHANGE_APPROACH", "[]", "[]", "fix test");
+        assertThat(store.latestReflection(run.id())).hasValueSatisfying(value ->
+                assertThat(value.failureClass()).isEqualTo("TEST_FAILURE"));
+    }
+
+    @Test
+    void storesTaskDigestDeliverySnapshotAndRoutingSignals() throws Exception {
+        var store = store();
+        var session = store.createSession("digest");
+        var run = store.createRun(session.id(), "task");
+
+        assertThat(store.latestTaskDigest("task-x")).isEmpty();
+        store.saveTaskDigest("task-x", "{\"ok\":true}", "5");
+        assertThat(store.latestTaskDigest("task-x")).hasValueSatisfying(value -> {
+            assertThat(value.revision()).isEqualTo(1);
+            assertThat(value.lastActivityId()).isEqualTo("5");
+        });
+        store.saveTaskDigest("task-x", "{\"ok\":false}", "6");
+        assertThat(store.latestTaskDigest("task-x")).hasValueSatisfying(value ->
+                assertThat(value.revision()).isEqualTo(2));
+
+        store.saveDelivery("task-x", 1, 1, run.id(), "{\"stage\":1}", "hash-1", "DELIVERED");
+        assertThat(store.deliveriesForTask("task-x")).hasSize(1);
+        assertThat(store.deliveriesForTask("task-x").get(0).contentHash()).isEqualTo("hash-1");
+
+        store.saveAcceptedSnapshot("task-x", "{\"accepted\":true}");
+        assertThat(store.latestAcceptedSnapshot("task-x")).hasValueSatisfying(value ->
+                assertThat(value.snapshotJson()).contains("accepted"));
+
+        assertThat(store.agentPassRate("default", "ghost-agent")).isEqualTo(0.5);
+        assertThat(store.activeRunsForAgent("ghost-agent")).isEqualTo(0);
     }
 
     private SqliteRuntimeStore store() throws Exception {

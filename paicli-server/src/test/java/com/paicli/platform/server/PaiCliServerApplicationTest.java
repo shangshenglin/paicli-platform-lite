@@ -11,7 +11,8 @@ import org.springframework.test.annotation.DirtiesContext;
         "paicli.workspace-root=target/test-data/application-context/workspaces",
         "paicli.worker-count=1",
         "paicli.worker-poll-millis=1000",
-        "paicli.model.provider=demo"
+        "paicli.model.provider=demo",
+        "paicli.web.enabled=false"
 })
 @DirtiesContext
 class PaiCliServerApplicationTest {

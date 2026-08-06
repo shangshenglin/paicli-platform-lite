@@ -2,6 +2,9 @@ package com.paicli.platform.server.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.common.ToolCallStatus;
+import com.paicli.platform.common.ToolRequest;
+import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.approval.ApprovalService;
@@ -30,6 +33,7 @@ import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -106,14 +110,18 @@ class RunProcessorTest {
     }
 
     @Test
-    void persistsRunDefaultShellBeforeRequestingCommandApproval() throws Exception {
+    void persistsRunDefaultShellBeforeExecutingSafeCommandWithoutApproval() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
         SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
         store.initialize();
         ObjectMapper mapper = new ObjectMapper();
         LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
-        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AtomicReference<ToolRequest> executed = new AtomicReference<>();
+        ToolRouter router = new ToolRouter(request -> {
+            executed.set(request);
+            return ToolResult.success(request.toolCallId(), "ok", 1);
+        }, artifacts);
         AuditService audit = new AuditService(mapper, properties);
         ModelProperties modelProperties = modelProperties();
         ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
@@ -138,8 +146,9 @@ class RunProcessorTest {
 
         var call = store.toolCallsForRun(run.id()).get(0);
         assertThat(call.arguments()).contains("\"shell\":\"powershell\"");
-        assertThat(store.approvalsForRun(run.id())).singleElement()
-                .satisfies(approval -> assertThat(approval.toolCallId()).isEqualTo(call.id()));
+        assertThat(store.approvalsForRun(run.id())).isEmpty();
+        assertThat(executed.get()).isNotNull();
+        assertThat(executed.get().arguments()).containsEntry("shell", "powershell");
         assertThat(store.messages(session.id()).stream()
                 .filter(message -> "assistant".equals(message.role()))
                 .findFirst().orElseThrow().toolCallsJson()).contains("\"shell\":\"powershell\"");
@@ -177,9 +186,12 @@ class RunProcessorTest {
         var session = store.createSession("parallel");
         var run = store.createRun(session.id(), "inspect twice");
 
-        processor.process(store.claimNextRun().orElseThrow());
-        processor.process(store.claimNextRun().orElseThrow());
-        processor.process(store.claimNextRun().orElseThrow());
+        for (int i = 0; i < 6; i++) {
+            var next = store.claimNextRun();
+            if (next.isEmpty()) break;
+            processor.process(next.orElseThrow());
+            if (store.findRun(run.id()).orElseThrow().status().terminal()) break;
+        }
 
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.COMPLETED);
         assertThat(store.messages(session.id())).extracting("role")
@@ -329,6 +341,143 @@ class RunProcessorTest {
                 .map(message -> message.content()).toList())
                 .noneMatch(content -> content.contains("Execution stopped because this run reached its configured budget"));
         assertThat(store.events(run.id(), 0)).extracting("type").doesNotContain("run.budget_stopped");
+    }
+
+    @Test
+    void executesReadOnlyToolBatchInOnePassInModelOrder() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(request -> ToolResult.success(request.toolCallId(), "ok", 1));
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient batchModel = new ModelClient() {
+            int calls = 0;
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                calls++;
+                if (calls == 1) {
+                    return ModelResponse.tools(List.of(
+                            new ModelResponse.ToolPlan("c1", "list_dir", Map.of("path", ".")),
+                            new ModelResponse.ToolPlan("c2", "read_file", Map.of("path", "a.txt")),
+                            new ModelResponse.ToolPlan("c3", "read_file", Map.of("path", "b.txt"))));
+                }
+                return ModelResponse.text("done");
+            }
+            @Override public String name() { return "batch-model-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, batchModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
+                new RunVerificationService(store), new ReflectionService(store, mapper));
+        var session = store.createSession("batch");
+        var run = store.createRun(session.id(), "read several files");
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        var callsDone = store.toolCallsForRun(run.id());
+        assertThat(callsDone).hasSize(3);
+        assertThat(callsDone).allMatch(call -> call.status() == ToolCallStatus.COMPLETED);
+        assertThat(store.messages(session.id()).stream().filter(message -> "tool".equals(message.role()))
+                .map(message -> message.toolCallId()).toList())
+                .containsExactly("c1", "c2", "c3");
+
+        processor.process(store.claimNextRun().orElseThrow());
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.COMPLETED);
+    }
+
+    @Test
+    void repairsRunWhenFinalAnswerLacksMutationEvidenceThenFailsAfterLimit() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(request -> ToolResult.success(request.toolCallId(), "ok", 1));
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient model = new ModelClient() {
+            int calls = 0;
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                calls++;
+                if (calls == 1) {
+                    return ModelResponse.tool("c1", "write_file", Map.of("path", "x.txt", "content", "hello"));
+                }
+                return ModelResponse.text("done");
+            }
+            @Override public String name() { return "verify-model-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, model, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
+                new RunVerificationService(store), new ReflectionService(store, mapper));
+        var session = store.createSession("verify");
+        var run = store.createRun(session.id(), "change a file");
+
+        for (int i = 0; i < 12; i++) {
+            var next = store.claimNextRun();
+            if (next.isEmpty()) break;
+            processor.process(next.orElseThrow());
+            if (store.findRun(run.id()).orElseThrow().status().terminal()) break;
+        }
+
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.FAILED);
+        assertThat(store.findRun(run.id()).orElseThrow().error()).contains("repair limit");
+        assertThat(store.countRunEvents(run.id(), "run.verification")).isEqualTo(2);
+        assertThat(store.latestReflection(run.id())).hasValueSatisfying(value ->
+                assertThat(value.failureClass()).isEqualTo("VERIFICATION_FAILURE"));
+    }
+
+    @Test
+    void recordsReflectionWhenIdenticalToolCallLoopIsDetected() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(request -> ToolResult.success(request.toolCallId(), "ok", 1));
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient model = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                return ModelResponse.tool("c-loop", "list_dir", Map.of("path", "."));
+            }
+            @Override public String name() { return "loop-model-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, model, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
+                new RunVerificationService(store), new ReflectionService(store, mapper));
+        var session = store.createSession("loop");
+        var run = store.createRun(session.id(), "avoid loops");
+
+        for (int i = 0; i < 12; i++) {
+            var next = store.claimNextRun();
+            if (next.isEmpty()) break;
+            processor.process(next.orElseThrow());
+            if (store.findRun(run.id()).orElseThrow().status().terminal()) break;
+        }
+
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.FAILED);
+        assertThat(store.findRun(run.id()).orElseThrow().error()).contains("repeated tool call loop detected");
+        assertThat(store.latestReflection(run.id())).hasValueSatisfying(value ->
+                assertThat(value.failureClass()).isEqualTo("DUPLICATE_CALL"));
     }
 
     private static ModelProperties modelProperties() {

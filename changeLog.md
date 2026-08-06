@@ -2,6 +2,88 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-07
+
+### 联网工具默认可见
+
+- 变更：当 `paicli.web.enabled=true` 时，`web_search`、`web_fetch`、`github_repo_fetch` 直接加入普通会话的默认工具上下文，不再只依赖 `tool_search` 发现；禁用时仍完全不可见。`ToolCatalog.definitionsForContext` 从已注册的 Provider 定义中识别 Web 工具并加入“默认可见”集合，避免 `tool_search` 结果上限（12 条、按名称排序）把 `web_*` 挤掉导致模型“搜不到联网工具”。
+- 思路：联网是高频能力，启用后应默认可用；仍受 Server 侧 SSRF 防护（`NetworkPolicy` 阻止私有/内网目标）与 `web_fetch` 的公开 URL 校验约束。
+- 验证：新增 `ToolCatalogTest`（启用时 `web_search/web_fetch/github_repo_fetch` 默认可见，禁用时不可见）；`ContextManagerTest`、`RunProcessorTest` 回归通过；`PaiCliServerApplicationTest` 显式钉住 `paicli.web.enabled=false`，避免宿主环境开启 Web 但缺 `PAICLI_WEB_SEARCH_URL` 时 `WebProperties` 构造校验失败导致测试上下文无法启动。本次未修改数据库、REST API、Sandbox、配置或产品站，故迁移、OpenAPI、`docs/phases.md`、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用；README 联网说明已同步。
+
+### 中英文输出一致性强化与前端中文化
+
+- 变更：确认中英文混杂的成因——系统提示、Leader 提示与工具 Schema 描述里同时存在中英文，模型会镜像切换。现做三重加固：`prompts/base.md` 明确“用户中文时最终回答、步骤、列表、结论与代码说明一律中文（代码/命令/标识符/专有名词除外），不因提示或工具描述含英文而切换”；`ContextManager.languageDirective` 加强判定（无拉丁字母或中文占比更高即按中文，短指令如“继续”“好”也覆盖）并强化指令文案；`CollaborationService.runInput` 把英文 “Team completion gate…” 段改为中文。
+- 变更：前端展示固定中文——Run 审计页的 Harness 面板改为“执行计划（WorkingPlan）/失败反思（Reflection）/完成验证（Verification）”，记忆浏览入口与对话框标题改为中文（“记忆浏览”“长期记忆浏览”），其余 Console 文案本就是中文。
+- 思路：语言一致性是“输入语言决定输出语言”，而不是提示词语言；对中文用户应默认中文输出并显式抑制英文漂移，前端展示不混用英文标签。
+- 验证：`node --check app.js` 通过，`git diff --check` 通过，Server 编译通过；README 与两份面试文档的语言/前端描述已同步。本次未修改数据库、REST API、Sandbox、配置或产品站，故迁移、OpenAPI、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用。
+
+### 效率工作台展示精简：Artifact 默认收缩、移除长期记忆关系地图
+
+- 变更：效率工作台“Artifact 工作台”的列表与“长期记忆”“持久化审批策略”一致，改为默认收缩（标题与操作按钮保留在头部，列表折叠，可展开）。
+- 变更：移除“长期记忆”的关系地图（图谱）功能：删除“打开地图”入口、Wiki 对话框中的“关系地图/页面”视图切换与图谱渲染（前端），保留按页面浏览记忆的来源/关联/审计；“打开地图”按钮改为“记忆 Wiki”。后端 `/v1/memories/wiki` 页面接口保留。
+- 思路：工作台以信息密度优先，记忆/审批/Artifact 这类长列表默认折叠；关系图谱属于低频可视化，移除后保留可搜索、可浏览来源的 Wiki 页面视图，减少维护面。
+- 验证：`node --check paicli-server/src/main/resources/static/app.js` 通过，`git diff --check` 通过；已扫描确认 app.js 无 `renderMemoryWikiGraph`/`setMemoryWikiView` 等残留引用。本次未修改后端运行逻辑、数据库、REST API、Sandbox、配置或产品站，因此迁移、OpenAPI、Store 测试、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用；README 与两份面试文档中关于效率工作台的描述已同步。
+
+## 2026-08-06
+
+### Harness Loop v2 PR5–PR8：结构化专家交付、工作区冲突检测、任务摘要/交付清单与路由评分
+
+- 变更（PR5 结构化专家交付）：新增 `DelegationEnvelopeBuilder`（服务端统一构建委派信封：目标、范围、约束、允许文件/工具、输入 Artifact、done criteria、工作区模式、父证据引用）与 `AgentResultValidator`（无证据 `COMPLETED` 拒绝、测试通过声明必须有测试证据、`FAILED/BLOCKED` 必须给出错误）；`get_agent_result` 增加 `validation` 结论。普通 Expert 嵌套委派继续由既有 `enforceParentDelegationRole` 守卫（默认仅 LEADER 可委派）。
+- 变更（PR6 工作区写隔离）：新增 `WorkspaceMode`（SHARED_READONLY/SHARED_SERIAL/ISOLATED_WORKTREE）与 `WorkspaceMergeService`（并行子交付变更文件冲突检测）；`spawn_agent` 新增 `workspace_mode`，默认按角色映射（实现/文档→ISOLATED_WORKTREE，Runner→SHARED_SERIAL，探索/审查→SHARED_READONLY），写入委派信封。
+- 变更（PR7 任务摘要与交付清单）：迁移 37 新增 `collaboration_task_digests`、`collaboration_deliveries`、`collaboration_accepted_snapshots`。`TaskDigestService` 构建并持久化任务摘要（目标、状态、阶段、阻塞、最近人工指令、增量活动、交付），Leader 复唤醒输入自动注入 `<task_digest>`；`DeliveryManifestService` 在阶段交付（IN_REVIEW）时记录清单（变更文件、Artifact、测试证据、内容哈希），人工 `ACCEPT` 时生成不可变验收快照；返工聚焦失败阶段由摘要携带。
+- 变更（PR8 路由/评测/前端）：`CollaborationRoutingService` 综合评分（能力匹配为主 + 历史验证通过率 + 当前活跃负载），候选携带 `score`；官方评测集新增“官方·08 Harness Loop”（简单问答无多余循环、无证据不得宣称完成、测试失败不得虚假通过、重复工具调用被阻止、只读批次顺序稳定、子 Agent 摘要隔离、写冲突检测、人工验收门禁）；`GET /runs/{runId}/audit` 增加 workingPlan/reflection/verifications，Run 审计页展示 Harness 状态面板；效率工作台“长期记忆地图”与“持久化审批策略”列表默认收缩。
+- 思路：专家协作的核心是“信封-结果协议”而不是信任自由文本；写隔离与冲突检测让并行写可安全合并；任务摘要与交付清单让复唤醒与返工不必重读全量历史；路由评分把“做过且做得好”和“当前不忙”变成可量化信号；评测把 Harness 行为固化为可回归的产品能力。
+- 验证：新增 `DelegationProtocolTest`（信封、结果验证、冲突检测、角色→工作区映射）、`TaskDigestManifestTest`（摘要/清单/快照）、`SqliteRuntimeStoreTest`（迁移 37 CRUD 与路由信号查询）、更新 `EvaluationStarterPackServiceTest`（官方·08 Harness Loop，版本 1.3.0）。使用已缓存 Maven 3.9.9 执行 Server 全量测试 208 项全部通过，`node --check app.js` 与 `git diff --check` 通过。本次修改数据库 Schema（迁移 37）、委派信封/结果协议、路由评分、评测集、Run 审计 API 与 Console 展示，因此 README 运行/架构说明、`docs/architecture.md`、`docs/phases.md` 与两份面试文档已同步；未修改 Sandbox、配置项、启动方式或产品站，故 `docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用。
+
+### Harness Loop v2 PR2–PR4：完成验证、失败反思与只读工具批次
+
+- 变更（PR2 CompletionVerifier）：新增 `RunVerificationService`。模型给出最终答案时不再只检查“非空”：若 Run 执行过写操作但工作区没有文件变化，或执行过测试命令但最后一次测试失败，判定 `REPAIRABLE`；`RunProcessor` 把验证结果作为 `run.verification` Event + `<verification>` 用户消息注入下一轮并重新排队，连续超过 2 次仍无法通过才 `FAILED` 并记录 `VERIFICATION_FAILURE` 反思。普通问答（TEXT_ONLY）行为不变，空回答仍直接失败。
+- 变更（PR3 Reflection）：新增 `ReflectionService` 与迁移 36 `run_reflections`（结构化失败分类、诊断、决策、plan patch、证据引用、下一步，不含隐藏思维链）。测试/工具失败自动记录 `TEST_FAILURE`/`TOOL_ERROR` 反思；重复相同工具+参数超过 `maxIdenticalToolCallsPerRun` 时记录 `DUPLICATE_CALL` 反思后停止 Run；`ContextManager` 每轮注入最新 `<reflection>` 块，Worker 重启后可恢复修复流程。
+- 变更（PR4 只读工具批次）：`RunProcessor` 把同一模型响应中连续的只读 ToolCall（不要求审批）在单次领取中并行执行（最多 4 并发），按模型原始顺序提交 Tool Message；写工具/审批工具仍是屏障，顺序逐个执行。`commitToolOutcome` 增加无 Run 状态守卫的 `commitToolMessage` 配套，批处理结束后统一重新排队一次，步骤计数语义不变。
+- 变更：`prompts/agent.md` 明确允许一次响应调用多个彼此独立的只读工具（PR1 已写入），写/命令/外部副作用工具仍逐个调用。
+- 思路：完成判断从“Final Answer ≠ 自动完成”推进为“Final Answer + Completion Policy 验证通过 = 完成”；失败才触发反思，避免每轮额外模型调用；只读工具在“同轮原子持久化”基础上并行执行，减少队列轮次且保持上下文顺序稳定。全部保持既有持久化、幂等、Approval、SSE 恢复与普通聊天向后兼容契约。
+- 验证：新增 `RunProcessorTest` 三个用例（只读批次单次领取全部完成且顺序稳定、无证据完成进入 repair 并超限失败、重复工具调用记录 DUPLICATE_CALL 反思）、`SqliteRuntimeStoreTest.savesAndLoadsLatestReflection`、`ContextManagerTest.injectsLatestReflectionIntoContext`；更新迁移版本断言到 36。使用已缓存 Maven 3.9.9 执行 Server 全量测试 199 项全部通过，`git diff --check` 通过。本次修改数据库 Schema（迁移 36）、RunProcessor 完成/执行路径、上下文组装与系统提示，因此 README 运行/架构说明、`docs/architecture.md`、`docs/phases.md` 已同步；未修改 REST API、Sandbox、配置项、启动方式或产品站，故 OpenAPI、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用。
+
+### Harness Loop v2 PR1：轻量 WorkingPlan、语言一致性与刷新恢复
+
+- 变更：新增迁移 35 `run_working_plans`（每 Run 单行、revision 自增，随 Run 归档）。新增 `WorkingPlanService`、`WorkingPlanToolProvider` 与 `update_working_plan` 工具：主 Agent 维护 objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目（`evidenceRefs` 可选），服务端校验 objective/items/status 并做确定性 upsert；工具效果为 `IDEMPOTENT_WRITE`，不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。
+- 变更：`ContextManager` 每轮只注入最新修订的 `<working_plan>` 块（计入上下文预算），不注入全部历史；`ToolCatalog` 把 `update_working_plan` 加入核心上下文工具，简单问答不自动产生计划，专家 Profile 可通过 `tool_search` 激活。
+- 变更：语言一致性。`prompts/base.md` 不再固定用中文作答，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答），协作任务复唤醒的 Leader Run 同样遵守。
+- 变更：`prompts/agent.md` 允许一次响应调用多个彼此独立的只读工具（写/命令/外部副作用仍逐个调用），并提示复杂多步任务使用 `update_working_plan` 维护轻量清单。
+- 变更：Console 整页刷新恢复上次查看的页面（最后打开的 Session、选中的协作任务及其视图），不再固定回到中性首页；删除选中任务时同步清理持久化选择。
+- 思路：Harness Loop v2 方案把 Plan 拆成“WorkingPlan（Run 内轻量清单）”与“Formal Plan（严格 DAG）”两层；本 PR 只落地第一层与两个交互问题，CompletionVerifier、Reflection/Replan、只读工具批次并行、DelegationEnvelope/AgentResult、Worktree 写隔离、TaskDigest/DeliveryManifest 与路由综合评分（PR2–PR8）按方案后续分批实现，不引入 LangGraph/Spring AI Graph 或新工作流框架。
+- 验证：新增 `WorkingPlanTest`（service 创建/修订/校验、provider 工具调用）、`SqliteRuntimeStoreTest.savesAndBumpsWorkingPlanPerRun`、`ContextManagerTest` 的 WorkingPlan 注入与语言指令断言；更新迁移版本断言到 35。使用已缓存 Maven 3.9.9 执行 Server 全量测试 194 项全部通过，`node --check paicli-server/src/main/resources/static/app.js` 通过，`git diff --check` 通过。本次修改数据库 Schema（迁移 35）、上下文组装、系统提示与 Console 行为，因此 README 运行/架构说明、`docs/architecture.md`、`docs/phases.md` 已同步；未修改 REST API、Sandbox、配置项、启动方式或产品站，故 OpenAPI、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用。
+
+### 协作评论送达活跃 Run、返工理由进入执行指令
+
+- 变更：用户评论/显式提及的目标已有活跃 Run 时，不再只是持久化后静默丢弃：`CollaborationService.comment` 会把评论内容作为 user 消息注入该目标（Agent 或 Team Leader）全部活跃 Run 的会话，运行中的专家在下一模型轮次即可读取并回应；没有活跃 Run 时才创建幂等 `MENTION` Trigger 派发新 Run。
+- 变更：`REQUEST_REWORK` 等人工指令的理由本就写入新 Run 的 `instruction`（已在运行输入可见），本次进一步在 Team Leader 提示词中明确：用户追加的评论或返工理由必须原样写进 Leader 派发的阶段子任务 `description/acceptance_criteria`，让执行专家直接看到，避免“只重新触发、执行专家看不到返工原因”的重复执行观感。
+- 思路：既有“目标已有活跃 Run 时不并发创建第二个 Run”的设计只保证了评论持久化，但运行中的 Run 上下文已固定，新评论永远不会被模型看到，导致“追加评论无效果”；返工则因 Leader 是唯一执行入口、阶段描述由 Leader 生成而可能丢失原因。修复把评论送入活跃会话，并把原因传递固化为提示词约束。
+- 验证：新增 `CollaborationServiceTest.userCommentIsDeliveredIntoActiveRunSessionInsteadOfDropped`（活跃 Run 时评论注入会话、不创建 Trigger）与 `requestReworkCarriesReasonIntoTriggerInstruction`（REQUEST_REWORK 理由进入 Trigger instruction）；依据真实数据审计 `task_f92640a989224db3` 01:09 用户评论（评论持久化但无 Trigger、Leader 在 01:13 未读评论即发布结论）与 01:17 REQUEST_REWORK（理由已进入 `run_53295d7373e6487b` 输入并被模型引用）。使用已缓存 Maven 3.9.9 执行 Server 全量测试 188 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、配置项、Sandbox、启动方式、阶段范围或产品站，因此迁移、Store 测试、`docs/phases.md`、`docs/docker-sandbox.md`、README 配置/运行说明和 `paicli-site/README.md` 不适用；README 协作评论语义、`docs/architecture.md` 协作生命周期章节与 OpenAPI 评论接口说明已同步更新。
+
+### 协作阶段状态一致性修复：Leader 续跑、屏障补唤醒、审批拒绝与整体取消收敛
+
+- 变更：Team Leader 提示词不再要求“派发后停止等待唤醒”，改为明确“派发后本 Run 会等待该子 Run；子 Run 终态后同一 Run 自动恢复，恢复回合必须读取阶段交付证据，派发下一必需阶段或发布最终结论”，并把 completion gate 文案与“原地恢复 / 阶段屏障唤醒新 Run”两种唤醒方式对齐，避免模型按旧提示词在恢复回合空转结束。
+- 变更：Leader Run 终态且未发布结论时，`onRunTerminal` 不再立即 `BLOCKED`，而是先扫描该任务下“已完成但没有 `STAGE_BARRIER` Trigger”的 StageBarrier 并补发一次幂等唤醒（每个阶段屏障最多补一次，受固定幂等键约束；`triggerLeaderForCompletedStage` 改为返回是否真正创建唤醒），只有没有任何可唤醒屏障时才保留 `BLOCKED` 兜底。
+- 变更：审批拒绝路径不再绕过协作生命周期。`ApprovalService.resolve` 拒绝后除 failTool/failRun 外，补充 `RUN_FAILED` memory outcome，并调用 `collaboration.onRunTerminal(run, "FAILED")`，使阶段子任务/根任务状态与 Run 终态收敛，修复“阶段 Run 已失败但阶段任务仍 `IN_PROGRESS`、根任务却已 `BLOCKED`/结束”的不一致。
+- 变更：整体取消协作任务时，`humanAction CANCEL` 在取消活跃 Run 后，把仍处于 `BACKLOG/TODO/IN_PROGRESS` 的后代阶段任务一并置为 `CANCELED`，避免根任务已取消而子树仍显示“执行中”；已交付(`IN_REVIEW`)、失败(`BLOCKED`)、完成(`DONE`) 的阶段保留证据不改动。
+- 思路：根因是协作生命周期只由 `RunProcessor` 的 COMPLETED/FAILED notify 驱动，而审批拒绝与 Run 取消两条终态路径绕过了该钩子；同时 Leader 提示词与“同一 Run 原地恢复”的运行时语义矛盾——模型按旧提示词“停止等屏障唤醒”，屏障唤醒又被活跃 Run 守卫抑制，最终只能靠人工 RESUME。修复把三条路径统一为“Run 终态即收敛协作状态、Leader 终态无结论时先补一次屏障唤醒再兜底 BLOCK”。
+- 验证：新增 `CollaborationServiceTest.teamRootWakesLeaderForSkippedStageBarrierInsteadOfBlocking`（Leader Run 终态、屏障 `COMPLETED` 且无 Trigger 时创建 `STAGE_BARRIER` 唤醒且不再 BLOCK）、`cancelingRootTaskMarksActiveStageSubtasksCanceled`（整体取消传播到活跃阶段任务）、`ApprovalFlowTest.deniedApprovalNotifiesCollaborationTerminalLifecycle`（审批拒绝后调用协作终态钩子）；并依据真实数据审计 `task_684893236d13410a`（象棋：Stage 2 审批被拒后阶段任务滞留 `IN_PROGRESS`、根任务取消后子树仍显示执行中）与 `task_f92640a989224db3`（别踩白块：每阶段完成后根任务 `BLOCKED`、全程无 `STAGE_BARRIER` 触发）。使用已缓存 Maven 3.9.9 执行 Server 全量测试 186 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、REST API、Sandbox、配置项、启动方式、阶段范围或产品站，因此迁移、OpenAPI、`docs/phases.md`、`docs/docker-sandbox.md`、README 配置/运行说明和 `paicli-site/README.md` 不适用；README 协作任务状态语义与 `docs/architecture.md` 协作生命周期章节已同步更新。
+
+### 命令按参数风险审批
+
+- 变更：`execute_command` 不再按工具名一刀切强制审批。ToolCall 仍先原子持久化，随后使用已落库的 `command` 做确定性风险分类；读取、搜索、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署命令创建持久化 Approval。空命令或无法解析参数时保持安全失败并要求审批。
+- 变更：MCP 和 Provider 显式声明的危险工具继续强制审批；批准后仍复用原 ToolCall 和原参数。服务初始化会重新分类历史未决命令，安全命令自动批准并重新排队，危险命令保持等待，避免升级后现有专家继续卡在旧的一刀切审批。工具 Schema 文案同步取消 `write_file` 的错误“总是审批”说明，并明确命令级审批范围。
+- 思路：审批应保护危险副作用，而不是阻塞每一次测试和只读命令；但风险判断必须基于已经持久化的最终参数，不能在模型生成前猜测，也不能在批准后重新生成。Sandbox 的 workspace、Shell、环境、网络、资源和取消边界继续作为独立防线。
+- 验证：新增风险分类测试覆盖 PowerShell/Bash 删除、进程终止、破坏性 Git、Docker 清理、下载执行和数据库删除，并断言目录读取、Node/Maven/NPM 测试及 Git diff 无需审批；`RunProcessorTest` 验证安全命令补齐持久化默认 Shell 后直接执行且不创建 Approval，`ApprovalFlowTest` 验证危险删除命令等待审批、策略复用、仅执行一次，以及历史安全命令自动批准重排队而危险命令保持等待。首轮使用本机 Maven 3.9.9 执行三组定向测试共 12 项全部通过；增加恢复用例后再次执行审批相关回归。本次未修改数据库 Schema、REST API、配置项、阶段范围或产品站，故迁移、OpenAPI、`docs/phases.md` 和 `paicli-site/README.md` 不适用。
+
+### Docker 重启重复测试与运行中 JAR 锁修复
+
+- 变更：`start-docker.ps1` 增加与本地启动一致的 PaiCLI 进程识别和 `-Restart` 语义。8080 已有 PaiCLI 时默认幂等返回；显式重启会先停止旧进程，再以 `-DskipTests` 重建 Server 和 Sandbox，避免运行中的 Server JAR 被 Windows 锁定。
+- 变更：`build-sandbox.ps1` 改为只构建 `paicli-common` 与 `paicli-sandbox-agent`，不再因构建 Sandbox 顺带执行 Server 的 180 项测试和 Spring Boot 重打包；默认跳过测试，只有显式传入 `-RunTests` 才运行相关模块测试。
+- 思路：服务重启是运维动作，不应隐式等同完整质量门禁；旧实现的全 Reactor `mvn package` 既造成每次启动耗时约两分钟，又会尝试改名正被 Java 进程使用的 Server JAR。启动脚本负责安全停止、快速构建和启动，完整测试继续由 `mvnw.cmd clean test` 显式执行。
+- 验证：两个 PowerShell 脚本均通过 Parser 语法检查；对当前 8080 服务执行无 `-Restart` 的 Docker 启动脚本，正确识别 PaiCLI PID 38224 后立即返回，没有触发 Maven 或停止服务；`git diff --check` 通过。附件中的原始完整构建最终为 Server 180 项、Sandbox 3 项测试全部通过、`BUILD SUCCESS`，并于 2026-08-06 00:01:40 成功启动。当前受限工具终端尝试定向构建时，Maven Wrapper 触发既有 `$HOME/.m2` 空数组错误，直接 Maven 又因沙箱网络权限无法解析父 POM，因此未重复下载依赖或中断当前服务。本次未修改数据库、REST API、Runtime 架构、阶段范围、配置项或产品站，故迁移、OpenAPI、`docs/architecture.md`、`docs/phases.md` 和 `paicli-site/README.md` 不适用。
+
 ## 2026-08-05
 
 ### 子专家 reasoning 空终止、旧工具集与重复阶段派发修复

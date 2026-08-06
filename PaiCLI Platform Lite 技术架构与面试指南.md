@@ -2807,3 +2807,58 @@ SSE delta 先进入批量缓冲，按批次写入 Event/Message，避免每个 t
 ### Q50：该项目当前最大的后端边界是什么？
 
 它是单机单租户 Lite 方案，SQLite 单写者、进程内限流和线程池、Docker 共享宿主内核都限定了容量与隔离强度。升级时优先保持 Run/ToolCall/Approval 的状态与幂等契约，依次替换为 PostgreSQL + Flyway、Outbox + 持久化队列、对象存储、分布式限流和远程隔离 Sandbox，再引入多租户与跨区域能力。
+
+---
+
+## Harness Loop v2：从“能跑”到“能验证、能反思、能并发的专家执行”
+
+> 这部分是对前面各章的增量补充，覆盖轻量 WorkingPlan、完成验证（CompletionVerifier）、失败反思（Reflection）、只读工具批次并行、结构化专家交付协议、工作区写隔离与冲突检测、任务摘要/交付清单/验收快照，以及路由综合评分与 Harness 专项评测。面试时可以作为“最近一轮迭代做了什么”来展开。
+
+### A. 核心思路：不把 Agent Loop 变成固定五节点流水线
+
+方案拒绝了 `Plan → Act → Observe → Evaluate → Reflect` 每一步都单独调一次模型的固定管线。真实做法是：
+
+```text
+模型负责：Plan + Act + 根据反馈调整策略
+Harness 负责：Observe + Evaluate + 状态持久化 + 安全边界
+失败时才触发：Reflect + Replan
+```
+
+- **Plan 变成可更新工作清单（WorkingPlan）**：普通 Run 内用 `update_working_plan` 维护目标 + TODO/IN_PROGRESS/COMPLETED 条目，每 Run 单行、revision 自增，随 Run 归档；`ContextManager` 每轮只注入最新修订。它不是 Formal Plan，不创建 PlanStep、不经过 PlanWorker、无 DAG。
+- **Observe 变成标准化证据**：工具结果按模型原始顺序写 Message；大结果外置 Artifact，上下文只留摘要与引用。
+- **Evaluate 放到 Harness（CompletionVerifier）**：最终答案非空不再等于完成。写操作无工作区变化、或测试命令失败时判定 `REPAIRABLE`，把验证结果注入下一轮重新排队；连续 2 次仍不过才 `FAILED`。普通问答行为不变。
+- **Reflect 限定为失败恢复（Reflection）**：测试/工具失败、重复相同工具+参数超限、验证不过时，持久化结构化失败分类与决策（`run_reflections`，不含隐藏思维链），每轮注入最新 `<reflection>`，Worker 重启可恢复。
+- **Act 支持安全批量**：同一响应中连续、无需审批的只读 ToolCall 单次领取并行执行（≤4 并发），按模型顺序写 Message；写工具与审批工具保持顺序屏障。
+- **语言一致性**：输入语言决定输出语言。系统提示明确“用户中文时全程中文（代码/命令/标识符/专有名词除外）”，`ContextManager` 按用户消息中/英占比注入 `<language>` 指令（中文问中文答、英文问英文答），协作任务复唤醒的 Leader 同样遵守；前端展示固定为中文。
+
+面试可以这样讲：*“完成不是模型说了算，是 Harness 用证据说了算；反思只在失败时触发，避免为每一轮额外付出模型调用；只读工具在‘同轮原子持久化’的基础上并行，减少队列轮次且顺序稳定。”*
+
+### B. 专家交付协议（PR5）
+
+- `DelegationEnvelopeBuilder`：服务端统一构建委派信封（目标、范围、约束、允许文件/工具、输入 Artifact、done criteria、工作区模式、父证据引用），不再完全信任 Leader 拼接的字符串。
+- `AgentResultValidator`：无证据 `COMPLETED` 被拒绝；声称测试通过但没有测试证据被拒绝；`FAILED/BLOCKED` 必须给出错误。`get_agent_result` 返回 `validation` 结论。
+- 普通 Expert 默认禁止嵌套委派（仅 LEADER 或显式策略允许），父 Agent 只接收约 4000 字符摘要与引用，不接收子 Agent 完整聊天日志——这与 Claude Subagent 的上下文隔离一致。
+
+### C. 工作区写隔离与冲突检测（PR6）
+
+- `WorkspaceMode`：SHARED_READONLY / SHARED_SERIAL / ISOLATED_WORKTREE，按角色默认映射（实现/文档→隔离工作树，Runner→串行共享，探索/审查→只读共享）。
+- `WorkspaceMergeService`：并行子交付各自报告变更文件，重叠路径被检测为冲突；冲突必须先仲裁或串行合并，未合并变更不能由 Leader 直接宣称为最终交付。
+
+### D. 任务摘要、交付清单与验收快照（PR7）
+
+- 迁移 37 新增 `collaboration_task_digests`、`collaboration_deliveries`、`collaboration_accepted_snapshots`。
+- `TaskDigestService`：Leader 每次复唤醒只注入任务摘要（目标、状态、阶段、阻塞、最近人工指令、增量活动、交付），不再重读全量历史。
+- `DeliveryManifestService`：阶段交付时记录清单（变更文件、Artifact、测试证据、内容哈希）；人工 `ACCEPT` 时生成不可变验收快照，避免“验收的内容”与“当前工作区”漂移。
+- 返工聚焦失败阶段：摘要携带失败阶段与交付清单，Leader 只重开受影响阶段，保留已验证阶段。
+
+### E. 路由综合评分与 Harness 评测（PR8）
+
+- `CollaborationRoutingService` 在能力关键词匹配之外，引入历史验证通过率（`agent_feedback`）与当前活跃负载（非终态 Run 数）作为综合评分信号，候选携带 `score`。
+- 官方评测集新增“官方·08 Harness Loop”：简单问答不产生额外循环、无证据不得宣称完成、测试失败不得虚假通过、重复工具调用被阻止、只读批次顺序稳定、子 Agent 摘要隔离、写冲突检测、人工验收前不显示最终完成。
+- Run 审计页展示 WorkingPlan / 失败反思 / 完成验证；效率工作台“长期记忆”“持久化审批策略”“Artifact 工作台”默认收缩，减少每次打开工作台的信息噪音；长期记忆移除关系地图（图谱）视图，保留可搜索、可浏览来源的 Wiki 页面。
+
+### F. 可对面试官强调的三个权衡
+
+1. **验证成本**：CompletionVerifier 用确定性规则（工作区文件变化、测试命令结果）而不是关键词重叠判断完成，避免“回答里出现相关词就算完成”；代价是写任务必须真的产生证据。
+2. **反思成本**：反思只由失败触发，且先用确定性规则分类（TEST_FAILURE/TOOL_ERROR/DUPLICATE_CALL/VERIFICATION_FAILURE），避免每轮多一次模型调用。
+3. **并行安全**：只读并行 + 写串行 + 审批屏障 + 工作区冲突检测，让“更快”不牺牲“可恢复、可审计、不互相覆盖”。

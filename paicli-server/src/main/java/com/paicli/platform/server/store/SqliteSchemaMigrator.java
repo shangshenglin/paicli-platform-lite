@@ -43,7 +43,10 @@ final class SqliteSchemaMigrator {
             new Migration(31, "effective agent team concurrency on collaboration run trees"),
             new Migration(32, "close pending approvals left by terminal runs"),
             new Migration(33, "reconcile review tasks with active run trees"),
-            new Migration(34, "task scoped collaboration workspaces and delivery evidence gate")
+            new Migration(34, "task scoped collaboration workspaces and delivery evidence gate"),
+            new Migration(35, "lightweight per-run working plan"),
+            new Migration(36, "durable run reflections"),
+            new Migration(37, "collaboration digests deliveries and accept snapshots")
     );
 
     private SqliteSchemaMigrator() { }
