@@ -511,6 +511,23 @@ class CollaborationServiceTest {
                 eq("TEAM"), eq("team-a"), argThat(payload -> payload.contains("请重新修复登录页")), any());
     }
 
+    @Test
+    void startupDoesNotWakeLeaderForCompletedBarrierWhenTaskIsInReview() {
+        Instant now = Instant.parse("2026-08-04T00:00:00Z");
+        var root = task("IN_REVIEW", "TEAM", "team-a");
+        var barrier = new CollaborationStore.StageBarrier(root.id(), 1, "COMPLETED", now, now);
+        when(collaboration.waitingStageBarriers()).thenReturn(List.of());
+        when(collaboration.completedStageBarriersWithoutTrigger()).thenReturn(List.of(barrier));
+        when(collaboration.task(root.id())).thenReturn(Optional.of(root));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.taskTreeRuns(root.id())).thenReturn(List.of());
+
+        service.reconcileWaitingStageBarriers();
+
+        verify(collaboration, org.mockito.Mockito.never()).createOrGetTrigger(
+                any(), any(), any(), any(), any(), any(), any());
+    }
+
     private static CollaborationStore.CollaborationTask task(String status, String assigneeType,
                                                                String assigneeId) {
         Instant now = Instant.parse("2026-08-02T00:00:00Z");

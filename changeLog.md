@@ -4,6 +4,12 @@
 
 ## 2026-08-07
 
+### 修复：已进入人工验收（IN_REVIEW）的协作任务重启后不再被阶段屏障重新唤醒
+
+- 变更：`CollaborationService.triggerLeaderForCompletedStage` 的“不可再自动唤醒”守卫由 `DONE/CANCELED` 扩展为 `IN_REVIEW/DONE/CANCELED`。根因是早前阶段完成时 Leader Run 仍活跃导致 `STAGE_BARRIER` 唤醒被跳过、屏障遗留为“COMPLETED 但无 Trigger”；服务重启后 `reconcileWaitingStageBarriers` 把它当作漏掉的唤醒补发，把已交付待人工验收（IN_REVIEW）的任务又置回 IN_PROGRESS 并新建 Leader Run。
+- 思路：IN_REVIEW 表示全部 Run 终态 + Leader 已结论 + 等人工 ACCEPT，历史阶段屏障不应触发重启执行；人工返工应走 `REQUEST_REWORK`（HUMAN_ACTION）路径。此守卫同时作用于启动对账的 `waitingStageBarriers` 与 `completedStageBarriersWithoutTrigger` 两条路径。
+- 验证：新增 `CollaborationServiceTest.startupDoesNotWakeLeaderForCompletedBarrierWhenTaskIsInReview`（父任务 IN_REVIEW + COMPLETED 无 Trigger 屏障时不创建唤醒）；依据真实数据审计 `task_f92640a989224db3`（重启后 17:31:43 生成 STAGE_BARRIER stage3 Trigger 并新建 `run_fa14b7d1f182469d`，任务被改回 IN_PROGRESS）。Server 全量测试 211 项全部通过，`git diff --check` 通过。本次未修改数据库、REST API、Sandbox、配置或产品站，故迁移、OpenAPI、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用；README 协作任务状态语义已同步。
+
 ### 联网工具默认可见
 
 - 变更：当 `paicli.web.enabled=true` 时，`web_search`、`web_fetch`、`github_repo_fetch` 直接加入普通会话的默认工具上下文，不再只依赖 `tool_search` 发现；禁用时仍完全不可见。`ToolCatalog.definitionsForContext` 从已注册的 Provider 定义中识别 Web 工具并加入“默认可见”集合，避免 `tool_search` 结果上限（12 条、按名称排序）把 `web_*` 挤掉导致模型“搜不到联网工具”。

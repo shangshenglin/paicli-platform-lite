@@ -543,7 +543,7 @@ SQLite `schema_migrations` 当前记录版本 1–35：版本 1–27 覆盖基�
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
-- 阶段子 Run 成功结束后，平台必须通过 `persistStatus` 完成对应 `StageBarrier`，再以幂等 `STAGE_BARRIER` Trigger 唤醒 Leader。Leader 派发阶段后同一 Run 原地等待该子 Run，子 Run 终态后原地恢复并继续推进；若 Leader Run 在未发布结论时提前终态，平台会先对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次唤醒（每个阶段最多一次），只有无法唤醒时才置 `BLOCKED`。Leader 的唤醒输入要求读取阶段交付证据，继续派发后续阶段或发布根任务结论；服务启动会补偿旧版本遗留的 `WAITING` Barrier，以及已完成但尚未持久化 Leader Trigger 的 Barrier。
+- 阶段子 Run 成功结束后，平台必须通过 `persistStatus` 完成对应 `StageBarrier`，再以幂等 `STAGE_BARRIER` Trigger 唤醒 Leader。Leader 派发阶段后同一 Run 原地等待该子 Run，子 Run 终态后原地恢复并继续推进；若 Leader Run 在未发布结论时提前终态，平台会先对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次唤醒（每个阶段最多一次），只有无法唤醒时才置 `BLOCKED`；任务已进入 `IN_REVIEW`（人工验收）时不再补发唤醒，避免重启对账把已交付任务重新置回执行。Leader 的唤醒输入要求读取阶段交付证据，继续派发后续阶段或发布根任务结论；服务启动会补偿旧版本遗留的 `WAITING` Barrier，以及已完成但尚未持久化 Leader Trigger 的 Barrier。
 - Team 根任务不能仅凭所有关联 Run 终态进入 `IN_REVIEW`：至少要有一个已交付的阶段，并且 Team Leader 必须在最后一个阶段交付之后发布结论评论。Leader Run 提前结束且无结论时，平台先补发阶段屏障唤醒；仍无进展才保持 `BLOCKED`，不会把未汇总的阶段成果错误交给人工验收。
 - 根协作任务是左侧列表与历史中的唯一任务记录。由 Leader 创建的阶段 1、阶段 2 等任务必须带有 `parentId`，只在根任务的“子任务与阶段”区域显示，不能作为独立任务出现。
 - Agent 只能报告 `IN_PROGRESS` 或 `BLOCKED`。阶段子 Run 结束后由平台标为已交付并等待 Leader 汇总；根任务及其全部阶段 Run 都已终态后，平台才可将根任务置为 `IN_REVIEW`，随后由人工 `ACCEPT` 完成最终验收。

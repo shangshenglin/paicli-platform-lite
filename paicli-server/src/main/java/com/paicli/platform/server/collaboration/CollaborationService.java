@@ -489,7 +489,7 @@ public class CollaborationService {
 
     private boolean triggerLeaderForCompletedStage(CollaborationStore.StageBarrier barrier) {
         CollaborationStore.CollaborationTask parent = collaboration.task(barrier.parentTaskId()).orElse(null);
-        if (parent == null || List.of("DONE", "CANCELED").contains(parent.status())
+        if (parent == null || List.of("IN_REVIEW", "DONE", "CANCELED").contains(parent.status())
                 || "HUMAN".equals(parent.assigneeType()) || blank(parent.assigneeId())) return false;
         CollaborationStore.MentionTarget target = new CollaborationStore.MentionTarget(
                 parent.assigneeType(), parent.assigneeId());
