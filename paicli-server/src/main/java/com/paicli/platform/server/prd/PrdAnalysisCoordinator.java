@@ -29,11 +29,12 @@ public class PrdAnalysisCoordinator {
     private final PrdAnalysisValidator validator;
     private final PrdAnalysisRenderer renderer;
     private final PrdAnalysisSkillCatalog skills;
+    private final PrdAnalysisMetrics metrics;
 
     public PrdAnalysisCoordinator(PrdAnalysisStore store, SqliteRuntimeStore runtime,
                                   ProductivityStore productivity, PrdSourceIngestionService ingestion,
                                   PrdAnalysisValidator validator, PrdAnalysisRenderer renderer,
-                                  PrdAnalysisSkillCatalog skills) {
+                                  PrdAnalysisSkillCatalog skills, PrdAnalysisMetrics metrics) {
         this.store = store;
         this.runtime = runtime;
         this.productivity = productivity;
@@ -41,6 +42,7 @@ public class PrdAnalysisCoordinator {
         this.validator = validator;
         this.renderer = renderer;
         this.skills = skills;
+        this.metrics = metrics;
     }
 
     /** Advances the task by one deterministic step. Safe to call repeatedly. */
@@ -59,9 +61,11 @@ public class PrdAnalysisCoordinator {
                 case "PACKAGING" -> packaging(task);
                 default -> { }
             }
+            recordTerminalOutcome(taskId);
         } catch (Exception e) {
             log.warn("PRD advance failed for task {}: {}", taskId, e.getMessage());
             store.markTaskFailed(taskId, "advance failed: " + message(e));
+            if (metrics != null) metrics.taskFailed();
         }
     }
 
@@ -173,6 +177,7 @@ public class PrdAnalysisCoordinator {
 
     private void handleNodeFailure(PrdAnalysisStore.PrdTask task, PrdAnalysisStore.PrdNode node,
                                    PrdAnalysisStore.PrdRunBinding binding) {
+        if (metrics != null) metrics.nodeFailed();
         if (binding.attempt() >= MAX_NODE_RETRY) {
             store.markTaskFailed(task.id(), "node " + node.clientKey() + " failed after max retries");
         }
@@ -299,6 +304,18 @@ public class PrdAnalysisCoordinator {
         }
         return "分析 PRD task=" + task.id() + " 的需求地图。严格遵循 prd-map skill。"
                 + "完成后必须调用 prd_submit_map。";
+    }
+
+    private void recordTerminalOutcome(String taskId) {
+        if (metrics == null) return;
+        PrdAnalysisStore.PrdTask latest = store.task(taskId).orElse(null);
+        if (latest == null) return;
+        if ("COMPLETED".equals(latest.status())) {
+            metrics.taskCompleted();
+            metrics.taskDuration("TOTAL", java.time.Duration.between(latest.createdAt(), java.time.Instant.now()));
+        } else if ("FAILED".equals(latest.status())) {
+            metrics.taskFailed();
+        }
     }
 
     /** Retries a failed node analysis by creating a fresh child run. */

@@ -104,6 +104,7 @@
 - 变更：`PrdAnalysisValidator` 为纯 Java 的 8 项确定性校验（证据完整性、引用完整性、重复实体、字段映射、规则冲突、状态转换、阻塞问题、节点完成）；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（如字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后自动继续。
 - 变更：`PrdAnalysisRenderer` 从 DB 生成 5 类产物并写入现有 Artifact Store（`analysis.md`、`domain_model.json`、`traceability_matrix.json`、`validation_report.json`、`questions.json`）；`PrdAnalysisPlanHandoffService` 基于 domain model 确定性生成实施 Plan（复用 PlanService，不直接写 Plan Store）。
 - 变更：复用既有 Harness——RunProcessor/ContextManager/ModelClient/ToolCatalog/ServerToolProvider/Agent Profile/Skill/Child Run/Usage/Budget/Artifact/Recovery/PlanService，未新增第二套 AgentLoop/ToolCall/Subagent Runtime；Maven 编译期把 `SqliteConnectionFactory` 公开为跨包 Store 复用。
+- 变更：Micrometer 指标 `paicli.prd.tasks.started/completed/failed`、`paicli.prd.nodes.failed`、`paicli.prd.validation.failures`、`paicli.prd.questions.blocking`、`paicli.prd.stage.duration`（Token 不重复统计，仍由绑定 Run 的 model_usage 汇总）。
 - 验证：新增 6 个测试类共 22 项（`PrdAnalysisStoreTest`、`PrdAnalysisToolProviderTest`、`PrdAnalysisCoordinatorTest`（全链路 + barrier + 澄清恢复）、`PrdAnalysisValidatorTest`、`PrdAnalysisRendererTest`、`PrdAnalysisPlanHandoffServiceTest`、`PrdAnalysisEvaluationTest`），覆盖持久化/幂等/权限/并发/恢复/确定性校验/澄清/产物/Plan Handoff，全部通过；`node --check app.js` 通过。数据库迁移 40 与 OpenAPI（`PrdAnalysisController` @Operation）已同步，`README.md`、`docs/architecture.md`、`docs/phases.md` 已更新；`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用（本功能不改变 Sandbox 执行边界，产品站未展示 PRD 分析能力）。
 
 

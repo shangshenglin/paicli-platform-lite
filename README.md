@@ -531,6 +531,7 @@ Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终
 - **确定性校验**：`PrdAnalysisValidator` 为纯 Java 的 8 项检查；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后继续。
 - **产物与交接**：`analysis.md` / `domain_model.json` / `traceability_matrix.json` / `validation_report.json` / `questions.json` 写入 Artifact Store；基于完成结果可复用 PlanService 生成实施 Plan。
 - **Skill 注入**：3 个内置 PRD Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`）启动种子到 data/skills；3 个系统 Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`）通过 `skillNamesJson` 把 required skill 全文注入 system 前缀。
+- **指标**：`paicli.prd.tasks.started/completed/failed`、`paicli.prd.nodes.failed`、`paicli.prd.validation.failures`、`paicli.prd.questions.blocking`、`paicli.prd.stage.duration`；Token 不重复统计，仍由绑定 Run 的 `model_usage` 汇总。
 
 
 ```text

@@ -23,15 +23,17 @@ public class PrdAnalysisService {
     private final SqliteRuntimeStore runtime;
     private final PrdAnalysisCoordinator coordinator;
     private final PrdAnalysisSkillCatalog skills;
+    private final PrdAnalysisMetrics metrics;
     private final ObjectMapper mapper;
 
     public PrdAnalysisService(PrdAnalysisStore store, SqliteRuntimeStore runtime,
                               PrdAnalysisCoordinator coordinator, PrdAnalysisSkillCatalog skills,
-                              ObjectMapper mapper) {
+                              PrdAnalysisMetrics metrics, ObjectMapper mapper) {
         this.store = store;
         this.runtime = runtime;
         this.coordinator = coordinator;
         this.skills = skills;
+        this.metrics = metrics;
         this.mapper = mapper;
     }
 
@@ -85,6 +87,7 @@ public class PrdAnalysisService {
         }
         skills.ensureProfiles(task.projectKey());
         store.updateTaskStatus(taskId, "INGESTING", null);
+        if (metrics != null) metrics.taskStarted();
         coordinator.advance(taskId);
         return detail(taskId);
     }

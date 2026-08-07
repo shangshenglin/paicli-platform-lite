@@ -2,6 +2,7 @@ package com.paicli.platform.server.prd;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -24,10 +25,17 @@ public class PrdAnalysisValidator {
     private static final int MAX_RECONCILE_ITERATIONS = 2;
     private final PrdAnalysisStore store;
     private final ObjectMapper mapper;
+    private final PrdAnalysisMetrics metrics;
 
     public PrdAnalysisValidator(PrdAnalysisStore store, ObjectMapper mapper) {
+        this(store, mapper, null);
+    }
+
+    @Autowired
+    public PrdAnalysisValidator(PrdAnalysisStore store, ObjectMapper mapper, PrdAnalysisMetrics metrics) {
         this.store = store;
         this.mapper = mapper;
+        this.metrics = metrics;
     }
 
     public ValidationSummary validate(String taskId) {
@@ -179,6 +187,10 @@ public class PrdAnalysisValidator {
         }
 
         store.replaceChecks(taskId, checks);
+        if (metrics != null) {
+            metrics.validationFailures(fixable + unfixable);
+            metrics.blockingQuestions(store.countOpenBlocking(taskId));
+        }
         return new ValidationSummary(blockingQuestions, fixable, unfixable, checks.size());
     }
 
