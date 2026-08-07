@@ -7,6 +7,7 @@
 ### 新增：PRD Analysis Agent（业务 Agent 垂直切片，阶段 1–10）
 
 - 变更：落地第一个真正的业务 Agent——PRD 分析。Console 新增独立「PRD 分析」入口：上传 PRD（可选接口/数据契约、补充文档）创建任务，Java 确定性状态机 INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED（FAILED/CANCELED 终态），服务重启后由 `PrdAnalysisWorkerCoordinator` 按 SQLite 当前状态恢复推进。
+- 变更：启动种子对 SQLite 瞬时繁忙（SQLITE_BUSY）做有限重试且失败不阻断启动；Profile 仍由协调器在创建首个 PRD Run 前懒加载重试，避免「无法启动 / 无法新建 PRD 流程」。
 - 变更：迁移 38 新增 10 张表（`prd_analysis_tasks`/`sources`/`source_chunks`/`nodes`/`node_dependencies`/`findings`/`evidence`/`questions`/`checks`/`runs`）；`PrdAnalysisStore` 提供粗粒度幂等提交（`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation`，按 run+toolCallId 去重），全部结构化写入走现有 ToolCall 生命周期，finding 等 ID 全部由 Server 生成。
 - 变更：新增 11 个 PRD 工具（`prd_get_task_context`/`prd_list_source_chunks`/`prd_read_node`/`prd_search_sources`/`prd_get_dependency_summaries`/`prd_get_findings`/`prd_get_open_questions`/`prd_get_validation_report`/`prd_submit_map`/`prd_submit_node_analysis`/`prd_submit_reconciliation`），工具权限以后端 `prd_analysis_runs` 绑定为准（Mapper/Node/Reconciler 角色与 nodeId 绑定校验，禁止越权）。
 - 变更：新增 3 个系统 Agent Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`，工具白名单 + required skill）与 3 个内置 Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`，classpath 资源启动种子到 data/skills）；`ContextManager` 按 Agent Profile 的 `skillNamesJson` 把 required skill 全文注入 system 前缀（无 required skill 的普通 Run 行为不变）。
