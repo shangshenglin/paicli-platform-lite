@@ -219,7 +219,7 @@ class PrdAnalysisEvaluationTest {
             PrdAnalysisValidator validator = new PrdAnalysisValidator(store, new ObjectMapper());
             PrdAnalysisRenderer renderer = new PrdAnalysisRenderer(store, artifacts, new ObjectMapper());
             this.coordinator = new PrdAnalysisCoordinator(store, runtime, productivity, null,
-                    validator, renderer, skills);
+                    validator, renderer, skills, null);
         }
     }
 }
