@@ -340,6 +340,30 @@ class CollaborationServiceTest {
     }
 
     @Test
+    void readOnlyToolResultArtifactIsNotStageDeliveryEvidence() {
+        var parent = task("IN_PROGRESS", "TEAM", "team-a");
+        var stage = new CollaborationStore.CollaborationTask("task-stage", "default", "Stage 1", "Implement",
+                "IN_PROGRESS", 0, "AGENT", "agent-a", "Done", parent.id(), 1,
+                null, "AGENT:leader-a", parent.createdAt(), parent.updatedAt());
+        var completed = run("run-child", "session-child", RunStatus.COMPLETED, "agent-a");
+        when(collaboration.taskForRun(completed.id())).thenReturn(Optional.of(stage));
+        when(collaboration.taskTreeRuns(stage.id())).thenReturn(List.of(new CollaborationStore.TaskRun(stage.id(),
+                completed.id(), null, "STAGE_DELEGATION", completed.sessionId(), "COMPLETED", "agent-a",
+                null, null, null, completed.createdAt(), completed.finishedAt())));
+        when(collaboration.task(parent.id())).thenReturn(Optional.of(parent));
+        when(runtime.artifactsForRun(completed.id())).thenReturn(List.of(
+                new ArtifactRecord("artifact-read", completed.id(), "tool_result", "read_file",
+                        "run-child/read.txt", 17531, "sha", completed.createdAt())));
+        when(runtime.hasCompletedMutatingToolCall(completed.id())).thenReturn(false);
+        when(collaboration.comments(stage.id())).thenReturn(List.of());
+
+        service.onRunTerminal(completed, "COMPLETED");
+
+        verify(collaboration).updateStatus(eq(stage.id()), eq("BLOCKED"), eq("SYSTEM"), eq(null), any());
+        verify(collaboration).updateStatus(eq(parent.id()), eq("BLOCKED"), eq("SYSTEM"), eq(null), any());
+    }
+
+    @Test
     void rootTaskIsSubmittedForReviewOnlyAfterItsRunTreeHasTerminated() {
         var root = task("IN_PROGRESS", "AGENT", "agent-a");
         var completed = run("run-root", "session-root", RunStatus.COMPLETED, "agent-a");
@@ -376,6 +400,27 @@ class CollaborationServiceTest {
 
         verify(collaboration).updateStatus(eq(root.id()), eq("BLOCKED"), eq("SYSTEM"), eq(null), any());
         verify(collaboration, org.mockito.Mockito.never()).updateStatus(eq(root.id()), eq("IN_REVIEW"), any(), any(), any());
+    }
+
+    @Test
+    void failedLeaderRunWithDeliveredStagesReturnsTaskToReview() {
+        var root = task("IN_PROGRESS", "TEAM", "team-a");
+        var stage = new CollaborationStore.CollaborationTask("task-stage", "default", "Stage 1", "Implement",
+                "IN_REVIEW", 0, "AGENT", "agent-a", "Done", root.id(), 1,
+                null, "AGENT:leader-a", root.createdAt(), root.updatedAt());
+        var failed = run("run-root", "session-root", RunStatus.FAILED, "leader-a");
+        when(collaboration.taskForRun(failed.id())).thenReturn(Optional.of(root));
+        when(collaboration.task(root.id())).thenReturn(Optional.of(root));
+        when(collaboration.taskTreeRuns(root.id())).thenReturn(List.of(new CollaborationStore.TaskRun(root.id(),
+                failed.id(), null, "HUMAN_ACTION", failed.sessionId(), "FAILED", "leader-a",
+                null, null, null, failed.createdAt(), failed.finishedAt())));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.descendantTasks(root.id())).thenReturn(List.of(stage));
+
+        service.onRunTerminal(failed, "FAILED");
+
+        verify(collaboration).updateStatus(eq(root.id()), eq("IN_REVIEW"), eq("SYSTEM"), eq(null), any());
+        verify(collaboration, org.mockito.Mockito.never()).updateStatus(eq(root.id()), eq("BLOCKED"), any(), any(), any());
     }
 
     @Test
@@ -509,6 +554,62 @@ class CollaborationServiceTest {
         assertThat(result.triggerExecution()).isNotNull();
         verify(collaboration).createOrGetTrigger(eq(task.id()), eq("HUMAN_ACTION"), eq("REQUEST_REWORK"),
                 eq("TEAM"), eq("team-a"), argThat(payload -> payload.contains("请重新修复登录页")), any());
+    }
+
+    @Test
+    void userCommentReworkOnDeliveredTaskMovesItBackToInProgress() {
+        var task = task("IN_REVIEW", "AGENT", "agent-a");
+        Instant now = task.createdAt();
+        var comment = new CollaborationStore.CollaborationComment("comment-a", task.id(), null,
+                "USER", null, "please rework: fix login page", false, false, now);
+        var trigger = new CollaborationStore.Trigger("trigger-mention", task.id(), "default", "MENTION",
+                comment.id(), "AGENT", "agent-a", "{}", "comment:" + comment.id() + ":AGENT:agent-a",
+                "PENDING", null, null, now, null);
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of());
+        when(collaboration.addComment(eq(task.id()), nullable(String.class), eq("USER"),
+                nullable(String.class), eq("please rework: fix login page"), eq(false), any())).thenReturn(comment);
+        when(collaboration.createOrGetTrigger(eq(task.id()), eq("MENTION"), eq(comment.id()), eq("AGENT"),
+                eq("agent-a"), any(), any())).thenReturn(trigger);
+        var preview = new CollaborationRoutingService.RoutePreview("AGENT", "agent-a", "agent-a",
+                "Implementation expert", List.of(), "MEDIUM", "LOW", 1, List.of());
+        when(routing.preview(any(), any(), eq("AGENT"), eq("agent-a"))).thenReturn(preview);
+        when(routing.persist(any(), any(), any(), any(), any())).thenReturn(new CollaborationStore.RouteDecision(
+                "route-a", "default", task.id(), trigger.id(), "input", "MEDIUM", "LOW", "AGENT", "agent-a",
+                "agent-a", "[]", "[]", 1, now));
+        when(productivity.resolveAgentProfile("default", "agent-a")).thenReturn(Optional.of(agent("agent-a")));
+        when(runtime.createSession(any(), eq("default"))).thenReturn(
+                new SessionRecord("session-rework", "title", "default", null, "ACTIVE", now, now));
+        var reworkRun = run("run-rework", "session-rework", RunStatus.QUEUED, "agent-a");
+        when(runtime.createRunInWorkspace(any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt(),
+                any(), any())).thenReturn(reworkRun);
+        when(collaboration.completeTrigger(trigger.id(), reworkRun.id())).thenReturn(new CollaborationStore.Trigger(
+                trigger.id(), task.id(), "default", "MENTION", comment.id(), "AGENT", "agent-a", "{}",
+                "comment:" + comment.id() + ":AGENT:agent-a", "COMPLETED", reworkRun.id(), null, now, now));
+
+        var result = service.comment(task.id(), null, "USER", null,
+                "please rework: fix login page", false, List.of());
+
+        assertThat(result.executions()).hasSize(1);
+        verify(collaboration).updateStatus(eq(task.id()), eq("IN_PROGRESS"), eq("SYSTEM"), eq(null), any());
+    }
+
+    @Test
+    void requestReworkPersistsReasonAsHumanCommentBeforeTriggering() {
+        var task = task("IN_REVIEW", "TEAM", "team-a");
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(productivity.findAgentTeam("team-a")).thenReturn(Optional.of(team("team-a", "leader-a")));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of());
+        when(collaboration.comments(task.id())).thenReturn(List.of());
+        when(collaboration.createOrGetTrigger(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new CollaborationStore.Trigger("trigger-r", task.id(), "default", "HUMAN_ACTION",
+                        "REQUEST_REWORK", "TEAM", "team-a", "{}", "key-r", "COMPLETED",
+                        "run-existing", null, task.createdAt(), task.createdAt()));
+
+        service.humanAction(task.id(), "REQUEST_REWORK", "fix the login page", null);
+
+        verify(collaboration).addComment(eq(task.id()), eq(null), eq("USER"), eq(null),
+                eq("fix the login page"), eq(false), eq(List.of()));
     }
 
     @Test

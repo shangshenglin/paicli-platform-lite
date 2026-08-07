@@ -36,7 +36,8 @@ class TaskDigestManifestTest {
         var digest = digests.build(task.id());
         assertThat(digest.revision()).isEqualTo(1);
         assertThat(digest.digestJson()).contains("build the widget").contains("stage 1");
-        assertThat(digests.prompt(task.id())).contains("<task_digest>");
+        assertThat(digests.prompt(task.id())).contains("<task_digest>")
+                .contains("please finish the widget").contains("stage 1");
 
         var delivery = manifests.recordStageDelivery(task.id(), 1, "run-1",
                 List.of("index.html"), List.of("artifact-1"), List.of("COMPLETED:"), Map.of());

@@ -2,7 +2,31 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-08
+
+### 修复：阶段“空交付”被误判为已交付 + 失败 Leader 未把已交付任务送回重新验收
+
+- 变更：`CollaborationService.hasStageDeliveryEvidence` 只把非 `tool_result` 类型的 Artifact 视为交付证据。此前 `artifactsForRun` 会统计 `tool_result`（read_file/execute_command 大结果外置）类型的只读物化产物，导致「只读不动手」的阶段 Run（真实案例 Stage 5 只读文件后直接宣布完成，没有写文件/发评论）也被判定为已交付并进入 IN_REVIEW、记录 DELIVERED 清单；现在这类空交付会正确走「无持久交付证据」分支，阶段与父任务置 BLOCKED，等待 Leader 重新派发。
+- 变更：`CollaborationService.onRunTerminal` 根任务失败分支新增 `hasDeliveredStages` 判断：当 Leader Run 失败（例如工具调用循环被限流终止）但任务树中已有 IN_REVIEW/DONE 的已交付阶段时，根任务回到 IN_REVIEW（重新验收），而不是一律 BLOCKED；只有没有任何已交付阶段时才按原有语义 BLOCKED。
+- 思路：真实案例中 Stage 5 只做了只读调用就以最终回复结束（模型假完成），旧证据门禁被 `tool_result` 外置产物误放行；Stage 6 修复重派后真正落盘交付，但 Leader Run 因 `list_dir` 重复调用循环被终止，根任务被错误置 BLOCKED。修复后空交付阶段不再冒充交付，失败但已有交付的根任务回到人工验收，避免用户手动 RESUME。
+- 验证：新增 `CollaborationServiceTest.readOnlyToolResultArtifactIsNotStageDeliveryEvidence`（仅有 tool_result 物化产物的阶段 Run 完成 → 阶段与父任务 BLOCKED）与 `failedLeaderRunWithDeliveredStagesReturnsTaskToReview`（Leader Run FAILED 但存在 IN_REVIEW 阶段 → 根任务 IN_REVIEW）；paicli-server 全量测试 217 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、REST 契约、Sandbox、配置、产品站或前端，故迁移、OpenAPI、`docs/docker-sandbox.md`、`docs/phases.md`、`paicli-site/README.md` 不适用；README 与 `docs/architecture.md` 的交付证据/复验语义已同步。
+
+### 协作视图聚合子 Agent 评论/动态、人工评论按时间入列，并统一子 Agent 中文输出
+
+- 变更：`GET /v1/collaboration/tasks/{id}` 的 comments/activities 由「仅根任务」改为整棵树聚合（`CollaborationStore.treeComments/treeActivities`：根 + 全部阶段子任务，按时间/事件序合并），根任务协作视图因此能看到所有子 Agent 的最终回复、并行阶段的多个负责人交付、阶段屏障与阶段动作；每条评论/动态保留所属 taskId，前端据此显示「阶段 N · 负责人」上下文，并在「子任务与阶段」区提示阶段串行依赖（阶段 N 依赖前序阶段）与同阶段并行数量。
+- 变更：人工反馈落库。`REQUEST_REWORK` / `BLOCK` 的原因会先持久化为该任务的 USER 评论（幂等去重）再触发/落状态，因此返工/阻塞原因按时间顺序出现在「评论与决策」，成为任务摘要的 latest_human_instruction，并能被复唤醒 Leader 通过 get_collaboration_task 读到；评论列表按时间顺序统一渲染（人工评论不置顶），人工评论带「人工评论」标识、子 Agent 评论带阶段标识。
+- 变更：任务摘要修复。`TaskDigestService.prompt` 改为每次重建摘要，注入 Leader 复唤醒/返工 Run 的是实时状态（status/阶段/交付/最新人工指令），而不是创建任务时的旧 revision（旧摘要曾显示 status=TODO、stages=[]，会误导返工 Run 从头重做）。
+- 变更：语言统一。`ContextManager.languageDirective` 改为从「用户原始意图」检测语言（协作信封里的 title/description/acceptance_criteria 或阶段任务内容，排除英文键名/ID/枚举等脚手架），含中文即中文、仅纯英文才英文、无信号默认中文；语言指令从 runtime 用户消息提升为 system 消息并强化文案（思考/推理/评论/最终回答一律中文，英文工具输出用中文转述）；`prompts/base.md`、`prompts/agent.md` 同步「默认中文、仅整条纯英文才英文」。
+- 思路：根任务详情此前只读自己的 comments/activities，子 Agent 的交付评论落在各自阶段子任务上，导致「只能看见 Leader 评论」；聚合后由前端按 taskId 还原阶段上下文，天然覆盖并行与阶段依赖。语言混乱的根因是协作信封的英文脚手架让 latin>han 触发英文指令，以及专家中途漂移；改为按用户真实意图判定 + system 级强约束后，中文任务稳定中文、英文用户仍得英文。
+- 验证：新增 `CollaborationStoreTest.treeCommentsAndActivitiesAggregateRootAndDescendantStages`、`ContextManagerTest.languageDirectiveUsesUserIntentNotCollaborationWrapperScaffolding`、`CollaborationServiceTest.requestReworkPersistsReasonAsHumanCommentBeforeTriggering`、`TaskDigestManifestTest` 摘要刷新断言；paicli-server 全量测试 215 项全部通过，`node --check app.js` 通过，`git diff --check` 通过。本次未修改数据库 Schema、REST 请求/响应/错误契约、Sandbox、配置或产品站，故迁移、`docs/docker-sandbox.md`、`docs/phases.md`、`paicli-site/README.md` 不适用；OpenAPI 的 `GET /tasks/{id}` 行为描述已同步，README 与 `docs/architecture.md` 已同步。
+
 ## 2026-08-07
+
+### 修复：评论/提及触发返工时，待验收（IN_REVIEW）协作任务未置回进行中（IN_PROGRESS）
+
+- 变更：`CollaborationService.trigger` 新建 Run 后把任务置回 `IN_PROGRESS` 的触发类型白名单，由 `HUMAN_ACTION/STAGE_BARRIER` 扩展为 `HUMAN_ACTION/STAGE_BARRIER/MENTION/REPLY`。根因是人工在待验收任务上回复评论（或显式 Mention、回复 Agent 评论）时，`comment` 走 `MENTION/REPLY` Trigger 新建返工 Run，但任务状态仍停留在 `IN_REVIEW`：前端一直显示“待验收”，且返工 Run 终态后 `onRunTerminal` 的 `IN_PROGRESS` 守卫不生效，任务不会重新提交待验收，状态永久卡在“待验收”。
+- 思路：IN_REVIEW 表示“全部 Run 终态 + 等人工 ACCEPT”；一旦评论/提及又新建了 Run，任务就不再只是等待验收而是正在返工，应先回到 `IN_PROGRESS`，待返工 Run 终态并重新具备交付证据后，由既有 `onRunTerminal` 再置回 `IN_REVIEW`。`STAGE_BARRIER` 保留在名单内仅为兼容：`triggerLeaderForCompletedStage` 已对 IN_REVIEW 父任务提前拦截，不会误唤醒；`RUN_EVENT` 只在子 Run 终态事件时唤醒 Leader，此时任务不会处于 IN_REVIEW，故未纳入。
+- 验证：新增 `CollaborationServiceTest.userCommentReworkOnDeliveredTaskMovesItBackToInProgress`（IN_REVIEW + 用户评论默认 Mention 触发 MENTION 新建 Run 后，断言任务被 `updateStatus` 置为 `IN_PROGRESS`）；`CollaborationServiceTest` 26 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、REST API 请求/响应/错误语义、Sandbox、配置或产品站，故迁移、`docs/docker-sandbox.md`、`docs/phases.md` 和 `paicli-site/README.md` 不适用（属既有协作层状态机缺陷修复，无新阶段里程碑）；OpenAPI 评论接口行为描述已补充（无契约变化），README 与 `docs/architecture.md` 的状态流转说明已同步。
 
 ### 修复：已进入人工验收（IN_REVIEW）的协作任务重启后不再被阶段屏障重新唤醒
 

@@ -784,6 +784,14 @@ function collaborationAssigneeName(task) {
   if (task.assigneeType === 'AGENT') return agentProfileName(task.assigneeId);
   return '历史手动任务';
 }
+function collaborationStageLabel(detail, taskId) {
+  if (!detail || !detail.children || !taskId || !detail.task || taskId === detail.task.id) return '';
+  const child = detail.children.find(value => value.id === taskId);
+  if (!child) return '';
+  const agent = child.assigneeType === 'AGENT' ? agentProfileName(child.assigneeId)
+    : (child.assigneeType === 'TEAM' ? agentTeamName(child.assigneeId) : '');
+  return '阶段 ' + (child.stage || '?') + (agent ? ' · ' + agent : '');
+}
 
 async function renderCollaborationTaskDetail(options = {}) {
   const pane = $('collaborationTaskDetail');
@@ -849,14 +857,22 @@ function renderTaskDefinitionLayer(detail) {
     taskTextSection('完成条件', task.acceptanceCriteria || '未设置，由负责人结合执行结果提交人工验收。'));
   if (detail.children.length) {
     const children = element('div', 'task-section');
-    children.append(element('h3', '', '子任务与阶段'));
+    const stageHead = element('div');
+    stageHead.append(element('h3', '', '子任务与阶段'));
+    const stageNumbers = [...new Set(detail.children.map(child => child.stage).filter(Boolean))];
+    if (stageNumbers.length > 1) {
+      stageHead.append(element('small', 'hint', '阶段按序号串行交付：阶段 N 依赖前面阶段完成后执行；同阶段多个子任务（不同负责人）可并行。'));
+    }
+    children.append(stageHead);
     detail.children.forEach(child => {
       const row = element('div', 'task-child-row');
       const status = child.status === 'IN_REVIEW' ? '已交付，等待负责人汇总'
         : (collaborationStatusNames[child.status] || child.status);
       const run = (detail.runs || []).find(value => value.taskId === child.id);
-      row.append(element('strong', '', `${child.stage ? `阶段 ${child.stage}` : '子任务'} · ${child.title}`),
-        element('small', '', `${status} · ${collaborationAssigneeName(child)}${run ? ` · ${run.status}` : ''}`));
+      const parallelCount = detail.children.filter(value => value.stage === child.stage && value.id !== child.id).length + 1;
+      const parallel = parallelCount > 1 ? ' · 并行 ' + parallelCount + ' 个' : '';
+      row.append(element('strong', '', (child.stage ? '阶段 ' + child.stage : '子任务') + ' · ' + child.title),
+        element('small', '', status + ' · ' + collaborationAssigneeName(child) + parallel + (run ? ' · ' + run.status : '')));
       children.append(row);
     });
     root.append(children);
@@ -1100,7 +1116,7 @@ function renderTaskCollaborationLayer(detail) {
   const grid = element('div', 'task-collaboration-grid');
   const discussion = element('section', 'task-discussion-pane');
   const discussionHead = element('div', 'task-layer-heading');
-  discussionHead.append(element('h3', '', '评论与决策'), element('small', '', `${detail.comments.length} 条`));
+  discussionHead.append(element('h3', '', '评论与决策'), element('small', '', `${detail.comments.length} 条 · 含人工与子 Agent 评论`));
   const form = element('form', 'task-comment-form');
   form.onsubmit = event => submitCollaborationComment(event, detail.task.id);
   const reply = element('div', 'hint');
@@ -1124,20 +1140,26 @@ function renderTaskCollaborationLayer(detail) {
   submit.type = 'submit';
   form.append(reply, content, mention, conclusion, submit);
   const comments = element('div', 'task-comment-list');
-  detail.comments.forEach(view => {
+  const orderedComments = [...detail.comments].sort((a, b) => String(a.comment.createdAt).localeCompare(String(b.comment.createdAt)));
+  const renderComment = view => {
     const comment = view.comment;
-    const item = element('article', `task-comment${comment.conclusion ? ' conclusion' : ''}`);
+    const stageLabel = collaborationStageLabel(detail, comment.taskId);
+    const human = comment.authorType === 'USER';
+    const cls = ['task-comment', comment.conclusion ? 'conclusion' : '', human ? 'human' : '', stageLabel ? 'stage' : ''].filter(Boolean).join(' ');
+    const item = element('article', cls);
     const meta = element('div', 'task-comment-meta');
+    const metaLine = [stageLabel, new Date(comment.createdAt).toLocaleString()].filter(Boolean).join(' · ');
     meta.append(element('strong', '', collaborationEntityName(comment.authorType, comment.authorId)),
-      element('small', '', new Date(comment.createdAt).toLocaleString()));
+      element('small', '', metaLine));
     item.append(meta);
+    if (human) item.append(element('small', 'task-comment-tag', '人工评论'));
     if (comment.parentCommentId) {
       const parent = detail.comments.find(value => value.comment.id === comment.parentCommentId)?.comment;
-      item.append(element('small', 'task-comment-reply', `回复 ${collaborationEntityName(parent?.authorType, parent?.authorId)}`));
+      item.append(element('small', 'task-comment-reply', '回复 ' + collaborationEntityName(parent?.authorType, parent?.authorId)));
     }
     item.append(element('p', '', replaceEntityReferences(comment.content)));
     if ((view.mentions || []).length) item.append(element('small', 'hint',
-      `提及：${view.mentions.map(value => collaborationEntityName(value.type, value.id)).join('、')}`));
+      '提及：' + view.mentions.map(value => collaborationEntityName(value.type, value.id)).join('、')));
     const replyButton = element('button', 'secondary', '回复');
     replyButton.onclick = () => {
       state.collaborationReplyToId = comment.id;
@@ -1145,17 +1167,20 @@ function renderTaskCollaborationLayer(detail) {
       requestAnimationFrame(() => $('collaborationCommentContent')?.focus());
     };
     item.append(replyButton);
-    comments.append(item);
-  });
+    return item;
+  };
+  orderedComments.forEach(view => comments.append(renderComment(view)));
   if (!detail.comments.length) comments.append(element('div', 'task-empty', '暂无评论'));
   discussion.append(discussionHead, form, comments);
 
   const flow = element('section', 'task-flow-pane');
   const flowHead = element('div', 'task-layer-heading');
-  flowHead.append(element('h3', '', '协作动态'), element('small', '', '最新在前'));
+  flowHead.append(element('h3', '', '协作动态'), element('small', '', '含各阶段子 Agent 动作 · 最新在前'));
   const timeline = element('div', 'task-activity-list');
   collaborationVisibleActivities(detail).slice().reverse().forEach(activity => {
     const presentation = collaborationActivityPresentation(activity, detail);
+    const stageContext = collaborationStageLabel(detail, activity.taskId);
+    if (stageContext) presentation.detail = stageContext + (presentation.detail ? ' · ' + presentation.detail : '');
     const item = element('article', `task-activity-item ${presentation.tone}`);
     const marker = element('span', 'task-activity-marker');
     const copy = element('div', 'task-activity-copy');

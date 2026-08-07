@@ -342,6 +342,39 @@ public class CollaborationStore {
         } catch (SQLException e) { throw failure("list collaboration activities", e); }
     }
 
+    /**
+     * Returns comments recorded on the task and every staged descendant, newest-first,
+     * so the root task's collaboration view can surface every sub-agent's final reply.
+     */
+    public List<CollaborationComment> treeComments(String rootTaskId) {
+        List<CollaborationComment> values = new ArrayList<>();
+        for (String taskId : taskTreeIds(rootTaskId)) values.addAll(comments(taskId));
+        values.sort(java.util.Comparator.comparing(CollaborationComment::createdAt)
+                .thenComparing(CollaborationComment::id));
+        return values;
+    }
+
+    /**
+     * Returns the merged activity timeline of the task and every staged descendant
+     * (sub-agent responses, stage dispatches, parallel deliveries, barrier completions),
+     * ordered by the global event id so the root task view reflects the whole tree.
+     */
+    public List<CollaborationActivity> treeActivities(String rootTaskId, long after, int requestedLimit) {
+        int limit = Math.max(1, Math.min(requestedLimit, 2_000));
+        List<CollaborationActivity> values = new ArrayList<>();
+        for (String taskId : taskTreeIds(rootTaskId)) values.addAll(activities(taskId, after, limit));
+        values.sort(java.util.Comparator.comparingLong(CollaborationActivity::id));
+        if (values.size() > limit) values = new ArrayList<>(values.subList(values.size() - limit, values.size()));
+        return values;
+    }
+
+    private List<String> taskTreeIds(String rootTaskId) {
+        List<String> ids = new ArrayList<>();
+        ids.add(rootTaskId);
+        for (CollaborationTask child : descendantTasks(rootTaskId)) ids.add(child.id());
+        return ids;
+    }
+
     public void recordActivity(String taskId, String activityType, String actorType,
                                String actorId, String subjectId, String payloadJson) {
         try (Connection c = open()) {
