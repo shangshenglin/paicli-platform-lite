@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.MessageRecord;
+import com.paicli.platform.server.domain.ReflectionRecord;
+import com.paicli.platform.server.domain.WorkingPlanRecord;
 import com.paicli.platform.server.model.ModelMessage;
 import com.paicli.platform.server.model.ModelRequest;
 import com.paicli.platform.server.model.ModelResponse;
@@ -21,6 +23,7 @@ import com.paicli.platform.server.config.RagProperties;
 import com.paicli.platform.server.memory.LayeredMemoryService;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.plan.PlanToolProvider;
+import com.paicli.platform.server.collaboration.CollaborationToolProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -112,11 +115,16 @@ public class ContextManager {
                 parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
         if (agentProfile != null && !allowedTools.isEmpty()) {
             allowedTools.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+            allowedTools.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
         }
         String runtime = prompts.runtimeContext(
                 platformProperties.workspaceRoot().resolve(workspaceRunId), run.createdAt());
         String planState = store.planContextForRun(runId);
+        String workingPlan = store.latestWorkingPlan(runId).map(this::workingPlanPrompt).orElse("");
+        String reflection = store.latestReflection(runId).map(this::reflectionPrompt).orElse("");
         List<MessageRecord> initialActive = store.activeMessages(sessionId);
+        String languageDirective = languageDirective(currentUserQuery(runId, initialActive));
+        if (!languageDirective.isBlank()) runtime = runtime + "\n" + languageDirective;
         Set<String> activatedTools = activatedToolNames(store.messages(sessionId));
         List<ModelToolDefinition> toolDefinitions =
                 toolCatalog.definitionsForContext(allowedTools, activatedTools);
@@ -128,7 +136,8 @@ public class ContextManager {
         if (!skillIndex.isBlank()) stablePrefix.add(ModelMessage.system(skillIndex));
         int toolTokens = TokenEstimator.estimateTools(toolDefinitions);
         int fixedTokens = TokenEstimator.estimateMessages(stablePrefix) + toolTokens
-                + messageTokens(runtime) + messageTokens(planState);
+                + messageTokens(runtime) + messageTokens(planState) + messageTokens(workingPlan)
+                + messageTokens(reflection);
         var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
 
         List<MessageRecord> active = store.activeMessages(sessionId);
@@ -157,6 +166,8 @@ public class ContextManager {
         requiredMessages.addAll(summaries);
         requiredMessages.addAll(priorConversation);
         requiredMessages.add(ModelMessage.user(runtime));
+        if (!workingPlan.isBlank()) requiredMessages.add(ModelMessage.user(workingPlan));
+        if (!reflection.isBlank()) requiredMessages.add(ModelMessage.user(reflection));
         if (!planState.isBlank()) requiredMessages.add(ModelMessage.user(planState));
         requiredMessages.addAll(currentConversation);
         int requiredTokens = TokenEstimator.estimateMessages(requiredMessages) + toolTokens;
@@ -172,6 +183,8 @@ public class ContextManager {
         messages.addAll(summaries);
         messages.addAll(priorConversation);
         messages.add(ModelMessage.user(runtime));
+        if (!workingPlan.isBlank()) messages.add(ModelMessage.user(workingPlan));
+        if (!reflection.isBlank()) messages.add(ModelMessage.user(reflection));
         if (!planState.isBlank()) messages.add(ModelMessage.user(planState));
         if (!dynamic.knowledge().isBlank()) messages.add(ModelMessage.user(dynamic.knowledge()));
         if (!dynamic.memories().isBlank()) messages.add(ModelMessage.user(dynamic.memories()));
@@ -539,6 +552,48 @@ public class ContextManager {
             Map<String, Integer> sectionTokens,
             String reusablePrefixSha256
     ) { }
+
+    private String workingPlanPrompt(WorkingPlanRecord record) {
+        StringBuilder value = new StringBuilder("<working_plan>\n");
+        value.append("objective: ").append(record.objective()).append("\n");
+        try {
+            List<Map<String, Object>> items = mapper.readValue(record.itemsJson(),
+                    new TypeReference<List<Map<String, Object>>>() { });
+            for (Map<String, Object> item : items) {
+                value.append("- [").append(item.getOrDefault("status", "")).append("] ")
+                        .append(item.getOrDefault("id", "")).append(": ")
+                        .append(item.getOrDefault("title", "")).append("\n");
+            }
+        } catch (Exception ignored) {
+            value.append(record.itemsJson()).append("\n");
+        }
+        value.append("status: ").append(record.status())
+                .append(" (revision ").append(record.revision()).append(")\n");
+        value.append("</working_plan>");
+        return value.toString();
+    }
+
+    private String reflectionPrompt(ReflectionRecord record) {
+        return "<reflection>\n"
+                + "failure_class: " + record.failureClass() + "\n"
+                + "decision: " + record.decision() + "\n"
+                + "diagnosis: " + record.diagnosis() + "\n"
+                + "next_action: " + record.nextAction() + "\n"
+                + "</reflection>";
+    }
+
+    private static String languageDirective(String query) {
+        if (query == null || query.isBlank()) return "";
+        long han = query.chars().filter(c -> Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN).count();
+        long latin = query.chars().filter(c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')).count();
+        if ((han >= 1 && han >= latin) || latin == 0) {
+            return "<language>本回合用户使用中文提问，请全程使用中文回答（代码、命令、标识符与专有名词除外）。</language>";
+        }
+        if (latin > han) {
+            return "<language>The user is writing in English; respond in English.</language>";
+        }
+        return "";
+    }
 
     public record PreparedContext(ModelRequest request, int estimatedInputTokens,
                                   ConversationCompactor.CompactionResult compaction,

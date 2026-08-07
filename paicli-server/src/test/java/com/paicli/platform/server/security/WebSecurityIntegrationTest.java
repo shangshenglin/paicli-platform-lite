@@ -55,7 +55,7 @@ class WebSecurityIntegrationTest {
 
         mvc.perform(get("/v1/system/info").header("X-API-Key", "test-secret"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.name").value("paicli-platform-lite"))
-                .andExpect(jsonPath("$.phase").value(10));
+                .andExpect(jsonPath("$.phase").value(24));
         mvc.perform(get("/actuator/health").header("X-API-Key", "test-secret"))
                 .andExpect(status().isOk());
         mvc.perform(get("/v3/api-docs").header("X-API-Key", "test-secret"))
@@ -68,7 +68,16 @@ class WebSecurityIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Frame-Options", "DENY"))
                 .andExpect(header().string("X-Content-Type-Options", "nosniff"))
-                .andExpect(header().exists("Content-Security-Policy"));
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("script-src data:"))));
+        mvc.perform(get("/workspace-preview.html"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.containsString("frame-src blob:")))
+                .andExpect(header().string("Content-Security-Policy",
+                        org.hamcrest.Matchers.containsString("connect-src 'none'")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"workspacePreviewFrame\"")));
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -90,7 +99,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "data-effort=\"low\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260731-schedule-execution-config")))
+                        "20260804-workbench-batch-delete-1")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -106,9 +115,17 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"memoryRevisionForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"memoryWikiGraph\"")))
+                        "id=\"memoryWikiSearch\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"openMemoryWiki\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"deleteSelectedRuns\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"deleteSelectedMemories\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"deleteSelectedArtifacts\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "id=\"deleteSelectedPolicies\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"executionShell\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -152,6 +169,14 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openWorkspaceFilePreview")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "bundleWorkspaceHtmlPreview")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "allow-scripts allow-forms allow-modals allow-downloads")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "new preview.Blob([html], {type: 'text/html'})")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "connect-src 'none'")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "preparePreviewWindow")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "window.alert")))
@@ -162,7 +187,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "openConnectionSettings")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "renderMemoryWikiGraph")))
+                        "renderMemoryWikiIndex")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "renderHomeModelPicker")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

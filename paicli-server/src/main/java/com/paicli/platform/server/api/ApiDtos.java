@@ -2,6 +2,7 @@ package com.paicli.platform.server.api;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import com.paicli.platform.common.ApprovalStatus;
 import java.util.List;
 import java.util.Map;
@@ -58,7 +59,11 @@ final class ApiDtos {
                             String description, @NotBlank String leaderAgentProfileId,
                             List<String> memberAgentProfileIds, Integer maxExperts,
                             Integer maxDepth, Boolean requireReviewer,
-                            Boolean requireRunner, Boolean enabled) { }
+                            Boolean requireRunner, String teamInstructions,
+                            Map<String, String> memberRoles, List<String> capabilityTags,
+                            String routingPolicy, String completionPolicy,
+                            String fallbackAgentProfileId, Integer maxConcurrency,
+                            Boolean enabled) { }
 
     record BudgetRequest(Long dailyTokens, Long monthlyTokens, Double dailyCost,
                          Double monthlyCost, Double warnRatio, Integer maxConcurrentRuns) { }
@@ -66,6 +71,8 @@ final class ApiDtos {
     record QueuePriorityRequest(@NotNull Integer priority) { }
 
     record QueueBatchRequest(@NotNull List<String> runIds, @NotBlank String action, Integer priority) { }
+
+    record BatchDeleteRequest(@NotNull @Size(min = 1, max = 100) List<@NotBlank String> ids) { }
 
     record ScheduledTaskRequest(@NotBlank String projectKey, @NotBlank String name,
                                 @NotBlank String templateId, @NotBlank String scheduleType,
@@ -86,7 +93,8 @@ final class ApiDtos {
                                  Integer maxToolCalls, Integer maxTokens, Long maxDurationMs,
                                  Boolean enabled) { }
 
-    record EvaluationStartRequest(String modelProfileId, Integer trialCount, Integer passThreshold) { }
+    record EvaluationStartRequest(String modelProfileId, String agentTeamId,
+                                  Integer trialCount, Integer passThreshold) { }
 
     record CreatePlanRequest(String sessionId, String runId, String projectKey, @NotBlank String objective,
                              @NotBlank String rawPlanJson, String source) { }

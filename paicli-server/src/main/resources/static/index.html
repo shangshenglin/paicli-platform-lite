@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260730-shell-runtime">
+  <link rel="stylesheet" href="/app.css?v=20260804-workbench-batch-delete-1">
 </head>
 <body>
 <div class="app">
@@ -13,9 +13,8 @@
       <div class="logo">π</div>
       <div><strong>PaiCLI</strong><small>Managed Agent Runtime</small></div>
     </div>
-    <button class="primary new" id="new">＋ 新建对话</button>
     <div class="list-title">
-      <div class="label">历史对话</div>
+      <div class="label">历史记录</div>
       <button class="text-button" id="newGroup">＋ 分组</button>
     </div>
     <div class="sessions" id="sessions"></div>
@@ -32,11 +31,18 @@
     <main class="chat">
       <header class="header">
         <button class="secondary menu" id="menu">☰</button>
+        <nav class="global-mode-switch" id="globalModeSwitch" aria-label="工作模式">
+          <button class="secondary" type="button" data-home-mode="chat">普通对话</button>
+          <button class="secondary" type="button" data-home-mode="collaboration">专家协作</button>
+          <button class="secondary" type="button" data-home-mode="tasks">协作任务</button>
+        </nav>
         <div class="title">
           <strong id="chatTitle">新对话</strong>
           <span class="meta" id="runMeta">尚未开始任务</span>
         </div>
+        <button class="secondary task-return-action" id="returnCollaborationTask" hidden>返回协作任务</button>
         <span class="status" id="status">空闲</span>
+        <button class="secondary approval-inbox" id="approvalInbox" hidden>待审批 <span id="approvalInboxCount">0</span></button>
         <button class="secondary run-action" id="retryRun" hidden>重试</button>
         <button class="secondary run-action" id="branchRun" hidden>分支</button>
         <button class="secondary" id="toggle">执行详情</button>
@@ -91,6 +97,11 @@
     <button class="secondary" id="close">取消</button>
     <button class="primary" id="save">验证并连接</button>
   </div>
+</dialog>
+<dialog id="approvalInboxDialog" class="wide-dialog audit-dialog">
+  <div class="dialog-title"><strong>待审批</strong><button class="secondary" id="closeApprovalInbox">关闭</button></div>
+  <div class="hint">当前项目的专家与子专家审批会在这里汇总，可直接处理。</div>
+  <div class="managed-list" id="approvalInboxList"></div>
 </dialog>
 <dialog id="capabilityDialog" class="wide-dialog">
   <div class="dialog-title"><strong>能力管理</strong><button class="secondary" id="closeCapabilities">关闭</button></div>
@@ -148,14 +159,14 @@
   <section class="capability-section productivity-overview"><div class="section-title"><div><h3>长期使用效率</h3><p class="hint">集中查看近 30 天用量、性能与预算风险。</p></div><div class="managed-actions"><button class="secondary" id="configureUsageBudget">预算与并发</button><button class="secondary" id="refreshProductivity">刷新</button></div></div><div class="capability-status usage-metrics" id="usageSummary"></div><details class="usage-history"><summary><span>最近用量</span><small id="usageHistorySummary">暂无记录</small></summary><div class="usage-breakdown" id="usageBreakdown"></div></details></section>
   <section class="capability-section"><div class="section-title"><h3>任务模板与快捷指令</h3><button class="primary" id="addTemplate">新建模板</button></div><div class="managed-list" id="templateList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>模型配置方案</h3><button class="primary" id="addProfile">新建方案</button></div><div class="managed-list" id="profileList"></div></section>
-  <section class="capability-section"><details class="workbench-collapse" id="queueCollapse"><summary><span>Run 队列</span><small id="queueSummary">默认收缩</small><button class="secondary" id="refreshQueue" type="button">刷新</button></summary><div class="managed-list" id="queueList"></div></details></section>
+  <section class="capability-section"><details class="workbench-collapse" id="queueCollapse"><summary><span>Run 队列</span><small id="queueSummary">默认收缩</small><button class="secondary" id="selectAllRuns" type="button">全选终态</button><button class="danger batch-delete" id="deleteSelectedRuns" type="button" disabled>永久删除已选</button><button class="secondary" id="refreshQueue" type="button">刷新</button></summary><div class="managed-list" id="queueList"></div></details></section>
   <section class="capability-section"><div class="section-title"><h3>定时任务</h3><button class="primary" id="addSchedule">新建定时任务</button></div><div class="managed-list" id="scheduleList"></div></section>
   <section class="capability-section"><div class="section-title"><h3>完成通知</h3><button class="primary" id="addNotification">新增通知</button></div><div class="managed-list" id="notificationList"></div></section>
   <section class="capability-section"><h3>Session 导入导出</h3><div class="portability-actions"><button class="secondary" data-export="markdown">导出 Markdown</button><button class="secondary" data-export="json">导出 JSON</button><button class="secondary" data-export="audit">完整审计包</button><label class="secondary file-action">导入 JSON<input id="sessionImport" type="file" accept="application/json,.json" hidden></label><label><input id="redactExport" type="checkbox"> 隐私脱敏</label></div></section>
-  <section class="capability-section"><div class="section-title"><div><h3>长期记忆地图</h3><p class="hint">标题由记忆内容概括生成；内部 key 只保留为稳定标识。</p></div><div class="section-actions"><button class="secondary" id="openMemoryWiki">打开地图</button><button class="secondary" id="refreshMemories">刷新</button></div></div><div class="managed-list" id="memoryList"></div></section>
-  <section class="capability-section"><div class="section-title"><h3>Artifact 工作台</h3><button class="secondary" id="refreshArtifacts">刷新</button></div><div class="managed-list" id="artifactList"></div></section>
+  <section class="capability-section"><div class="section-title"><div><h3>长期记忆</h3><p class="hint">标题由记忆内容概括生成；内部 key 只保留为稳定标识。</p></div><div class="section-actions"><button class="primary" id="addLongTermMemory">新增 L3 长期记忆</button><button class="secondary" id="openMemoryWiki">记忆浏览</button><button class="secondary" id="selectAllMemories">全选</button><button class="danger batch-delete" id="deleteSelectedMemories" disabled>永久删除已选</button><button class="secondary" id="refreshMemories">刷新</button></div></div><details class="workbench-collapse" id="memoryCollapse"><summary><span>记忆列表</span><small>默认收缩，展开查看全部记忆</small></summary><div class="managed-list" id="memoryList"></div></details></section>
+  <section class="capability-section"><div class="section-title"><h3>Artifact 工作台</h3><div class="section-actions"><button class="secondary" id="selectAllArtifacts">全选</button><button class="danger batch-delete" id="deleteSelectedArtifacts" disabled>永久删除已选</button><button class="secondary" id="refreshArtifacts">刷新</button></div></div><details class="workbench-collapse" id="artifactCollapse"><summary><span>Artifact 列表</span><small>默认收缩，展开查看全部 Artifact</small></summary><div class="managed-list" id="artifactList"></div></details></section>
   <section class="capability-section"><div class="section-title"><h3>Plan 工作台</h3><button class="secondary" id="refreshPlans">刷新</button></div><p class="hint">查看持久化 Plan、Step DAG、Async Job 和 Validation Check；启动后由后端调度器复用普通 ReAct Run。</p><div class="managed-list" id="planList"></div></section>
-  <section class="capability-section"><div class="section-title"><h3>持久化审批策略</h3><button class="secondary" id="refreshPolicies">刷新</button></div><p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p><div class="managed-list" id="policyList"></div></section>
+  <section class="capability-section"><div class="section-title"><h3>持久化审批策略</h3><div class="section-actions"><button class="secondary" id="selectAllPolicies">全选</button><button class="danger batch-delete" id="deleteSelectedPolicies" disabled>永久删除已选</button><button class="secondary" id="refreshPolicies">刷新</button></div></div><p class="hint">策略只匹配相同工具和完全相同的持久化参数，可随时撤销。</p><details class="workbench-collapse" id="policyCollapse"><summary><span>策略列表</span><small>默认收缩，展开查看全部策略</small></summary><div class="managed-list" id="policyList"></div></details></section>
 </dialog>
 <dialog id="planDetailDialog" class="wide-dialog audit-dialog">
   <div class="dialog-title"><strong id="planDetailTitle">Plan 详情</strong><button class="secondary" id="closePlanDetail">关闭</button></div>
@@ -173,7 +184,7 @@
       <strong>质量回归工作区</strong>
       <p class="hint">复用正式 Run 检查工具、响应、输出 Token、总 Token、耗时和人工基线；用例默认收起，按需查看。</p>
     </div>
-    <div class="managed-actions"><button class="secondary" id="refreshEvaluations">刷新</button><button class="secondary" id="installEvaluationStarterPack">安装官方评测集</button><button class="primary" id="addEvaluationSuite">新建套件</button></div>
+    <div class="managed-actions"><select class="control-select compact" id="evaluationAgentTeam" title="选择团队级评测执行者"><option value="">单 Agent 基线</option></select><button class="secondary" id="refreshEvaluations">刷新</button><button class="secondary" id="installEvaluationStarterPack">安装官方评测集</button><button class="primary" id="addEvaluationSuite">新建套件</button></div>
   </div>
   <div class="evaluation-layout">
     <section class="evaluation-pane evaluation-suites-pane">
@@ -269,6 +280,12 @@
       <label class="form-field"><span>小队名称 *</span><input id="agentTeamName" maxlength="120" required placeholder="例如：研发交付小队"></label>
       <label class="form-field"><span>Leader *</span><select id="agentTeamLeader" required></select></label>
       <label class="form-field full"><span>说明</span><input id="agentTeamDescription" maxlength="1000" placeholder="适用任务和协作目标"></label>
+      <label class="form-field full"><span>团队指令</span><textarea id="agentTeamInstructions" rows="4" maxlength="16000" placeholder="定义 Leader 的拆分方式、成员交接约束和质量要求"></textarea></label>
+      <label class="form-field full"><span>能力标签</span><input id="agentTeamCapabilityTags" maxlength="1000" placeholder="研发, 测试, 审查（逗号分隔）"></label>
+      <label class="form-field"><span>路由策略</span><select id="agentTeamRoutingPolicy"><option value="CAPABILITY">能力匹配</option><option value="LEADER">Leader 决策</option><option value="ROUND_ROBIN">轮询候选</option></select></label>
+      <label class="form-field"><span>完成策略</span><select id="agentTeamCompletionPolicy"><option value="LEADER_ACCEPTS">Leader 验收</option><option value="ALL_REQUIRED">全部成员完成</option><option value="ANY_SUCCESS">任一成功</option></select></label>
+      <label class="form-field"><span>故障回退 Agent</span><select id="agentTeamFallback"><option value="">不设置</option></select></label>
+      <label class="form-field"><span>最大并发</span><input id="agentTeamMaxConcurrency" type="number" min="1" max="20" value="3"></label>
       <fieldset class="form-field full agent-choice-field">
         <legend>小队成员</legend>
         <small>可组合 Expert、Reviewer、Runner；Leader 不需要重复选择。</small>
@@ -392,12 +409,24 @@
     </section>
   </form>
 </dialog>
+<dialog id="longTermMemoryDialog" class="form-dialog">
+  <form id="longTermMemoryForm" class="entity-form">
+    <div class="dialog-title"><strong>新增 L3 长期记忆</strong><button type="button" class="secondary" id="cancelLongTermMemory">取消</button></div>
+    <p class="hint">仅录入稳定的个人偏好、长期约束或可长期复用的背景。这会创建一条人工确认的 L3 Memory。</p>
+    <div class="form-grid">
+      <label class="form-field"><span>Memory Key *</span><input id="longTermMemoryKey" maxlength="120" placeholder="例如：preferred-language" required></label>
+      <label class="form-field"><span>标签</span><input id="longTermMemoryTags" maxlength="500" placeholder="逗号分隔，例如：preference,java"></label>
+      <label class="form-field full"><span>长期记忆 *</span><textarea id="longTermMemoryContent" rows="6" maxlength="32000" placeholder="例如：用户长期偏好使用 Java 17 和 Maven Wrapper。" required></textarea></label>
+    </div>
+    <div class="form-error" id="longTermMemoryError" role="alert"></div>
+    <div class="dialog-actions"><button type="submit" class="primary" id="saveLongTermMemory">保存 L3 记忆</button></div>
+  </form>
+</dialog>
 <dialog id="memoryWikiDialog" class="wide-dialog memory-wiki-dialog">
-  <div class="dialog-title"><strong>LLM Memory Wiki</strong><button type="button" class="secondary" id="closeMemoryWiki">关闭</button></div>
+  <div class="dialog-title"><strong>长期记忆浏览</strong><button type="button" class="secondary" id="closeMemoryWiki">关闭</button></div>
   <p class="hint">这是现有 Memory 的导航层，不会升级、覆盖或删除任何记忆。点击页面可查看关联、来源与审计信息。</p>
-  <div class="memory-wiki-toolbar"><input id="memoryWikiSearch" maxlength="120" placeholder="搜索页面、内容或标签"><button class="secondary" id="searchMemoryWiki">搜索</button><button class="secondary" id="showMemoryWikiGraph">关系地图</button><button class="secondary" id="showMemoryWikiPages">页面</button></div>
+  <div class="memory-wiki-toolbar"><input id="memoryWikiSearch" maxlength="120" placeholder="搜索页面、内容或标签"><button class="secondary" id="searchMemoryWiki">搜索</button></div>
   <div class="memory-wiki-layout" id="memoryWikiPagesLayout"><nav class="memory-wiki-index" id="memoryWikiIndex" aria-label="Memory Wiki 页面"></nav><article class="memory-wiki-page" id="memoryWikiPage"></article></div>
-  <section class="memory-wiki-graph" id="memoryWikiGraph" hidden aria-label="Memory Wiki 关系地图"></section>
 </dialog>
 <dialog id="groupDialog">
   <strong>新建对话分组</strong>
@@ -408,6 +437,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260731-schedule-execution-config"></script>
+<script src="/app.js?v=20260805-workspace-html-preview-2"></script>
 </body>
 </html>

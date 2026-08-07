@@ -35,6 +35,12 @@ public class LayeredMemoryService {
     private static final Set<String> LAYERS = Set.of("L1", "L2", "L3");
     private static final Set<String> TYPES = Set.of("EPISODIC", "SEMANTIC", "PROCEDURAL", "PREFERENCE",
             "DECISION", "ENTITY_RELATION", "FACT", "CONSTRAINT", "LESSON");
+    private static final int MAX_MEMORIES_PER_RUN = 3;
+    private static final Map<String, Integer> MAX_MEMORIES_PER_LAYER = Map.of("L1", 1, "L2", 2, "L3", 1);
+    private static final Pattern PROCESS_EVENT = Pattern.compile("(?i)(?:\\bstage\\s+\\d+\\b|\\btask_[a-z0-9]+\\b|"
+            + "\\bagent_[a-z0-9]+\\b|\\brun_[a-z0-9]+\\b|\\bcomment_[a-z0-9]+\\b|已派发|正在运行|已发布评论|恢复运行中|leader\\s*启动)");
+    private static final Pattern TECHNICAL_CONCLUSION = Pattern.compile("(?i)(?:决定|决策|采用|方案|架构|接口|数据库|迁移|约束|验证|测试|设计|原因|"
+            + "decision|architecture|api|database|migration|constraint|validation|test|design)");
     private final SqliteRuntimeStore store;
     private final ModelClient modelClient;
     private final KnowledgeEmbeddingService embeddings;
@@ -53,7 +59,8 @@ public class LayeredMemoryService {
     }
 
     public void enqueue(String runId) {
-        if (properties.autoExtract() && !"demo".equals(modelClient.name()) && !store.isInternalRun(runId)) {
+        if (properties.autoExtract() && !"demo".equals(modelClient.name()) && !store.isInternalRun(runId)
+                && runId.equals(store.delegationRootRunId(runId))) {
             store.enqueueMemoryExtraction(runId);
         }
     }
@@ -176,24 +183,26 @@ public class LayeredMemoryService {
                     ModelStreamListener.NO_OP);
             JsonNode root = parseJson(response.content());
             int stored = 0;
+            Map<String, Integer> storedByLayer = new HashMap<>();
             for (JsonNode node : root.path("memories")) {
-                if (stored >= 8) break;
+                if (stored >= MAX_MEMORIES_PER_RUN) break;
                 String content = node.path("content").asText("").trim();
-                double confidence = node.path("confidence").asDouble(0);
-                if (!candidate(content, confidence)) continue;
                 String key = normalizeKey(node.path("key").asText(""), node.path("type").asText("FACT"), content);
                 String layer = node.path("layer").asText("L1").toUpperCase(Locale.ROOT);
                 String type = node.path("type").asText("FACT").toUpperCase(Locale.ROOT);
                 if (!LAYERS.contains(layer)) layer = "L1";
                 if (!TYPES.contains(type)) type = "FACT";
+                if (storedByLayer.getOrDefault(layer, 0) >= MAX_MEMORIES_PER_LAYER.get(layer)) continue;
+                if (isProcessEvent(content, type)) continue;
                 String tags = tags(node.path("tags"));
                 List<String> evidenceIds = evidenceIds(node.path("evidenceMessageIds"), sourceMessages);
-                if (evidenceIds.isEmpty()) {
-                    evidenceIds = sourceMessages.stream().map(SqliteRuntimeStore.MemoryExtractionMessage::id).toList();
-                }
+                if (evidenceIds.isEmpty()) continue;
                 List<String> selectedEvidenceIds = evidenceIds;
                 List<SqliteRuntimeStore.MemoryExtractionMessage> evidenceMessages = sourceMessages.stream()
                         .filter(message -> selectedEvidenceIds.contains(message.id())).toList();
+                if (!hasAuthoritativeEvidence(evidenceMessages)) continue;
+                double confidence = calibratedConfidence(node.path("confidence").asDouble(0), evidenceMessages, layer);
+                if (!candidate(content, confidence)) continue;
                 Long startSequence = evidenceMessages.stream()
                         .mapToLong(SqliteRuntimeStore.MemoryExtractionMessage::sequence).min().stream()
                         .boxed().findFirst().orElse(null);
@@ -217,6 +226,7 @@ public class LayeredMemoryService {
                                     + String.format(Locale.ROOT, "%.4f", similar.score()));
                 }
                 stored++;
+                storedByLayer.merge(layer, 1, Integer::sum);
             }
             store.finishMemoryExtraction(runId, null);
             store.appendEvent(runId, "memory.extracted", "{\"count\":" + stored + "}");
@@ -250,6 +260,44 @@ public class LayeredMemoryService {
         if (SECRET.matcher(content).find()) return false;
         String lower = content.toLowerCase(Locale.ROOT);
         return !(lower.equals("你好") || lower.equals("谢谢") || lower.startsWith("用户想要我"));
+    }
+
+    static boolean isProcessEvent(String content, String type) {
+        return PROCESS_EVENT.matcher(content).find()
+                && !TECHNICAL_CONCLUSION.matcher(content).find()
+                && !Set.of("DECISION", "CONSTRAINT", "LESSON", "PROCEDURAL").contains(type);
+    }
+
+    static boolean hasAuthoritativeEvidence(List<SqliteRuntimeStore.MemoryExtractionMessage> evidence) {
+        return evidence.stream().anyMatch(message -> "user".equals(message.role()) && !message.content().isBlank())
+                || evidence.stream().anyMatch(LayeredMemoryService::isSuccessfulToolResult);
+    }
+
+    static double calibratedConfidence(double modelConfidence,
+                                       List<SqliteRuntimeStore.MemoryExtractionMessage> evidence,
+                                       String layer) {
+        double model = Math.max(0d, Math.min(1d, modelConfidence));
+        boolean user = evidence.stream().anyMatch(message -> "user".equals(message.role())
+                && !message.content().isBlank());
+        boolean tool = evidence.stream().anyMatch(LayeredMemoryService::isSuccessfulToolResult);
+        double evidenceQuality = (user || tool) ? 1d : 0.5d;
+        double repetition = evidence.size() >= 2 ? 1d : 0.5d;
+        double stability = switch (layer) {
+            case "L3" -> 1d;
+            case "L2" -> 0.8d;
+            default -> 0.6d;
+        };
+        double calibrated = model * 0.4d + evidenceQuality * 0.3d + repetition * 0.2d + stability * 0.1d;
+        double cap = user && tool ? 0.95d : user ? 0.80d : tool ? 0.75d : 0.55d;
+        return Math.min(cap, calibrated);
+    }
+
+    private static boolean isSuccessfulToolResult(SqliteRuntimeStore.MemoryExtractionMessage message) {
+        if (!"tool".equals(message.role()) || message.content() == null || message.content().isBlank()) return false;
+        String lower = message.content().toLowerCase(Locale.ROOT);
+        return !(lower.contains("\"error\"") || lower.contains("\"failed\"")
+                || lower.contains("\"success\":false") || lower.contains("\"ok\":false")
+                || lower.contains("失败") || lower.contains("异常"));
     }
 
     private static String normalizeKey(String key, String type, String content) {

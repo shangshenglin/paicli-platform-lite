@@ -92,12 +92,16 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         }
         try {
             ModelStreamListener streamListener = listener == null ? ModelStreamListener.NO_OP : listener;
+            ModelRequest activeRequest = request;
             for (int streamAttempt = 1; ; streamAttempt++) {
-                HttpResponse<InputStream> response = sendRequest(active, request);
+                HttpResponse<InputStream> response = sendRequest(active, activeRequest);
                 active.body = response.body();
                 if (active.canceled) throw new CancellationException("Model request canceled");
                 try {
                     ModelResponse result = readSse(response, streamListener);
+                    if (!result.hasToolCalls() && result.content().isBlank()) {
+                        throw new EmptyTerminalResponseException(result.reasoningContent().isBlank());
+                    }
                     finishAttempt(active, "SUCCESS", active.attemptHttpStatus, null);
                     circuit.succeeded();
                     return result;
@@ -108,6 +112,11 @@ public class OpenAiCompatibleModelClient implements ModelClient {
                     if (!willRetry) throw error;
                     finishAttempt(active, "RETRY", active.attemptHttpStatus, error.getMessage());
                     if (metrics != null) metrics.modelRetry();
+                    if (error instanceof EmptyTerminalResponseException) {
+                        activeRequest = emptyTerminalRecoveryRequest(request);
+                    } else if (toolCallRecoveryNeeded(error)) {
+                        activeRequest = truncatedToolCallRecoveryRequest(request);
+                    }
                     backoff(streamAttempt, 0, active);
                 }
             }
@@ -141,7 +150,8 @@ public class OpenAiCompatibleModelClient implements ModelClient {
 
     private static boolean retryableStreamFailure(Throwable error) {
         for (Throwable current = error; current != null; current = current.getCause()) {
-            if (current instanceof JsonProcessingException || current instanceof EOFException
+            if (current instanceof EmptyTerminalResponseException
+                    || current instanceof JsonProcessingException || current instanceof EOFException
                     || current instanceof IOException || current instanceof TimeoutException) {
                 return true;
             }
@@ -152,6 +162,35 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             }
         }
         return false;
+    }
+
+    private static boolean toolCallRecoveryNeeded(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof JsonProcessingException) return true;
+            String message = current.getMessage();
+            if (message != null && message.contains("incomplete tool call")) return true;
+        }
+        return false;
+    }
+
+    private static ModelRequest emptyTerminalRecoveryRequest(ModelRequest request) {
+        List<ModelMessage> messages = new ArrayList<>(request.messages());
+        messages.add(ModelMessage.user("The previous model attempt ended without final content or tool calls. "
+                + "Continue the same task now without repeating the analysis. If tools are available and the task "
+                + "requires an action, issue the necessary tool call(s) immediately; otherwise return a concise "
+                + "final answer. Reasoning is disabled for this recovery attempt, so act directly."));
+        return new ModelRequest(messages, request.tools(), request.maxOutputTokens(),
+                "disabled", "", request.route());
+    }
+
+    private static ModelRequest truncatedToolCallRecoveryRequest(ModelRequest request) {
+        List<ModelMessage> messages = new ArrayList<>(request.messages());
+        messages.add(ModelMessage.user("The previous streamed tool call was truncated or contained invalid JSON. "
+                + "Continue the same task now without repeating the analysis. Keep every tool call argument valid "
+                + "and small. For large file content, write one file per turn and split the work across multiple "
+                + "tool calls instead of generating one oversized argument."));
+        return new ModelRequest(messages, request.tools(), request.maxOutputTokens(),
+                request.thinkingMode(), request.reasoningEffort(), request.route());
     }
 
     private static boolean containsImages(ModelRequest request) {
@@ -325,11 +364,22 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         root.set("stream_options", mapper.createObjectNode().put("include_usage", true));
         String thinkingMode = "auto".equals(request.thinkingMode())
                 ? properties.effectiveThinkingMode() : request.thinkingMode();
+        boolean forcedNonThinkingContinuation = "enabled".equals(thinkingMode)
+                && hasToolCallWithoutReasoning(request);
+        if (forcedNonThinkingContinuation) {
+            // A recovery tool call produced with thinking disabled has no reasoning_content to replay.
+            // Keep subsequent turns non-thinking instead of sending an invalid mixed-mode history.
+            thinkingMode = "disabled";
+        }
         if (!kimiK3 && !"auto".equals(thinkingMode)) {
             root.set("thinking", mapper.createObjectNode().put("type", thinkingMode));
         }
-        String reasoningEffort = kimiK3
-                ? (request.reasoningEffort().isBlank() ? "max" : request.reasoningEffort())
+        String reasoningEffort = forcedNonThinkingContinuation
+                ? (kimiK3 ? "low" : "")
+                : kimiK3
+                ? (request.reasoningEffort().isBlank()
+                    ? ("disabled".equals(thinkingMode) ? "low" : "max")
+                    : request.reasoningEffort())
                 : request.reasoningEffort().isBlank()
                     ? ("disabled".equals(thinkingMode) ? "" : properties.effectiveReasoningEffort())
                     : request.reasoningEffort();
@@ -381,6 +431,11 @@ public class OpenAiCompatibleModelClient implements ModelClient {
             }
         }
         return root;
+    }
+
+    private static boolean hasToolCallWithoutReasoning(ModelRequest request) {
+        return request.messages().stream().anyMatch(message -> "assistant".equals(message.role())
+                && !message.toolCalls().isEmpty() && message.reasoningContent().isBlank());
     }
 
     private static boolean kimiK3(String model) {
@@ -513,6 +568,16 @@ public class OpenAiCompatibleModelClient implements ModelClient {
         private String id;
         private final StringBuilder name = new StringBuilder();
         private final StringBuilder arguments = new StringBuilder();
+    }
+
+    private static final class EmptyTerminalResponseException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        private EmptyTerminalResponseException(boolean noReasoning) {
+            super(noReasoning
+                    ? "Model stream ended without content or tool calls"
+                    : "Model stream ended after reasoning without content or tool calls");
+        }
     }
 
     private static final class CircuitState {

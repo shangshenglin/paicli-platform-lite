@@ -253,4 +253,70 @@ class ContextManagerTest {
         };
         return new ToolCatalog(List.of(deferred));
     }
+
+    @Test
+    void injectsLatestWorkingPlanIntoContext() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("working-plan", "alpha");
+        var run = store.createRun(session.id(), "multi step task");
+        store.saveWorkingPlan(run.id(), "refactor login flow",
+                "[{\"id\":\"s1\",\"title\":\"inspect\",\"status\":\"IN_PROGRESS\"}]", "ACTIVE");
+
+        var text = manager.prepare(session.id(), run.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+
+        assertThat(text).anyMatch(value -> value.contains("<working_plan>") && value.contains("refactor login flow"));
+    }
+
+    @Test
+    void injectsLanguageDirectiveMatchingUserQuery() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+
+        var zhSession = store.createSession("lang-zh", "alpha");
+        var zhRun = store.createRun(zhSession.id(), "请帮我重构登录模块");
+        var zh = manager.prepare(zhSession.id(), zhRun.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+        assertThat(zh).anyMatch(value -> value.contains("<language>") && value.contains("中文"));
+
+        var enSession = store.createSession("lang-en", "alpha");
+        var enRun = store.createRun(enSession.id(), "Help me refactor the login module");
+        var en = manager.prepare(enSession.id(), enRun.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+        assertThat(en).anyMatch(value -> value.contains("<language>") && value.contains("English"));
+    }
+
+    @Test
+    void injectsLatestReflectionIntoContext() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("reflection", "alpha");
+        var run = store.createRun(session.id(), "repair me");
+        store.saveReflection(run.id(), "VERIFICATION_FAILURE", "no evidence", "CHANGE_APPROACH",
+                "[]", "[]", "inspect evidence");
+
+        var text = manager.prepare(session.id(), run.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+
+        assertThat(text).anyMatch(value -> value.contains("<reflection>") && value.contains("VERIFICATION_FAILURE"));
+    }
 }

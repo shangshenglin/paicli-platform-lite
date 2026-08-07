@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
+import java.util.Optional;
 
 @Component
 public class ToolRouter {
@@ -21,7 +22,6 @@ public class ToolRouter {
     private final List<ServerToolProvider> providers;
     private final ToolCatalog toolCatalog;
     private final ObjectMapper mapper = new ObjectMapper();
-    private static final Set<String> SANDBOX_APPROVAL_TOOLS = Set.of("execute_command");
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
             "list_dir", "read_file", "read_artifact", "load_skill", "read_skill_resource",
             "search_knowledge", "web_search", "web_fetch", "github_repo_fetch", "session_search",
@@ -105,11 +105,25 @@ public class ToolRouter {
     }
 
     public boolean requiresApproval(String toolName) {
-        if (SANDBOX_APPROVAL_TOOLS.contains(toolName) || (toolName != null && toolName.startsWith("mcp__"))) {
-            return true;
+        return requiresApproval(toolName, Map.of());
+    }
+
+    public boolean requiresApproval(String toolName, Map<String, Object> arguments) {
+        return approvalReason(toolName, arguments).isPresent();
+    }
+
+    public Optional<String> approvalReason(String toolName, Map<String, Object> arguments) {
+        if ("execute_command".equals(toolName)) {
+            return CommandApprovalPolicy.approvalReason(arguments.get("command"))
+                    .map(reason -> "Command requires approval: " + reason);
         }
-        return providers.stream().anyMatch(provider -> provider.supports(toolName)
+        if (toolName != null && toolName.startsWith("mcp__")) {
+            return Optional.of("MCP tools require explicit approval before execution");
+        }
+        boolean providerApproval = providers.stream().anyMatch(provider -> provider.supports(toolName)
                 && provider.requiresApproval(toolName));
+        if (providerApproval) return Optional.of("Tool '" + toolName + "' requires explicit approval before execution");
+        return Optional.empty();
     }
 
     public String executionTarget(String toolName) {

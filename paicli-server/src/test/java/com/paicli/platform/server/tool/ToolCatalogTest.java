@@ -1,13 +1,12 @@
 package com.paicli.platform.server.tool;
 
-import com.paicli.platform.common.ToolEffect;
-import com.paicli.platform.common.ToolRequest;
-import com.paicli.platform.common.ToolResult;
-import com.paicli.platform.server.model.ModelToolDefinition;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.server.config.WebProperties;
+import com.paicli.platform.server.web.WebAccessService;
+import com.paicli.platform.server.web.WebToolProvider;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -15,40 +14,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ToolCatalogTest {
 
     @Test
-    void searchesAndActivatesDeferredProviderSchemas() {
-        ServerToolProvider provider = provider();
-        ToolCatalog catalog = new ToolCatalog(List.of(provider));
+    void exposesWebToolsByDefaultWhenWebEnabled() {
+        WebProperties webProperties = new WebProperties(
+                true, "http://127.0.0.1:8888/search", "", "Authorization", 20, 100_000);
+        WebToolProvider web = new WebToolProvider(
+                new WebAccessService(webProperties, new ObjectMapper()), new ObjectMapper());
+        ToolCatalog catalog = new ToolCatalog(List.of(web));
 
-        assertThat(catalog.definitionsForContext(Set.of(), Set.of())).extracting("name")
-                .contains("tool_search")
-                .doesNotContain("search_knowledge");
-        assertThat(catalog.search("knowledge retrieval", 8, Set.of())).extracting("name")
-                .containsExactly("search_knowledge");
-        assertThat(catalog.definitionsForContext(Set.of(), Set.of("search_knowledge")))
-                .extracting("name").contains("search_knowledge");
+        var names = catalog.definitionsForContext(Set.of(), Set.of()).stream()
+                .map(definition -> definition.name()).toList();
 
-        ToolRouter router = new ToolRouter(null, null, List.of(provider), catalog);
-        ToolResult result = router.execute(new ToolRequest(
-                "call_search", "run", "tool_search",
-                Map.of("query", "knowledge retrieval", "limit", 4), "idem"));
-
-        assertThat(result.success()).isTrue();
-        assertThat(result.content()).contains("\"activatedTools\":[\"search_knowledge\"]");
-        assertThat(router.effect("tool_search")).isEqualTo(ToolEffect.READ_ONLY);
+        assertThat(names).contains("web_search", "web_fetch", "github_repo_fetch");
     }
 
-    private static ServerToolProvider provider() {
-        return new ServerToolProvider() {
-            @Override public String id() { return "knowledge"; }
-            @Override public List<ModelToolDefinition> definitions() {
-                return List.of(new ModelToolDefinition(
-                        "search_knowledge", "Search indexed project knowledge",
-                        Map.of("type", "object", "properties", Map.of())));
-            }
-            @Override public boolean supports(String toolName) { return "search_knowledge".equals(toolName); }
-            @Override public ToolResult execute(ToolRequest request) {
-                return ToolResult.success(request.toolCallId(), "ok", 0);
-            }
-        };
+    @Test
+    void hidesWebToolsWhenWebDisabled() {
+        WebProperties webProperties = new WebProperties(false, "", "", "Authorization", 20, 100_000);
+        WebToolProvider web = new WebToolProvider(
+                new WebAccessService(webProperties, new ObjectMapper()), new ObjectMapper());
+        ToolCatalog catalog = new ToolCatalog(List.of(web));
+
+        var names = catalog.definitionsForContext(Set.of(), Set.of()).stream()
+                .map(definition -> definition.name()).toList();
+
+        assertThat(names).doesNotContain("web_search", "web_fetch", "github_repo_fetch");
     }
 }

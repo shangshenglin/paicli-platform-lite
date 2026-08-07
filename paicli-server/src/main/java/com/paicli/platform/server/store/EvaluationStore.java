@@ -130,13 +130,19 @@ public class EvaluationStore {
 
     public EvaluationExecution createExecution(EvaluationSuite suite, String modelProfileId,
                                                int trialCount, int passThreshold) {
+        return createExecution(suite, modelProfileId, null, trialCount, passThreshold);
+    }
+
+    public EvaluationExecution createExecution(EvaluationSuite suite, String modelProfileId,
+                                               String agentTeamId, int trialCount, int passThreshold) {
         String id = id("eval-exec"); Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO evaluation_executions(id,suite_id,project_key,status,model_profile_id,trial_count,pass_threshold,created_at) VALUES(?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO evaluation_executions(id,suite_id,project_key,status,model_profile_id,agent_team_id,trial_count,pass_threshold,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id); ps.setString(2, suite.id()); ps.setString(3, suite.projectKey());
             ps.setString(4, "RUNNING"); ps.setString(5, blank(modelProfileId) ? null : modelProfileId);
-            ps.setInt(6, range(trialCount, 1, 10, "trialCount"));
-            ps.setInt(7, range(passThreshold, 1, 100, "passThreshold")); ps.setString(8, now.toString());
+            ps.setString(6, blank(agentTeamId) ? null : agentTeamId);
+            ps.setInt(7, range(trialCount, 1, 10, "trialCount"));
+            ps.setInt(8, range(passThreshold, 1, 100, "passThreshold")); ps.setString(9, now.toString());
             ps.executeUpdate(); return execution(id).orElseThrow();
         } catch (SQLException e) { throw failure("create evaluation execution", e); }
     }
@@ -281,7 +287,7 @@ public class EvaluationStore {
         Double score = rs.getObject("average_score") == null ? null : rs.getDouble("average_score");
         Boolean passed = rs.getObject("passed") == null ? null : rs.getInt("passed") != 0;
         return new EvaluationExecution(rs.getString("id"), rs.getString("suite_id"), rs.getString("project_key"),
-                rs.getString("status"), rs.getString("model_profile_id"), rs.getInt("trial_count"),
+                rs.getString("status"), rs.getString("model_profile_id"), rs.getString("agent_team_id"), rs.getInt("trial_count"),
                 rs.getInt("pass_threshold"), score, passed, instant(rs.getString("created_at")),
                 instant(rs.getString("completed_at")));
     }
@@ -308,7 +314,7 @@ public class EvaluationStore {
                                  int maxToolCalls, int maxTokens, long maxDurationMs, boolean enabled,
                                  Instant createdAt, Instant updatedAt) { }
     public record EvaluationExecution(String id, String suiteId, String projectKey, String status,
-                                      String modelProfileId, int trialCount, int passThreshold,
+                                      String modelProfileId, String agentTeamId, int trialCount, int passThreshold,
                                       Double averageScore, Boolean passed, Instant createdAt, Instant completedAt) { }
     public record EvaluationTrial(String id, String executionId, String caseId, int ordinal,
                                   String sessionId, String runId, String status, Integer score,

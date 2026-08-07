@@ -27,7 +27,7 @@ paicli:
   workspace-root: data/workspaces
   worker-count: ${PAICLI_WORKER_COUNT:4}
   worker-poll-millis: ${PAICLI_WORKER_POLL_MILLIS:300}
-  sandbox-mode: local
+  sandbox-mode: docker
   infrastructure:
     run-queue: ${PAICLI_RUN_QUEUE_BACKEND:local}
     coordination: ${PAICLI_COORDINATION_BACKEND:local}
@@ -72,7 +72,7 @@ paicli:
     startup-timeout-seconds: 30
     command-timeout-seconds: 90
   web:
-    enabled: ${PAICLI_WEB_ENABLED:false}
+    enabled: ${PAICLI_WEB_ENABLED:true}
     search-url: ${PAICLI_WEB_SEARCH_URL:}
     api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
     api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}

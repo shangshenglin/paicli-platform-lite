@@ -1,12 +1,16 @@
 package com.paicli.platform.server.approval;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.ApprovalStatus;
 import com.paicli.platform.server.audit.AuditService;
+import com.paicli.platform.server.collaboration.CollaborationService;
 import com.paicli.platform.server.domain.ApprovalRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
+import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -18,22 +22,44 @@ import java.util.HexFormat;
 
 @Service
 public class ApprovalService {
+    private static final TypeReference<Map<String, Object>> ARGUMENTS_TYPE = new TypeReference<>() { };
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final SqliteRuntimeStore store;
     private final AuditService auditService;
     private final ToolRouter toolRouter;
+    private final CollaborationService collaboration;
 
-    public ApprovalService(SqliteRuntimeStore store, AuditService auditService, ToolRouter toolRouter) {
+    @org.springframework.beans.factory.annotation.Autowired
+    public ApprovalService(SqliteRuntimeStore store, AuditService auditService, ToolRouter toolRouter,
+                           CollaborationService collaboration) {
         this.store = store;
         this.auditService = auditService;
         this.toolRouter = toolRouter;
+        this.collaboration = collaboration;
     }
 
-    public boolean requiresApproval(String toolName) {
-        return toolRouter.requiresApproval(toolName);
+    public ApprovalService(SqliteRuntimeStore store, AuditService auditService, ToolRouter toolRouter) {
+        this(store, auditService, toolRouter, null);
+    }
+
+    @PostConstruct
+    public void reconcileCommandApprovals() {
+        for (ApprovalRecord approval : store.pendingApprovals()) {
+            ToolCallRecord call = store.findToolCall(approval.toolCallId()).orElse(null);
+            if (call == null || !"execute_command".equals(call.toolName()) || requiresApproval(call)) continue;
+            resolve(approval.id(), ApprovalStatus.APPROVED);
+            auditService.record("approval.risk_reclassified", approval.runId(), call.id(), Map.of(
+                    "approvalId", approval.id(), "tool", call.toolName(), "reason", "command no longer requires approval"));
+        }
+    }
+
+    public boolean requiresApproval(ToolCallRecord call) {
+        return toolRouter.requiresApproval(call.toolName(), arguments(call));
     }
 
     public synchronized ApprovalRecord request(RunRecord run, ToolCallRecord call) {
-        String reason = "Tool '" + call.toolName() + "' requires explicit approval before execution";
+        String reason = toolRouter.approvalReason(call.toolName(), arguments(call))
+                .orElseThrow(() -> new IllegalStateException("Tool call does not require approval"));
         ApprovalRecord approval = store.createApproval(run.id(), call.id(), reason);
         var session = store.findSession(run.sessionId()).orElseThrow();
         var policy = store.matchingApprovalPolicy(session.id(), session.projectKey(), call.toolName(),
@@ -91,13 +117,33 @@ public class ApprovalService {
         } else {
             store.failTool(approval.toolCallId(), "Tool call denied by user");
             store.failRun(run.id(), "Tool call denied by user");
+            store.recordMemoryOutcome(run.id(), "RUN_FAILED");
             toolRouter.release(run.id());
+            if (collaboration != null) {
+                try {
+                    store.findRun(run.id()).ifPresent(value -> collaboration.onRunTerminal(value, "FAILED"));
+                } catch (Exception error) {
+                    try {
+                        store.appendEvent(run.id(), "collaboration.lifecycle_failed",
+                                JSON.writeValueAsString(Map.of("error", error.getMessage() == null
+                                        ? error.getClass().getSimpleName() : error.getMessage())));
+                    } catch (Exception ignored) {
+                        // best-effort diagnostics only
+                    }
+                }
+            }
         }
         return approval;
     }
 
     public List<ApprovalRecord> pending() {
         return store.pendingApprovals();
+    }
+
+    public List<ApprovalRecord> pendingForProject(String projectKey) {
+        return store.pendingApprovals().stream().filter(approval -> store.findRun(approval.runId())
+                .flatMap(run -> store.findSession(run.sessionId()))
+                .map(session -> session.projectKey().equals(projectKey)).orElse(false)).toList();
     }
 
     public List<ApprovalRecord> pendingForRunTree(String runId) {
@@ -116,6 +162,10 @@ public class ApprovalService {
         return store.deleteApprovalPolicy(policyId);
     }
 
+    public List<String> deletePolicies(List<String> policyIds) {
+        return store.deleteApprovalPolicies(policyIds);
+    }
+
     public ApprovalStatus statusForTool(String toolCallId) {
         return store.findApprovalByToolCall(toolCallId)
                 .map(ApprovalRecord::status)
@@ -132,5 +182,13 @@ public class ApprovalService {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (Exception e) { throw new IllegalStateException("SHA-256 unavailable", e); }
+    }
+
+    private static Map<String, Object> arguments(ToolCallRecord call) {
+        try {
+            return JSON.readValue(call.arguments(), ARGUMENTS_TYPE);
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 }

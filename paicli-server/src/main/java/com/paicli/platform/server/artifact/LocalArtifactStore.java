@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -123,6 +124,20 @@ public class LocalArtifactStore implements ArtifactStore {
             objectStorage.delete(objectKey("artifacts", artifact.relativePath()));
             return true;
         } catch (Exception e) { throw new IllegalStateException("Failed to delete artifact", e); }
+    }
+
+    @Override
+    public List<String> deleteBatch(List<String> artifactIds) {
+        List<ArtifactRecord> artifacts = store.deleteArtifacts(artifactIds);
+        for (ArtifactRecord artifact : artifacts) {
+            try {
+                objectStorage.delete(objectKey("artifacts", artifact.relativePath()));
+            } catch (Exception e) {
+                throw new IllegalStateException("Artifact metadata was deleted, but stored content cleanup failed: "
+                        + artifact.id(), e);
+            }
+        }
+        return artifacts.stream().map(ArtifactRecord::id).toList();
     }
 
     private static String safeName(String value) {

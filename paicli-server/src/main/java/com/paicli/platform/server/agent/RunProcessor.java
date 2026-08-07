@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.ApprovalStatus;
+import com.paicli.platform.common.ToolEffect;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.approval.ApprovalService;
@@ -20,6 +21,7 @@ import com.paicli.platform.server.observability.RuntimeMetrics;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
+import com.paicli.platform.server.collaboration.CollaborationService;
 import com.paicli.platform.server.tool.ToolRouter;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,10 +35,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @Component
 public class RunProcessor {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() { };
+    private static final int MAX_READ_ONLY_PARALLELISM = 4;
+    private static final int MAX_VERIFICATION_REPAIRS = 2;
     private final SqliteRuntimeStore store;
     private final ModelClient modelClient;
     private final ToolRouter toolRouter;
@@ -50,6 +58,9 @@ public class RunProcessor {
     private final RuntimeMetrics metrics;
     private final ProductivityStore productivity;
     private final CompletionNotificationService notifications;
+    private final CollaborationService collaboration;
+    private final RunVerificationService runVerification;
+    private final ReflectionService reflectionService;
 
     @Autowired
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -58,7 +69,10 @@ public class RunProcessor {
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer,
                         LayeredMemoryService memoryService, ModelProperties modelProperties,
                         RuntimeMetrics metrics, ProductivityStore productivity,
-                        CompletionNotificationService notifications) {
+                        CompletionNotificationService notifications,
+                        CollaborationService collaboration,
+                        RunVerificationService runVerification,
+                        ReflectionService reflectionService) {
         this.store = store;
         this.modelClient = modelClient;
         this.toolRouter = toolRouter;
@@ -72,6 +86,9 @@ public class RunProcessor {
         this.metrics = metrics;
         this.productivity = productivity;
         this.notifications = notifications;
+        this.collaboration = collaboration;
+        this.runVerification = runVerification;
+        this.reflectionService = reflectionService;
     }
 
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -79,7 +96,31 @@ public class RunProcessor {
                         ApprovalService approvalService, AuditService auditService,
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
-                contextManager, resultMaterializer, null, null, null, null, null);
+                contextManager, resultMaterializer, null, null, null, null, null, null,
+                null, null);
+    }
+
+    RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
+                 ToolRouter toolRouter, ObjectMapper mapper,
+                 ApprovalService approvalService, AuditService auditService,
+                 ContextManager contextManager, ToolResultMaterializer resultMaterializer,
+                 ModelProperties modelProperties,
+                 RunVerificationService runVerification, ReflectionService reflectionService) {
+        this(store, modelClient, toolRouter, mapper, approvalService, auditService,
+                contextManager, resultMaterializer, null, modelProperties, null, null, null, null,
+                runVerification, reflectionService);
+    }
+
+    RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
+                 ToolRouter toolRouter, ObjectMapper mapper,
+                 ApprovalService approvalService, AuditService auditService,
+                 ContextManager contextManager, ToolResultMaterializer resultMaterializer,
+                 LayeredMemoryService memoryService, ModelProperties modelProperties,
+                 RuntimeMetrics metrics, ProductivityStore productivity,
+                 CompletionNotificationService notifications) {
+        this(store, modelClient, toolRouter, mapper, approvalService, auditService,
+                contextManager, resultMaterializer, memoryService, modelProperties, metrics,
+                productivity, notifications, null, null, null);
     }
 
     public void process(RunRecord claimedRun) {
@@ -154,6 +195,42 @@ public class RunProcessor {
             if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) return;
 
             if (!response.hasToolCalls()) {
+                if (response.content().isBlank()) {
+                    throw new IllegalStateException(
+                            "model returned an empty final response without tool calls; refusing false completion");
+                }
+                if (runVerification != null) {
+                    RunVerificationService.VerificationResult verification =
+                            runVerification.verify(run, response.content());
+                    if (verification.status() == RunVerificationService.Status.REPAIRABLE) {
+                        long repairs = store.countRunEvents(run.id(), "run.verification");
+                        if (repairs < MAX_VERIFICATION_REPAIRS) {
+                            store.appendEvent(run.id(), "run.verification", json(Map.of(
+                                    "status", verification.status().name(),
+                                    "failedCriteria", verification.failedCriteria(),
+                                    "missingEvidence", verification.missingEvidence(),
+                                    "repairInstruction", verification.repairInstruction())));
+                            store.appendMessage(run.sessionId(), run.id(), "user",
+                                    "<verification>\n" + verification.repairInstruction() + "\n</verification>");
+                            store.requeueRun(run.id(), run.currentStep() + 1);
+                            toolRouter.release(run.id());
+                            return;
+                        }
+                        if (reflectionService != null) {
+                            try {
+                                reflectionService.classifyAndRecord(run.id(), "VERIFICATION_FAILURE",
+                                        List.of("run.verification"));
+                            } catch (Exception ignored) { }
+                        }
+                        store.failRun(run.id(), "run exceeded verification repair limit: "
+                                + String.join("; ", verification.failedCriteria()));
+                        store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+                        store.requeueWaitingParentRuns(run.id());
+                        notify(run, "FAILED", "运行无法通过完成验证");
+                        toolRouter.release(run.id());
+                        return;
+                    }
+                }
                 boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(),
                         response.content(), response.reasoningContent(), json(Map.of(
                         "content", response.content(),
@@ -207,7 +284,12 @@ public class RunProcessor {
                 return;
             }
             store.appendEvent(run.id(), "model.tool_calls", json(Map.of("count", calls.size())));
-            handleTool(run, calls.get(0));
+            List<ToolCallRecord> readOnly = readOnlyPrefix(calls);
+            if (readOnly.size() >= 2) {
+                executeReadOnlyBatch(run, readOnly);
+            } else {
+                handleTool(run, calls.get(0));
+            }
         } catch (Exception e) {
             if (productivity != null && budgetReservationKey != null) {
                 try { productivity.releaseModelBudget(budgetReservationKey); } catch (Exception ignored) { }
@@ -229,7 +311,7 @@ public class RunProcessor {
     }
 
     private void handleTool(RunRecord run, ToolCallRecord call) throws Exception {
-        if (approvalService.requiresApproval(call.toolName())) {
+        if (approvalService.requiresApproval(call)) {
             ApprovalStatus status = approvalService.statusForTool(call.id());
             if (status == null) {
                 approvalService.request(run, call);
@@ -289,8 +371,19 @@ public class RunProcessor {
     }
 
     private void notify(RunRecord run,String event,String message){
-        if(notifications==null)return;
-        store.findSession(run.sessionId()).ifPresent(session->notifications.publish(session.projectKey(),event,run.id(),message));
+        if (notifications != null) {
+            store.findSession(run.sessionId()).ifPresent(session ->
+                    notifications.publish(session.projectKey(), event, run.id(), message));
+        }
+        if (collaboration != null && ("COMPLETED".equals(event) || "FAILED".equals(event))) {
+            try {
+                store.findRun(run.id()).ifPresent(value -> collaboration.onRunTerminal(value, event));
+            } catch (Exception error) {
+                store.appendEvent(run.id(), "collaboration.lifecycle_failed", json(Map.of(
+                        "error", error.getMessage() == null
+                                ? error.getClass().getSimpleName() : error.getMessage())));
+            }
+        }
     }
 
     private record RunBudgetSnapshot(int step, int maxSteps, int tokens, int maxTokens,
@@ -315,28 +408,43 @@ public class RunProcessor {
         MDC.put("toolCallId", call.id());
         if (metrics != null) metrics.toolCall(call.toolName(), toolRouter.executionTarget(call.toolName()));
         if (!store.markRunStatus(run.id(), RunStatus.WAITING_TOOL)) return;
-        Map<String, Object> arguments = mapper.readValue(call.arguments(), MAP_TYPE);
-        store.appendEvent(run.id(), "tool.requested", json(Map.of(
-                "toolCallId", call.id(), "name", call.toolName(),
-                "argumentBytes", call.arguments().length())));
-        store.markToolRunning(call.id());
-        Map<String, Object> startedEvent = new LinkedHashMap<>();
-        startedEvent.put("toolCallId", call.id());
-        startedEvent.put("name", call.toolName());
-        if ("execute_command".equals(call.toolName())) {
-            startedEvent.put("shell", arguments.getOrDefault("shell", run.executionShell()));
-            startedEvent.put("cwd", arguments.getOrDefault("cwd", "."));
-            if (arguments.containsKey("timeoutSeconds")) {
-                startedEvent.put("timeoutSeconds", arguments.get("timeoutSeconds"));
-            }
-        }
-        store.appendEvent(run.id(), "tool.started", json(startedEvent));
-        auditService.record("tool.started", run.id(), call.id(), Map.of(
-                "tool", call.toolName(), "arguments", call.arguments(),
-                "target", toolRouter.executionTarget(call.toolName())));
+        ToolResult result = executeToolCall(run, call);
+        commitToolResult(run, call, result);
+        MDC.remove("toolCallId");
+    }
 
-        ToolResult result = toolRouter.execute(new ToolRequest(
-                call.id(), run.id(), call.toolName(), arguments, call.idempotencyKey()));
+    /** Executes one tool without committing its outcome; returns the raw result. */
+    private ToolResult executeToolCall(RunRecord run, ToolCallRecord call) {
+        try {
+            Map<String, Object> arguments = mapper.readValue(call.arguments(), MAP_TYPE);
+            store.appendEvent(run.id(), "tool.requested", json(Map.of(
+                    "toolCallId", call.id(), "name", call.toolName(),
+                    "argumentBytes", call.arguments().length())));
+            store.markToolRunning(call.id());
+            Map<String, Object> startedEvent = new LinkedHashMap<>();
+            startedEvent.put("toolCallId", call.id());
+            startedEvent.put("name", call.toolName());
+            if ("execute_command".equals(call.toolName())) {
+                startedEvent.put("shell", arguments.getOrDefault("shell", run.executionShell()));
+                startedEvent.put("cwd", arguments.getOrDefault("cwd", "."));
+                if (arguments.containsKey("timeoutSeconds")) {
+                    startedEvent.put("timeoutSeconds", arguments.get("timeoutSeconds"));
+                }
+            }
+            store.appendEvent(run.id(), "tool.started", json(startedEvent));
+            auditService.record("tool.started", run.id(), call.id(), Map.of(
+                    "tool", call.toolName(), "arguments", call.arguments(),
+                    "target", toolRouter.executionTarget(call.toolName())));
+            return toolRouter.execute(new ToolRequest(
+                    call.id(), run.id(), call.toolName(), arguments, call.idempotencyKey()));
+        } catch (Exception e) {
+            return ToolResult.failure(call.id(),
+                    e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), 0);
+        }
+    }
+
+    /** Commits one tool outcome (message + event + audit) in the model's original order. */
+    private void commitToolResult(RunRecord run, ToolCallRecord call, ToolResult result) {
         if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) {
             store.failTool(call.id(), "Run canceled");
             toolRouter.release(run.id());
@@ -355,7 +463,8 @@ public class RunProcessor {
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
                     materialized.modelContent(), null, json(completedEvent), run.currentStep());
             if (!committed) return;
-            if (isActiveAgentResult(call, materialized.modelContent())) {
+            if (isActiveAgentResult(call, materialized.modelContent())
+                    || "create_collaboration_subtask".equals(call.toolName())) {
                 store.waitForAgent(run.id());
                 return;
             }
@@ -377,8 +486,101 @@ public class RunProcessor {
             if (!committed) return;
             auditService.record("tool.failed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
+            recordToolFailureReflection(run, call, result);
         }
-        MDC.remove("toolCallId");
+    }
+
+    /** PR4: executes the leading read-only prefix in parallel, committing outcomes in model order. */
+    private void executeReadOnlyBatch(RunRecord run, List<ToolCallRecord> calls) throws Exception {
+        if (!store.markRunStatus(run.id(), RunStatus.WAITING_TOOL)) return;
+        if (metrics != null) calls.forEach(call ->
+                metrics.toolCall(call.toolName(), toolRouter.executionTarget(call.toolName())));
+        Map<String, ToolResult> results = new ConcurrentHashMap<>();
+        ExecutorService pool = Executors.newFixedThreadPool(
+                Math.min(Math.max(calls.size(), 1), MAX_READ_ONLY_PARALLELISM));
+        List<Future<?>> futures = new ArrayList<>();
+        for (ToolCallRecord call : calls) {
+            futures.add(pool.submit(() -> results.put(call.id(), executeToolCall(run, call))));
+        }
+        for (Future<?> future : futures) future.get();
+        pool.shutdown();
+        boolean waitForAgent = false;
+        for (ToolCallRecord call : calls) {
+            ToolResult result = results.get(call.id());
+            if (result == null) continue;
+            if (commitBatchToolResult(run, call, result)) waitForAgent = true;
+        }
+        boolean hasMore = store.toolCallsForRun(run.id()).stream()
+                .anyMatch(call -> call.status() == com.paicli.platform.common.ToolCallStatus.REQUESTED);
+        store.requeueRun(run.id(), hasMore ? run.currentStep() : run.currentStep() + 1);
+        if (waitForAgent) store.waitForAgent(run.id());
+    }
+
+    /**
+     * Commits one batched outcome via {@code commitToolMessage} (no Run status guard, no requeue).
+     * Returns true when the Run must park waiting for a delegated child result.
+     */
+    private boolean commitBatchToolResult(RunRecord run, ToolCallRecord call, ToolResult result) {
+        if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) {
+            store.failTool(call.id(), "Run canceled");
+            return false;
+        }
+        if (result.success()) {
+            ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
+                    run.id(), call.toolName(), result.content());
+            Map<String, Object> completedEvent = new LinkedHashMap<>(result.metadata());
+            completedEvent.put("toolCallId", call.id());
+            completedEvent.put("durationMs", result.durationMs());
+            completedEvent.put("externalized", materialized.artifact() != null);
+            completedEvent.put("artifactId",
+                    materialized.artifact() == null ? "" : materialized.artifact().id());
+            completedEvent.put("content", materialized.modelContent());
+            store.commitToolMessage(run.sessionId(), run.id(), call, true,
+                    materialized.modelContent(), null, json(completedEvent));
+            auditService.record("tool.completed", run.id(), call.id(), Map.of(
+                    "tool", call.toolName(), "durationMs", result.durationMs(), "result", result.content()));
+            return isActiveAgentResult(call, materialized.modelContent())
+                    || "create_collaboration_subtask".equals(call.toolName());
+        }
+        if (metrics != null) metrics.toolFailure(call.toolName(), toolRouter.executionTarget(call.toolName()));
+        String observation = json(Map.of(
+                "ok", false,
+                "tool", call.toolName(),
+                "error", result.error(),
+                "guidance", "Treat this as a tool observation. Do not retry unchanged arguments; use available context or choose a valid alternative."));
+        Map<String, Object> failedEvent = new LinkedHashMap<>(result.metadata());
+        failedEvent.put("toolCallId", call.id());
+        failedEvent.put("durationMs", result.durationMs());
+        failedEvent.put("error", result.error());
+        store.commitToolMessage(run.sessionId(), run.id(), call, false,
+                observation, result.error(), json(failedEvent));
+        auditService.record("tool.failed", run.id(), call.id(), Map.of(
+                "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
+        recordToolFailureReflection(run, call, result);
+        return false;
+    }
+
+    private List<ToolCallRecord> readOnlyPrefix(List<ToolCallRecord> calls) {
+        List<ToolCallRecord> batch = new ArrayList<>();
+        for (ToolCallRecord call : calls) {
+            if (toolRouter.effect(call.toolName()) == ToolEffect.READ_ONLY
+                    && !approvalService.requiresApproval(call)) {
+                batch.add(call);
+            } else {
+                break;
+            }
+        }
+        return batch;
+    }
+
+    private void recordToolFailureReflection(RunRecord run, ToolCallRecord call, ToolResult result) {
+        if (reflectionService == null) return;
+        try {
+            boolean testLike = call.arguments() != null
+                    && call.arguments().toLowerCase().contains("test");
+            String failureClass = testLike ? "TEST_FAILURE" : "TOOL_ERROR";
+            reflectionService.classifyAndRecord(run.id(), failureClass, List.of(call.id()));
+        } catch (Exception ignored) { }
     }
 
     private String json(Object value) {
@@ -417,6 +619,12 @@ public class RunProcessor {
             String signature = toolSignature(draft.toolName(), draft.arguments());
             int count = counts.merge(signature, 1, Integer::sum);
             if (count > limit) {
+                if (reflectionService != null) {
+                    try {
+                        reflectionService.classifyAndRecord(runId, "DUPLICATE_CALL",
+                                List.of(draft.toolName() + " " + draft.arguments()));
+                    } catch (Exception ignored) { }
+                }
                 throw new IllegalStateException("repeated tool call loop detected: " + draft.toolName()
                         + " with unchanged arguments repeated " + count + " times (limit " + limit + ")");
             }

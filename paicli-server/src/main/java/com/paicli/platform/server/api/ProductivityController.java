@@ -3,6 +3,7 @@ package com.paicli.platform.server.api;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.model.ModelClient;
+import com.paicli.platform.server.collaboration.CollaborationToolProvider;
 import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
@@ -261,14 +262,23 @@ public class ProductivityController {
     }
 
     @PostMapping("/queue/batch")
+    @io.swagger.v3.oas.annotations.Operation(summary = "Batch-manage Run queue records",
+            description = "CANCEL, REQUEUE and PRIORITY update queue state. DELETE permanently removes up to 100 "
+                    + "terminal Runs and their persisted runtime records in one transaction; any missing Run, active "
+                    + "target, or active related delegation Run rolls back the complete delete batch.")
     public Map<String,Object> batch(@Valid @RequestBody ApiDtos.QueueBatchRequest request){
-        List<String> changed=new ArrayList<>();String action=request.action().trim().toUpperCase();
+        String action=request.action().trim().toUpperCase();
+        if("DELETE".equals(action)){
+            List<String> deleted=runtime.deleteRuns(request.runIds());
+            return Map.of("action",action,"changed",deleted,"deletedCount",deleted.size());
+        }
+        List<String> changed=new ArrayList<>();
         for(String runId:request.runIds().stream().filter(v->v!=null&&!v.isBlank()).distinct().limit(100).toList()){
             boolean ok=switch(action){
                 case "CANCEL"->{boolean canceled=runtime.cancelRunTree(runId).contains(runId);modelClient.cancel(runId);tools.cancel(runId);yield canceled;}
                 case "REQUEUE"->{boolean requeued=productivity.requeue(runId);if(requeued)runtime.appendEvent(runId,"run.requeued","{\"source\":\"productivity-console\"}");yield requeued;}
                 case "PRIORITY"->productivity.setPriority(runId,request.priority()==null?0:request.priority());
-                default->throw new IllegalArgumentException("action must be CANCEL, REQUEUE, or PRIORITY");};
+                default->throw new IllegalArgumentException("action must be CANCEL, REQUEUE, PRIORITY, or DELETE");};
             if(ok)changed.add(runId);
         }
         return Map.of("action",action,"changed",changed);
@@ -350,6 +360,11 @@ public class ProductivityController {
                     request.maxDepth() == null ? 1 : request.maxDepth(),
                     Boolean.TRUE.equals(request.requireReviewer()),
                     Boolean.TRUE.equals(request.requireRunner()),
+                    request.teamInstructions(),
+                    mapper.writeValueAsString(request.memberRoles() == null ? Map.of() : request.memberRoles()),
+                    mapper.writeValueAsString(request.capabilityTags() == null ? List.of() : request.capabilityTags()),
+                    request.routingPolicy(), request.completionPolicy(), request.fallbackAgentProfileId(),
+                    request.maxConcurrency() == null ? Math.max(1, members.size()) : request.maxConcurrency(),
                     request.enabled() == null || request.enabled());
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime
@@ -410,6 +425,13 @@ public class ProductivityController {
                             existing.collaborationRole(), existing.handoffPolicy(), existing.workspaceScope(),
                             existing.approvalPolicy(), existing.thinkingMode(), existing.reasoningEffort(),
                             existing.executionShell(), existing.enabled(), seed.key(), seed.version());
+                } else if (seed.key().equals(existing.templateKey())
+                        && existing.templateVersion() < seed.version()) {
+                    productivity.saveAgentProfile(existing.id(), existing.projectKey(), seed.name(), seed.description(),
+                            seed.prompt(), existing.modelProfileId(), mapper.writeValueAsString(withPlanTools(seed.tools())),
+                            mapper.writeValueAsString(List.of()), seed.outputSchema(), seed.role(), seed.handoff(),
+                            "PROJECT", seed.approval(), existing.thinkingMode(), existing.reasoningEffort(),
+                            existing.executionShell(), existing.enabled(), seed.key(), seed.version());
                 }
                 continue;
             }
@@ -458,6 +480,7 @@ public class ProductivityController {
     private static List<String> withPlanTools(List<String> tools) {
         var values = new java.util.LinkedHashSet<>(tools);
         values.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
+        values.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
         return List.copyOf(values);
     }
     private String withPlanToolsJson(String json) throws Exception {
@@ -468,32 +491,32 @@ public class ProductivityController {
     private static boolean blank(String value){return value==null||value.isBlank();}
     private static ResponseStatusException notFound(String name){return new ResponseStatusException(HttpStatus.NOT_FOUND,name+" not found");}
     private static final List<AgentSeed> AGENT_SEEDS=List.of(
-            new AgentSeed("leader","Leader 任务队长",1,"把一句话目标拆成可验证计划，挑选专家并综合最终交付。",
+            new AgentSeed("leader","Leader 任务队长",2,"把一句话目标拆成可验证计划，挑选专家并综合最终交付。",
                     "你是 PaiCLI 的 Leader 智能体。先理解用户目标，调用 list_agent_profiles 查看可用专家，再用 spawn_agent 按 agent_profile_id 分派独立、可验证的子任务。独立节点可并行；审查、测试等后置节点必须用 dependencies 引用前置 delegation_id 或 child_run_id，并声明资源读写集与失败策略。持续用 list_agents 和 get_agent_result 跟踪结果，最后合并为一个完整交付。不要重复派发任务。",
                     "LEADER","LEADER_ASSIGNED","INHERIT",
                     List.of("list_agent_profiles","spawn_agent","list_agents","get_agent_result","cancel_agent","read_file","list_dir","search_knowledge","web_search","web_fetch","github_repo_fetch","mcp__github__*"),
                     "输出 Markdown：目标拆解、专家分工、关键结果、风险、最终建议或交付物。"),
-            new AgentSeed("requirements","需求分析专家",1,"澄清目标、边界、用户场景和验收标准。",
+            new AgentSeed("requirements","需求分析专家",2,"澄清目标、边界、用户场景和验收标准。",
                     "你是需求分析专家。将模糊目标转成清晰任务说明，识别范围、约束、用户路径、边界条件和验收标准。只在必要时提出阻塞问题；否则给出可执行的需求拆解。",
                     "EXPERT","LEADER_ASSIGNED","READ_ONLY",
                     List.of("read_file","list_dir","search_knowledge","session_search"),
                     "输出：需求摘要、范围、假设、验收标准、未决问题。"),
-            new AgentSeed("implementation","代码实现专家",1,"在受控工作区内实现功能并说明关键改动。",
+            new AgentSeed("implementation","代码实现专家",2,"在受控工作区内实现功能并说明关键改动。",
                     "你是代码实现专家。优先遵循现有架构和代码风格，做最小可交付改动。修改前先定位相关文件，修改后说明行为变化和可能影响。涉及危险操作时等待审批。",
                     "EXPERT","LEADER_ASSIGNED","INHERIT",
                     List.of("list_dir","read_file","write_file","execute_command","search_knowledge"),
                     "输出：修改摘要、关键文件、验证命令、风险。"),
-            new AgentSeed("runner","测试验证专家",1,"设计并执行回归验证，定位失败原因。",
+            new AgentSeed("runner","测试验证专家",2,"设计并执行回归验证，定位失败原因。",
                     "你是测试验证专家。根据任务目标选择最小但有效的测试范围，运行验证命令，记录失败复现、日志要点和建议修复路径。不做无关重构。",
                     "RUNNER","LEADER_ASSIGNED","INHERIT",
                     List.of("list_dir","read_file","execute_command","search_knowledge"),
                     "输出：验证范围、命令、结果、失败分析、剩余风险。"),
-            new AgentSeed("reviewer","代码审查专家",1,"审查缺陷、回归风险和缺失测试。",
+            new AgentSeed("reviewer","代码审查专家",2,"审查缺陷、回归风险和缺失测试。",
                     "你是代码审查专家。以缺陷优先，检查行为回归、安全边界、数据兼容、并发和测试缺口。发现问题时给出文件位置、影响和建议修复；没有问题也要说明剩余风险。",
                     "REVIEWER","LEADER_ASSIGNED","READ_ONLY",
                     List.of("list_dir","read_file","search_knowledge","session_search"),
                     "输出：按严重程度排序的问题、证据、建议、测试缺口。"),
-            new AgentSeed("docs","文档交付专家",1,"把实现结果整理成用户可读文档和变更说明。",
+            new AgentSeed("docs","文档交付专家",2,"把实现结果整理成用户可读文档和变更说明。",
                     "你是文档交付专家。根据代码和任务结果更新 README、接口说明、变更日志或交付摘要。内容要准确、可审计，避免夸大未实现能力。",
                     "EXPERT","LEADER_ASSIGNED","INHERIT",
                     List.of("read_file","write_file","search_knowledge"),

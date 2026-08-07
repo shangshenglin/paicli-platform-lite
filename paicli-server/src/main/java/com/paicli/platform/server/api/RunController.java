@@ -219,6 +219,10 @@ public class RunController {
         value.put("events", store.events(runId, 0, 1_000));
         value.put("planStep", step == null ? Map.of() : step);
         value.put("validationChecks", checks);
+        value.put("workingPlan", store.latestWorkingPlan(runId).orElse(null));
+        value.put("reflection", store.latestReflection(runId).orElse(null));
+        value.put("verifications", store.events(runId, 0, 1_000).stream()
+                .filter(event -> "run.verification".equals(event.type())).toList());
         return value;
     }
 

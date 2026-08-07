@@ -3,6 +3,7 @@ package com.paicli.platform.server.evaluation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.store.EvaluationStore;
+import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -15,6 +16,42 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class EvaluationServiceTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void startsTeamEvaluationWithLeaderAndCollaborationPolicy() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        EvaluationStore evaluations = new EvaluationStore(properties);
+        ProductivityStore productivity = new ProductivityStore(properties);
+        var leader = productivity.saveAgentProfile(null, "project-team-eval", "Leader", "Coordinates",
+                "Delegate and synthesize", null, "[\"spawn_agent\"]", "[]", "summary",
+                "LEADER", "LEADER_ASSIGNED", "PROJECT", "INHERIT", true);
+        var reviewer = productivity.saveAgentProfile(null, "project-team-eval", "Reviewer", "Reviews",
+                "Review risks", null, "[]", "[]", "risks",
+                "REVIEWER", "LEADER_ASSIGNED", "PROJECT", "READ_ONLY", true);
+        var team = productivity.saveAgentTeam(null, "project-team-eval", "Delivery", "",
+                leader.id(), "[\"" + reviewer.id() + "\"]", 2, 1, true, false,
+                "Delegate review", "{}", "[\"review\"]", "CAPABILITY", "LEADER_ACCEPTS",
+                reviewer.id(), 2, true);
+        var suite = evaluations.saveSuite(null, "project-team-eval", "Team regression", "", 1, 80);
+        evaluations.saveCase(null, suite.id(), "team answer", "review this change", "[]", "[]",
+                "[]", "[]", 0, 0, 0, true);
+        EvaluationService service = new EvaluationService(evaluations, runtime, productivity, new ObjectMapper());
+
+        var execution = service.start(suite.id(), null, team.id(), 1, 80);
+        var trial = evaluations.trials(execution.id()).get(0);
+        var run = runtime.findRun(trial.runId()).orElseThrow();
+
+        assertThat(execution.agentTeamId()).isEqualTo(team.id());
+        assertThat(run.agentProfileId()).isEqualTo(leader.id());
+        assertThat(runtime.collaborationPolicy(run.id())).get().satisfies(policy -> {
+            assertThat(policy.enabled()).isTrue();
+            assertThat(policy.allowedAgentProfileIdsJson()).contains(reviewer.id());
+            assertThat(policy.requireReviewer()).isTrue();
+        });
+    }
 
     @Test
     void executesScoresAggregatesAndPromotesBaseline() throws Exception {
