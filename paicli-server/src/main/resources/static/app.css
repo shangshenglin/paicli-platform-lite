@@ -774,3 +774,14 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
   .workbench-collapse summary { grid-template-columns: minmax(0, 1fr) auto; }
   .workbench-collapse summary button { width: 100%; }
 }
+
+/* PRD Analysis console */
+.prd-dialog { width: min(960px, calc(100% - 28px)); }
+.prd-dialog label { display: block; margin: 8px 0; font-size: 13px; }
+.prd-dialog label input[type="file"], .prd-dialog label input[type="number"] { width: 100%; margin-top: 4px; }
+.prd-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; }
+.prd-tab.active { border-color: var(--accent, #6c8cff); color: var(--accent, #6c8cff); }
+.prd-tab-content { margin-top: 8px; }
+.prd-answer-input { width: 100%; margin-top: 6px; }
+.dialog-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.capability-status.error { color: #e06c75; }

@@ -73,8 +73,32 @@ PaiCLI Server
 版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
 
 评测中心从效率工作台中抽离为首页一级入口。宽屏使用“套件/报告”双栏布局，套件用例默认折叠，两栏各自限高滚动；窄屏降级为上下两块独立滚动区域。这样套件、Case 和 Trial 增长时不会形成一条无限延长的单列页面。
+## PRD Analysis Agent
 
-## Plan Runtime 基础
+PRD 分析是第一个真正复用 Harness 的业务 Agent 垂直切片：业务流程单独实现为 Java 确定性状态机，底层执行完全复用普通 Session/Run/ToolCall/Profile/Skill/Artifact/Plan。
+
+```text
+Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService → PrdAnalysisCoordinator
+    状态机：INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED
+    ├─ INGESTING   PrdSourceIngestionService（DocumentTextExtractor + StructuredDocumentChunker 快照分块）
+    ├─ MAPPING     Mapper Run（system.prd.mapper + prd-map skill）→ prd_submit_map
+    ├─ ANALYZING   N 个 Node Analyst Child Run（system.prd.node-analyst + prd-node-analyze）→ prd_submit_node_analysis
+    ├─ RECONCILING Reconciler Run（system.prd.reconciler + prd-reconcile）→ prd_submit_reconciliation
+    ├─ VERIFYING   PrdAnalysisValidator（Java 8 项确定性校验）→ FIXABLE 回流 / AMBIGUOUS 进入 WAITING_USER
+    ├─ WAITING_USER 用户批量回答 → 重新 RECONCILING
+    └─ PACKAGING   PrdAnalysisRenderer → 5 类 Artifact → COMPLETED
+```
+
+关键边界：
+
+- **DB 是事实来源**：状态推进只依据 SQLite（`prd_analysis_runs` 绑定 + Run 终态重新计算），Worker 轮询恢复，不依赖 terminal Event。
+- **计划不编排流程**：Plan 只用于「分析完成后的实施计划交接」（`PrdAnalysisPlanHandoffService` 复用 PlanService），不承担 PRD 内部阶段编排。
+- **后端绑定权限**：`prd_*` 工具从当前 RunId 反查 `prd_analysis_runs` 的 purpose/task/node 绑定，Mapper/Node/Reconciler 不能越权。
+- **结构化提交**：模型只通过三个粗粒度 submit 工具提交，全部事务写入；ID 由 Server 生成，Markdown 是派生产物。
+- **确定性校验**：Validator 纯 Java，FIXABLE（重复实体等）自动回流最多 2 轮，AMBIGUOUS（字段缺失/规则互斥）产生 BLOCKING 问题进入 WAITING_USER。
+- **Skill 注入**：Agent Profile 的 `skillNamesJson` 作为 required skill，由 ContextManager 把 SKILL.md 全文注入 system 前缀（普通 Run 不受影响）。
+- **评测**：simple-order fixture + 确定性评分（实体/规则数、指定字段映射、冲突发现、阻塞问题与回答后通过），LLM Judge 不作硬门禁。
+
 
 Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把“计划”从模型文本变成可恢复、可审计、可调度的数据对象，但不替代现有 RunProcessor，也不绕过 ToolCall、Approval、Event、Artifact 和预算链路。
 

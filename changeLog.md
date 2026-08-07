@@ -4,6 +4,19 @@
 
 ## 2026-08-08
 
+### 新增：PRD Analysis Agent（业务 Agent 垂直切片，阶段 1–10）
+
+- 变更：落地第一个真正的业务 Agent——PRD 分析。Console 新增独立「PRD 分析」入口：上传 PRD（可选接口/数据契约、补充文档）创建任务，Java 确定性状态机 INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED（FAILED/CANCELED 终态），服务重启后由 `PrdAnalysisWorkerCoordinator` 按 SQLite 当前状态恢复推进。
+- 变更：迁移 38 新增 10 张表（`prd_analysis_tasks`/`sources`/`source_chunks`/`nodes`/`node_dependencies`/`findings`/`evidence`/`questions`/`checks`/`runs`）；`PrdAnalysisStore` 提供粗粒度幂等提交（`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation`，按 run+toolCallId 去重），全部结构化写入走现有 ToolCall 生命周期，finding 等 ID 全部由 Server 生成。
+- 变更：新增 11 个 PRD 工具（`prd_get_task_context`/`prd_list_source_chunks`/`prd_read_node`/`prd_search_sources`/`prd_get_dependency_summaries`/`prd_get_findings`/`prd_get_open_questions`/`prd_get_validation_report`/`prd_submit_map`/`prd_submit_node_analysis`/`prd_submit_reconciliation`），工具权限以后端 `prd_analysis_runs` 绑定为准（Mapper/Node/Reconciler 角色与 nodeId 绑定校验，禁止越权）。
+- 变更：新增 3 个系统 Agent Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`，工具白名单 + required skill）与 3 个内置 Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`，classpath 资源启动种子到 data/skills）；`ContextManager` 按 Agent Profile 的 `skillNamesJson` 把 required skill 全文注入 system 前缀（无 required skill 的普通 Run 行为不变）。
+- 变更：节点由 Java 确定性并行调度（依赖满足才 READY，受 `maxParallelism` 与全局上限约束），全部节点完成后 barrier 只创建一次 Reconciler Run；Reconciler 接收结构化 findings/glossary/open questions/上一轮校验报告/用户 answers。
+- 变更：`PrdAnalysisValidator` 为纯 Java 的 8 项确定性校验（证据完整性、引用完整性、重复实体、字段映射、规则冲突、状态转换、阻塞问题、节点完成）；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（如字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后自动继续。
+- 变更：`PrdAnalysisRenderer` 从 DB 生成 5 类产物并写入现有 Artifact Store（`analysis.md`、`domain_model.json`、`traceability_matrix.json`、`validation_report.json`、`questions.json`）；`PrdAnalysisPlanHandoffService` 基于 domain model 确定性生成实施 Plan（复用 PlanService，不直接写 Plan Store）。
+- 变更：复用既有 Harness——RunProcessor/ContextManager/ModelClient/ToolCatalog/ServerToolProvider/Agent Profile/Skill/Child Run/Usage/Budget/Artifact/Recovery/PlanService，未新增第二套 AgentLoop/ToolCall/Subagent Runtime；Maven 编译期把 `SqliteConnectionFactory` 公开为跨包 Store 复用。
+- 验证：新增 6 个测试类共 22 项（`PrdAnalysisStoreTest`、`PrdAnalysisToolProviderTest`、`PrdAnalysisCoordinatorTest`（全链路 + barrier + 澄清恢复）、`PrdAnalysisValidatorTest`、`PrdAnalysisRendererTest`、`PrdAnalysisPlanHandoffServiceTest`、`PrdAnalysisEvaluationTest`），覆盖持久化/幂等/权限/并发/恢复/确定性校验/澄清/产物/Plan Handoff，全部通过；`node --check app.js` 通过。数据库迁移 38 与 OpenAPI（`PrdAnalysisController` @Operation）已同步，`README.md`、`docs/architecture.md`、`docs/phases.md` 已更新；`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用（本功能不改变 Sandbox 执行边界，产品站未展示 PRD 分析能力）。
+
+
 ### 修复：阶段“空交付”被误判为已交付 + 失败 Leader 未把已交付任务送回重新验收
 
 - 变更：`CollaborationService.hasStageDeliveryEvidence` 只把非 `tool_result` 类型的 Artifact 视为交付证据。此前 `artifactsForRun` 会统计 `tool_result`（read_file/execute_command 大结果外置）类型的只读物化产物，导致「只读不动手」的阶段 Run（真实案例 Stage 5 只读文件后直接宣布完成，没有写文件/发评论）也被判定为已交付并进入 IN_REVIEW、记录 DELIVERED 清单；现在这类空交付会正确走「无持久交付证据」分支，阶段与父任务置 BLOCKED，等待 Leader 重新派发。
