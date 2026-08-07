@@ -1,4 +1,18 @@
 # 交付阶段
+## 2026-08-08 PRD Analysis Agent（阶段 1–10 全量）
+
+- [x] 迁移 38：PRD 分析 10 张表（tasks/sources/source_chunks/nodes/node_dependencies/findings/evidence/questions/checks/runs）。
+- [x] `PrdAnalysisStore` 粗粒度幂等提交（submitMap / submitNodeAnalysis / submitReconciliation），finding/evidence ID 全部 Server 生成。
+- [x] 来源摄入复用 DocumentTextExtractor + StructuredDocumentChunker，不做第二套 OCR/Tika 链。
+- [x] 11 个 `prd_*` 工具 + 后端 run→task/node 绑定权限校验。
+- [x] 3 个系统 Profile（mapper/node-analyst/reconciler）+ 3 个内置 Skill（prd-map/prd-node-analyze/prd-reconcile），required skill 全文注入 system 前缀。
+- [x] Java 确定性节点调度（依赖就绪 + maxParallelism）、barrier 只创建一次 Reconciler Run。
+- [x] Java 8 项确定性校验（证据/引用/重复实体/字段映射/规则冲突/状态转换/阻塞问题/节点完成），FIXABLE 回流与 AMBIGUOUS→WAITING_USER。
+- [x] 用户澄清 API（answers）与 WAITING_USER 恢复。
+- [x] 5 类产物（analysis.md / domain_model.json / traceability_matrix.json / validation_report.json / questions.json）。
+- [x] Plan Handoff 复用 PlanService 生成实施计划。
+- [x] Console 独立「PRD 分析」入口（导航/列表/创建/详情/问题回答/Artifacts/生成 Plan）。
+- [x] 确定性评测 fixture（simple-order-prd / simple-order-contract）与 22 项 PRD 测试。
 
 ## 2026-08-09 Harness Loop v2 · PR10：完成合同、执行证据与 Deferred get_agent_result
 

@@ -520,7 +520,18 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 
 Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。当前版本没有把 LLM-as-Judge 当作硬门禁，也不严格比较原始 reasoning；开放式语义 Rubric 留作后续扩展。
 
-## 数据目录
+### 阶段 13：PRD Analysis Agent
+
+第一个真正的业务 Agent 垂直切片：在 Console 增加独立的「PRD 分析」入口，上传 PRD（可选接口/数据契约、补充文档）后由 Java 确定性状态机驱动：`INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED`，服务重启后从 SQLite 当前状态恢复推进。
+
+- **复用而非重建**：Mapper / Node Analyst / Reconciler 都是普通内部 Session + 普通 Run，走现有 RunProcessor / ContextManager / ToolCall / Budget / Artifact / Recovery；未新增第二套 AgentLoop / Subagent Runtime。
+- **结构化工具提交**：`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation` 粗粒度、幂等（run+toolCallId 去重）、事务提交；finding/evidence/question 的 ID 全部由 Server 生成，Markdown 不是事实来源。
+- **后端权限**：11 个 `prd_*` 工具按 `prd_analysis_runs` 绑定校验角色（Mapper/Node/Reconciler）与 nodeId，禁止越权读取或提交。
+- **确定性调度**：节点依赖满足才 READY，受 `maxParallelism` 与全局上限约束；全部节点完成后 barrier 只创建一次 Reconciler Run。
+- **确定性校验**：`PrdAnalysisValidator` 为纯 Java 的 8 项检查；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后继续。
+- **产物与交接**：`analysis.md` / `domain_model.json` / `traceability_matrix.json` / `validation_report.json` / `questions.json` 写入 Artifact Store；基于完成结果可复用 PlanService 生成实施 Plan。
+- **Skill 注入**：3 个内置 PRD Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`）启动种子到 data/skills；3 个系统 Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`）通过 `skillNamesJson` 把 required skill 全文注入 system 前缀。
+
 
 ```text
 data/
@@ -792,7 +803,26 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 
 `POST /tasks/{taskId}/actions` 支持 `START`、`CONTINUE`、`RESUME`、`BLOCK`、`REQUEST_REWORK`、`ACCEPT`、`CANCEL` 和 `REOPEN`；其中 `BLOCK` 与 `REQUEST_REWORK` 必须提供原因，`ACCEPT` 是唯一进入 `DONE` 的人工动作。`CANCEL` 可在任务存在活跃 Run 时执行：服务端先持久化取消全部关联 Run 树，并中断对应模型请求与 Sandbox 执行，再把长期任务标记为 `CANCELED`，评论、活动和 Run 审计继续保留。`PUT /status` 仅保留为旧客户端兼容入口，不能由人工提交 `IN_REVIEW`。Trigger 请求支持 `triggerType`、`sourceId`、`targetType`、`targetId`、`instruction` 和 `idempotencyKey`；同一 key 只关联一个已创建 Run。评论/提及（MENTION/REPLY）触发的新 Run 会把处于 IN_REVIEW 的任务先置回 IN_PROGRESS，返工结束后再重新提交待验收。`REQUEST_REWORK` 与 `BLOCK` 的原因会先作为人工评论持久化到任务（幂等去重），再触发返工 Run 或落阻塞状态，保证反馈在「评论与决策」与任务摘要中可见。删除存在 Task-Run 历史的任务返回 `409`，客户端应改用 `CANCEL` 保留审计链路；只有从未执行的任务可以物理删除。
 
-## 配置入口
+### PRD 分析
+
+```text
+POST/GET                    /v1/prd-analysis/tasks
+GET                         /v1/prd-analysis/tasks/{taskId}
+POST                        /v1/prd-analysis/tasks/{taskId}/start
+POST                        /v1/prd-analysis/tasks/{taskId}/cancel
+POST                        /v1/prd-analysis/tasks/{taskId}/retry
+GET                         /v1/prd-analysis/tasks/{taskId}/nodes
+GET                         /v1/prd-analysis/tasks/{taskId}/findings
+GET                         /v1/prd-analysis/tasks/{taskId}/checks
+GET                         /v1/prd-analysis/tasks/{taskId}/questions
+POST                        /v1/prd-analysis/tasks/{taskId}/answers
+POST                        /v1/prd-analysis/tasks/{taskId}/nodes/{nodeId}/retry
+GET                         /v1/prd-analysis/tasks/{taskId}/artifacts
+POST                        /v1/prd-analysis/tasks/{taskId}/plans
+```
+
+创建任务时 PRD / 接口契约 / 补充文档必须已作为文档附件暂存在同一 Session；任务创建后为 DRAFT，调用 `start` 进入 INGESTING。完成的分析任务可调用 `plans` 复用 PlanService 生成实施计划。
+
 
 推荐从 [.env.example](.env.example) 复制所需变量到不提交 Git 的 `.env`。主要配置族：
 
@@ -804,6 +834,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
+| `PAICLI_PRD_ANALYSIS_ENABLED` / `PAICLI_PRD_ANALYSIS_POLL_MILLIS` / `PAICLI_PRD_ANALYSIS_MAX_PARALLELISM` | PRD 分析 Worker 开关（默认开启）、轮询间隔（默认 1000ms）与全局最大并发节点数（默认 4，上限 8） |
 | `paicli.docker.command-timeout-seconds` | Docker 命令请求的最大超时，同时注入 Sandbox Agent 作为请求级 `timeoutSeconds` 上限；默认 90 秒 |
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
@@ -828,6 +859,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - SQLite Store、迁移 1–34、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
+- PRD Analysis：持久化/幂等提交/工具权限/节点 barrier/恢复/确定性校验/人工澄清/5 类产物/Plan Handoff/评测用例（simple-order fixture）。
 - Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 7 套件/28 Case Starter Pack 完整性和幂等安装。
 
 此外已完成：
