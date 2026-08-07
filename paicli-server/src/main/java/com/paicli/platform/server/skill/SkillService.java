@@ -141,6 +141,33 @@ public class SkillService {
         return out.append("</available_skills>").toString();
     }
 
+    /**
+     * Resolves the full content of the required skills configured on an Agent
+     * Profile and returns them as a stable system-prefix block. Profiles without
+     * required skills return an empty string so ordinary Runs are unaffected.
+     */
+    public String requiredPrompt(String projectKey, List<String> requiredNames) {
+        List<String> names = requiredNames == null ? List.of() : requiredNames.stream()
+                .filter(value -> value != null && !value.isBlank()).map(String::trim).distinct().toList();
+        if (names.isEmpty()) return "";
+        StringBuilder out = new StringBuilder("<required_skills>\n");
+        for (String name : names) {
+            try {
+                SkillContent content = load(projectKey, name);
+                out.append("## ").append(name).append("\n").append(content.content()).append("\n");
+                if (out.length() > MAX_SKILL_CHARS) {
+                    out.append("\n[Skill prompt truncated by Platform Lite character budget]");
+                    break;
+                }
+            } catch (Exception e) {
+                String message = e.getMessage() == null || e.getMessage().isBlank()
+                        ? e.getClass().getSimpleName() : e.getMessage();
+                out.append("## ").append(name).append("\n[Skill unavailable: ").append(message).append("]\n");
+            }
+        }
+        return out.append("</required_skills>").toString();
+    }
+
     public SkillDescriptor importFromGit(String projectKey, String gitUrl, String requestedName,
                                          String ref, boolean global) {
         GitSource gitSource = normalizeGitSource(gitUrl, ref);

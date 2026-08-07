@@ -689,6 +689,100 @@ public class SqliteRuntimeStore {
                     "finished_at='" + Instant.now() + "',version=version+1 WHERE id IN " +
                     "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
                     "('COMPLETED','FAILED','CANCELED')");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_tasks (" +
+                    "id TEXT PRIMARY KEY,project_key TEXT NOT NULL,title TEXT NOT NULL," +
+                    "status TEXT NOT NULL DEFAULT 'DRAFT',current_stage TEXT NOT NULL DEFAULT 'DRAFT'," +
+                    "prd_source_id TEXT,source_contract_source_id TEXT," +
+                    "max_parallelism INTEGER NOT NULL DEFAULT 4,reconcile_iteration INTEGER NOT NULL DEFAULT 0," +
+                    "session_id TEXT," +
+                    "glossary_json TEXT NOT NULL DEFAULT '[]',claim_owner TEXT,claim_expires_at TEXT," +
+                    "created_by TEXT NOT NULL DEFAULT 'USER',created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "completed_at TEXT,last_error TEXT,version INTEGER NOT NULL DEFAULT 0)");
+            SqliteSchemaMigrator.ensureColumn(connection, "prd_analysis_tasks", "session_id", "TEXT");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_tasks_project " +
+                    "ON prd_analysis_tasks(project_key,status,updated_at DESC)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_sources (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,attachment_id TEXT NOT NULL," +
+                    "source_type TEXT NOT NULL,file_name TEXT NOT NULL,content_hash TEXT NOT NULL," +
+                    "extraction_status TEXT NOT NULL DEFAULT 'PENDING',text_artifact_id TEXT,created_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_sources_task " +
+                    "ON prd_analysis_sources(task_id,source_type)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_source_chunks (" +
+                    "id TEXT PRIMARY KEY,source_id TEXT NOT NULL,ordinal INTEGER NOT NULL,heading TEXT," +
+                    "start_offset INTEGER NOT NULL,end_offset INTEGER NOT NULL,text TEXT NOT NULL," +
+                    "content_hash TEXT NOT NULL," +
+                    "FOREIGN KEY(source_id) REFERENCES prd_analysis_sources(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_chunks_source " +
+                    "ON prd_analysis_source_chunks(source_id,ordinal)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_nodes (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,client_key TEXT NOT NULL," +
+                    "title TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '',source_id TEXT NOT NULL," +
+                    "start_chunk_ordinal INTEGER NOT NULL,end_chunk_ordinal INTEGER NOT NULL," +
+                    "status TEXT NOT NULL DEFAULT 'PENDING',domain_tags_json TEXT NOT NULL DEFAULT '[]'," +
+                    "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_nodes_task " +
+                    "ON prd_analysis_nodes(task_id,status,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_node_dependencies (" +
+                    "task_id TEXT NOT NULL,from_node_id TEXT NOT NULL,to_node_id TEXT NOT NULL," +
+                    "dependency_type TEXT NOT NULL," +
+                    "PRIMARY KEY(task_id,from_node_id,to_node_id)," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(from_node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(to_node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_findings (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,node_id TEXT,finding_type TEXT NOT NULL," +
+                    "name TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '',payload_json TEXT NOT NULL DEFAULT '{}'," +
+                    "status TEXT NOT NULL DEFAULT 'ACTIVE',merged_into_id TEXT,severity TEXT," +
+                    "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(merged_into_id) REFERENCES prd_analysis_findings(id) ON DELETE SET NULL)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_findings_task " +
+                    "ON prd_analysis_findings(task_id,status,finding_type)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_questions (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,category TEXT NOT NULL DEFAULT ''," +
+                    "severity TEXT NOT NULL DEFAULT 'WARNING',question TEXT NOT NULL,context TEXT NOT NULL DEFAULT ''," +
+                    "status TEXT NOT NULL DEFAULT 'OPEN',answer TEXT,resolution TEXT,updated_at TEXT," +
+                    "created_at TEXT NOT NULL,answered_at TEXT,resolved_at TEXT," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE)");
+            SqliteSchemaMigrator.ensureColumn(connection, "prd_analysis_questions", "updated_at", "TEXT");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_questions_task " +
+                    "ON prd_analysis_questions(task_id,status,severity)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_evidence (" +
+                    "id TEXT PRIMARY KEY,finding_id TEXT,question_id TEXT,source_id TEXT NOT NULL," +
+                    "chunk_id TEXT NOT NULL,local_start_offset INTEGER NOT NULL,local_end_offset INTEGER NOT NULL," +
+                    "created_at TEXT NOT NULL," +
+                    "FOREIGN KEY(finding_id) REFERENCES prd_analysis_findings(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(question_id) REFERENCES prd_analysis_questions(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(source_id) REFERENCES prd_analysis_sources(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(chunk_id) REFERENCES prd_analysis_source_chunks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_evidence_finding " +
+                    "ON prd_analysis_evidence(finding_id)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_evidence_question " +
+                    "ON prd_analysis_evidence(question_id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_checks (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,check_type TEXT NOT NULL," +
+                    "severity TEXT NOT NULL DEFAULT 'WARNING',status TEXT NOT NULL DEFAULT 'WARNING'," +
+                    "subject_type TEXT,subject_id TEXT,message TEXT NOT NULL DEFAULT ''," +
+                    "expected_json TEXT,actual_json TEXT,created_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_checks_task " +
+                    "ON prd_analysis_checks(task_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_runs (" +
+                    "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,purpose TEXT NOT NULL,node_id TEXT," +
+                    "run_id TEXT NOT NULL UNIQUE,attempt INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'CREATED'," +
+                    "result_summary_json TEXT,submission_tool_call_id TEXT,submission_payload_json TEXT," +
+                    "submission_result_json TEXT,submitted_at TEXT," +
+                    "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_runs_task " +
+                    "ON prd_analysis_runs(task_id,purpose,status)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_runs_run " +
+                    "ON prd_analysis_runs(run_id)");
             SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE approvals SET status='DENIED',resolved_at='" + Instant.now()
                     + "' WHERE status='PENDING' AND run_id IN "
