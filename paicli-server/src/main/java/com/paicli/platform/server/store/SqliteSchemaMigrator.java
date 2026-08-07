@@ -46,7 +46,8 @@ final class SqliteSchemaMigrator {
             new Migration(34, "task scoped collaboration workspaces and delivery evidence gate"),
             new Migration(35, "lightweight per-run working plan"),
             new Migration(36, "durable run reflections"),
-            new Migration(37, "collaboration digests deliveries and accept snapshots")
+            new Migration(37, "collaboration digests deliveries and accept snapshots"),
+            new Migration(38, "prd analysis tasks sources chunks nodes findings evidence questions checks runs")
     );
 
     private SqliteSchemaMigrator() { }

@@ -111,6 +111,7 @@ public class ContextManager {
         String projectRules = prompts.projectRules(projectKey, workspaceRunId);
         List<String> allowedSkills = parseStringList(agentProfile == null ? "" : agentProfile.skillNamesJson());
         String skillIndex = skillService.indexPrompt(projectKey, allowedSkills);
+        String requiredSkills = skillService.requiredPrompt(projectKey, allowedSkills);
         Set<String> allowedTools = new java.util.HashSet<>(
                 parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
         if (agentProfile != null && !allowedTools.isEmpty()) {
@@ -133,9 +134,11 @@ public class ContextManager {
         if (!agentInstruction.isBlank()) stablePrefix.add(ModelMessage.system(agentInstruction));
         if (!projectRules.isBlank()) stablePrefix.add(ModelMessage.system(projectRules));
         if (!skillIndex.isBlank()) stablePrefix.add(ModelMessage.system(skillIndex));
+        if (!requiredSkills.isBlank()) stablePrefix.add(ModelMessage.system(requiredSkills));
         if (!languageDirective.isBlank()) stablePrefix.add(ModelMessage.system(languageDirective));
         int toolTokens = TokenEstimator.estimateTools(toolDefinitions);
         int fixedTokens = TokenEstimator.estimateMessages(stablePrefix) + toolTokens
+                + messageTokens(requiredSkills)
                 + messageTokens(runtime) + messageTokens(planState) + messageTokens(workingPlan)
                 + messageTokens(reflection);
         var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);

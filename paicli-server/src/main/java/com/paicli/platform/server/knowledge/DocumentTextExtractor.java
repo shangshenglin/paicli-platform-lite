@@ -33,16 +33,28 @@ public class DocumentTextExtractor {
         if (file == null || file.isEmpty()) throw new IllegalArgumentException("file must not be empty");
         if (file.getSize() > properties.maxFileBytes()) throw new IllegalArgumentException("file exceeds upload limit");
         try {
-            byte[] bytes = file.getBytes();
-            String name = safeName(file.getOriginalFilename());
+            return extract(file.getBytes(), safeName(file.getOriginalFilename()), file.getContentType());
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("document text extraction failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Extracts text from raw bytes; used by PRD ingestion to snapshot staged attachments. */
+    public ExtractedDocument extract(byte[] bytes, String fileName, String contentType) {
+        if (bytes == null || bytes.length == 0) throw new IllegalArgumentException("file must not be empty");
+        if (bytes.length > properties.maxFileBytes()) throw new IllegalArgumentException("file exceeds upload limit");
+        try {
+            String name = safeName(fileName);
             Metadata metadata = new Metadata();
             metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, name);
-            if (file.getContentType() != null) metadata.set(Metadata.CONTENT_TYPE, file.getContentType());
+            if (contentType != null) metadata.set(Metadata.CONTENT_TYPE, contentType);
             BodyContentHandler handler = new BodyContentHandler(MAX_EXTRACTED_CHARS);
             new AutoDetectParser().parse(new ByteArrayInputStream(bytes), handler, metadata, new ParseContext());
             String text = handler.toString().replace("\u0000", "").trim();
             String type = metadata.get(Metadata.CONTENT_TYPE);
-            type = type == null ? file.getContentType() : type;
+            type = type == null ? contentType : type;
             if (text.isBlank() && isPdf(name, type, bytes)) {
                 try {
                     if (pdfOcr == null) throw new IllegalStateException("PDF OCR service is unavailable");
