@@ -87,7 +87,7 @@ public class PrdAnalysisCoordinator {
             store.updateTaskStatus(task.id(), "ANALYZING", null);
             return;
         }
-        if ("FAILED".equals(refreshed.status())) {
+        if ("COMPLETED".equals(refreshed.status()) || "FAILED".equals(refreshed.status())) {
             handleRunFailure(task, refreshed, "MAP", null, PROFILE_MAPPER, MAX_NODE_RETRY);
         }
     }
@@ -112,6 +112,13 @@ public class PrdAnalysisCoordinator {
                 PrdAnalysisStore.PrdRunBinding refreshed = store.findBinding(binding.id()).orElse(binding);
                 if ("COMPLETED".equals(refreshed.status()) && refreshed.submissionResultJson() != null) {
                     store.updateNodeStatus(node.id(), "COMPLETED");
+                    continue;
+                }
+                if ("COMPLETED".equals(refreshed.status())) {
+                    store.updateNodeStatus(node.id(), "FAILED");
+                    store.updateTaskStatus(task.id(), "ANALYZING",
+                            "node " + node.clientKey() + " completed without submission");
+                    handleNodeFailure(task, node, refreshed);
                     continue;
                 }
                 if ("FAILED".equals(refreshed.status())) {
@@ -187,7 +194,7 @@ public class PrdAnalysisCoordinator {
             store.updateTaskStatus(task.id(), "VERIFYING", null);
             return;
         }
-        if ("FAILED".equals(refreshed.status())) {
+        if ("COMPLETED".equals(refreshed.status()) || "FAILED".equals(refreshed.status())) {
             handleRunFailure(task, refreshed, "RECONCILE", null, PROFILE_RECONCILER, MAX_RECONCILE_RETRY);
         }
     }
