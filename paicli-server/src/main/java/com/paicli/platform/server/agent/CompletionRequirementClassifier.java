@@ -28,7 +28,8 @@ public final class CompletionRequirementClassifier {
             "执行 pytest", "让测试通过", "写测试", "添加测试", "测试通过", "run tests",
             "run the tests", "run test", "make tests pass", "ensure tests pass",
             "add unit tests", "add tests", "write tests", "execute tests",
-            "run mvn test", "run pytest", "unit tests", "test suite");
+            "run mvn test", "run pytest", "unit tests", "test suite",
+            "tests pass", "tests passed", "all tests", "tests green");
     private static final List<String> TEST_NEGATIVE = List.of(
             "测试是什么", "为什么测试失败", "解释 pytest", "解释测试", "what is a test",
             "why did the test fail", "explain the test", "what tests");

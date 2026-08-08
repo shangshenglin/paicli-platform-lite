@@ -35,10 +35,12 @@ public class DelegationToolProvider implements ServerToolProvider {
     private final CollaborationStore collaboration;
     private final DelegationEnvelopeBuilder envelopeBuilder;
     private final AgentResultValidator resultValidator;
+    private final AgentResultService agentResultService;
 
     public DelegationToolProvider(SqliteRuntimeStore store, ProductivityStore productivity,
                                   ObjectMapper mapper, PlanStore plans, CollaborationStore collaboration,
-                                  DelegationEnvelopeBuilder envelopeBuilder, AgentResultValidator resultValidator) {
+                                  DelegationEnvelopeBuilder envelopeBuilder, AgentResultValidator resultValidator,
+                                  AgentResultService agentResultService) {
         this.store = store;
         this.productivity = productivity;
         this.mapper = mapper;
@@ -46,6 +48,7 @@ public class DelegationToolProvider implements ServerToolProvider {
         this.collaboration = collaboration;
         this.envelopeBuilder = envelopeBuilder;
         this.resultValidator = resultValidator;
+        this.agentResultService = agentResultService;
     }
 
     @Override public String id() { return "agent"; }
@@ -246,11 +249,11 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("plan_id", nullToBlank(delegation.planId()));
         value.put("plan_step_id", nullToBlank(delegation.planStepId()));
         if (child.error() != null && !child.error().isBlank()) value.put("error", child.error());
-        Map<String, Object> agentResult = persistedAgentResult(delegation);
-        if (agentResult.isEmpty()) agentResult = agentResult(delegation, child);
+        Map<String, Object> agentResult = agentResultService.build(delegation, child);
         List<String> doneCriteria = doneCriteria(delegation);
-        AgentResultValidator.ValidationResult validation =
-                resultValidator.validate(child, agentResult, doneCriteria);
+        AgentResultValidator.ValidationResult validation = child.status() == RunStatus.COMPLETED
+                ? resultValidator.validate(child, store.completionContract(child.id()).orElse(null), agentResult)
+                : resultValidator.validate(child, agentResult, doneCriteria);
         value.put("done_criteria", doneCriteria);
         Map<String, Object> validationView = new LinkedHashMap<>();
         validationView.put("valid", validation.valid());
@@ -389,40 +392,6 @@ public class DelegationToolProvider implements ServerToolProvider {
         return value == null || String.valueOf(value).isBlank();
     }
 
-    private Map<String, Object> agentResult(RunDelegationRecord delegation,
-                                            com.paicli.platform.server.domain.RunRecord child) {
-        Map<String, Object> value = new LinkedHashMap<>();
-        value.put("version", 1);
-        value.put("delegation_id", delegation.id());
-        value.put("child_run_id", child.id());
-        value.put("status", child.status().name());
-        value.put("failure_class", failureClass(child.status(), child.error()));
-        value.put("summary", latestAssistantAnswer(delegation.childSessionId()));
-        value.put("artifacts", store.artifactsForRun(child.id()).stream().map(artifact -> {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id", artifact.id());
-            item.put("type", artifact.type());
-            item.put("name", artifact.name());
-            item.put("relative_path", artifact.relativePath());
-            item.put("sha256", artifact.sha256());
-            return item;
-        }).toList());
-        var usage = store.modelTokenUsageForRun(child.id());
-        value.put("usage", Map.of("input_tokens", usage.inputTokens(),
-                "output_tokens", usage.outputTokens(), "total_tokens", usage.totalTokens()));
-        value.put("evidence", child.status().terminal()
-                ? List.of("run_status:" + child.status().name(), "assistant_final")
-                : List.of("run_status:" + child.status().name()));
-        value.put("unresolved_items", child.status() == RunStatus.FAILED && child.error() != null
-                ? List.of(child.error()) : List.of());
-        value.put("files_changed", List.of());
-        value.put("commands_executed", List.of());
-        value.put("tests", List.of());
-        value.put("findings", List.of());
-        value.put("risks", List.of());
-        value.put("memory_candidates", List.of());
-        return value;
-    }
 
     /**
      * Reads the done criteria that were actually persisted on the delegation envelope at spawn
@@ -453,15 +422,6 @@ public class DelegationToolProvider implements ServerToolProvider {
         }
     }
 
-    private String latestAssistantAnswer(String sessionId) {
-        return store.activeMessages(sessionId).stream()
-                .filter(message -> "assistant".equals(message.role()))
-                .map(MessageRecord::content)
-                .filter(content -> content != null && !content.isBlank())
-                .reduce((first, second) -> second)
-                .map(this::summarizeAgentAnswer)
-                .orElse("");
-    }
 
     private String summarizeAgentAnswer(String value) {
         if (value == null || value.length() <= AGENT_RESULT_SUMMARY_CHARS) return value == null ? "" : value;

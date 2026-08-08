@@ -27,11 +27,38 @@ public class DeliveryManifestService {
     private final CollaborationStore collaboration;
     private final SqliteRuntimeStore store;
     private final ObjectMapper mapper;
+    private final com.paicli.platform.server.agent.RunEvidenceCollector evidenceCollector;
 
     public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper) {
+        this(collaboration, store, mapper, null);
+    }
+
+    public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper,
+                                   com.paicli.platform.server.agent.RunEvidenceCollector evidenceCollector) {
         this.collaboration = collaboration;
         this.store = store;
         this.mapper = mapper;
+        this.evidenceCollector = evidenceCollector;
+    }
+
+    /**
+     * Records a stage delivery from the unified Run evidence collector so the
+     * manifest always reflects real changed files / commands / tests / artifacts.
+     */
+    public DeliveryRecord recordStageDelivery(String taskId, int stage, String runId) {
+        if (evidenceCollector == null) {
+            return recordStageDelivery(taskId, stage, runId, List.of(), List.of(), List.of(), Map.of());
+        }
+        com.paicli.platform.server.agent.RunEvidence evidence = evidenceCollector.collect(runId);
+        List<String> changedFiles = evidence.changedFilePaths();
+        List<String> artifacts = evidence.artifacts().stream()
+                .map(com.paicli.platform.server.agent.ArtifactEvidence::relativePath).toList();
+        List<String> testEvidence = evidence.tests().stream()
+                .map(test -> test.family().name() + "=" + test.status().name()).toList();
+        Map<String, Object> criteria = new LinkedHashMap<>();
+        evidence.latestTestStatusByFamily().forEach((family, status) ->
+                criteria.put(family.name(), status.name()));
+        return recordStageDelivery(taskId, stage, runId, changedFiles, artifacts, testEvidence, criteria);
     }
 
     public DeliveryRecord recordStageDelivery(String taskId, int stage, String runId,

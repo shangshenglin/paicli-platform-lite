@@ -89,8 +89,9 @@ public class CompletionContractService {
                 || booleanClaim(envelope.get("requires_workspace_change"));
         List<String> doneCriteria = stringList(envelope.get("done_criteria"));
         String task = delegation.task() == null ? "" : delegation.task();
-        boolean requiresTests = !doneCriteria.isEmpty() && mentionsTests(doneCriteria, task)
-                || booleanClaim(envelope.get("requires_tests"));
+        boolean requiresTests = booleanClaim(envelope.get("requires_tests"))
+                || CompletionRequirementClassifier.classify(task).requiresTests()
+                || CompletionRequirementClassifier.classify(String.join(" ", doneCriteria)).requiresTests();
         List<String> families = requiredFamilies(envelope.get("required_test_families"));
         CompletionMode mode = mode(requiresWorkspace, requiresTests);
         return new RunCompletionContractRecord(run.id(), mode, requiresWorkspace, requiresTests,
