@@ -2,11 +2,14 @@
 
 ## 2026-08-08 ExpertThread · PR9：专家线程与执行期新输入竞态保护
 
-- [x] 迁移 38：`collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。
-- [x] `ExpertThreadService`（getOrCreate 幂等 / attachRun / findByRun / refreshDigest）与 `ExpertThreadDigestBuilder`（紧凑 resume 摘要：最新 Run 状态/摘要、已完成/剩余工作、blockers、changed files、artifact refs、test 报告引用、最新人工指令，不含全文/正文/reasoning）。
-- [x] `CollaborationService.trigger` 绑定线程、阶段派发子 Run 绑定线程、`onRunTerminal` 终态后刷新 Digest；后续 Run 输入注入 `<expert_thread_resume>`，Leader 线程（role=LEADER）不重复注入。
-- [x] Active Run 竞态保护：`PreparedContext.maxMessageSequence` + `RunProcessor` 最终完成前重查，模型执行期间新输入 → `run.new_input_during_model` + 保留 assistant 中间消息 + 重新排队。
+- [x] 迁移 38：`collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一，`latest_run_id` 带 `ON DELETE SET NULL` 外键）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。
+- [x] `ExpertThreadService`（getOrCreate 幂等 / attachRun / findByRun / refreshDigest）与 `ExpertThreadDigestBuilder`（紧凑 resume 摘要：仅本专家阶段的已完成/剩余工作与 blockers、本 Run DeliveryManifest 的 changed files、artifact/test 引用、最新人工指令，不含全文/正文/reasoning）。
+- [x] `CollaborationService.trigger` 与 `createAndDispatchSubtask`（阶段再派）都在 Run 输入注入 `<expert_thread_resume>`，`onRunTerminal` 终态后刷新 Digest；Leader 线程（role=LEADER）不重复注入。
+- [x] `attachExpertThreadRun` 在单个 `BEGIN IMMEDIATE` 事务内完成跨线程校验 + ordinal 分配 + 挂载 + latest_run_id 更新；并发挂载安全、重复挂载幂等、跨线程挂载抛错。
+- [x] Active Run 竞态保护：`PreparedContext.maxMessageSequence` + `commitFinalAssistantAndComplete(..., expectedSequence)` 单事务“比对 + 置 COMPLETED”，新输入整体回滚；`commitIntermediateAssistantAndRequeue` 单事务保留中间回答并重新排队；`appendUserMessageIfRunActive` 事务内重确认，Run 恰好终态时评论回退创建新 Trigger/Run。
+- [x] 删除终态 Run 时清理线程绑定、重选 `latest_run_id` 并置空受影响线程摘要。
 - [x] `GET /v1/collaboration/tasks/{id}` 返回 `expertThreads`，Console 执行层按专家线程分组展示 `#序号 状态` 并可打开会话。
+- [x] CI：`mvnw` 恢复可执行位，workflow 增加 `chmod +x mvnw`，`./mvnw -B -ntp clean verify` 可正常执行。
 
 ## 2026-08-06 Harness Loop v2 · PR1：轻量 WorkingPlan 与交互修复
 

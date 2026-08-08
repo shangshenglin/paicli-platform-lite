@@ -231,29 +231,29 @@ public class RunProcessor {
                         return;
                     }
                 }
-                long latestSequence = store.maxMessageSequence(run.sessionId());
-                if (latestSequence > context.maxMessageSequence()) {
-                    // User input arrived while the model was generating (e.g. a collaboration
-                    // comment delivered into the active run's session). The model may not have
-                    // seen it, so do NOT complete the Run: preserve this answer as an intermediate
-                    // assistant message, persist the event and requeue so the next turn includes it.
-                    store.appendEvent(run.id(), "run.new_input_during_model", json(Map.of(
-                            "contextMessageSequence", context.maxMessageSequence(),
-                            "latestSequence", latestSequence)));
-                    store.appendAssistantMessage(run.sessionId(), run.id(),
-                            response.content(), response.reasoningContent());
-                    store.requeueRun(run.id(), run.currentStep() + 1);
-                    toolRouter.release(run.id());
-                    return;
-                }
                 boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(),
                         response.content(), response.reasoningContent(), json(Map.of(
                         "content", response.content(),
                         "estimatedInputTokens", context.estimatedInputTokens(),
                         "inputTokens", response.usage().inputTokens(),
                         "outputTokens", response.usage().outputTokens(),
-                        "cachedInputTokens", response.usage().cachedInputTokens())));
+                        "cachedInputTokens", response.usage().cachedInputTokens())),
+                        context.maxMessageSequence());
                 if (!completed) {
+                    RunStatus currentStatus = store.findRun(run.id())
+                            .map(RunRecord::status).orElse(RunStatus.CANCELED);
+                    if (!currentStatus.terminal()) {
+                        // User input arrived while the model was generating (e.g. a collaboration
+                        // comment delivered into the active run's session) and was not part of the
+                        // context. The atomic final commit refused to complete; preserve this answer
+                        // as an intermediate assistant message, record the event and requeue in one
+                        // transaction so the next turn necessarily includes the new input.
+                        store.commitIntermediateAssistantAndRequeue(run.sessionId(), run.id(),
+                                response.content(), response.reasoningContent(), json(Map.of(
+                                "contextMessageSequence", context.maxMessageSequence(),
+                                "latestSequence", store.maxMessageSequence(run.sessionId()))),
+                                run.currentStep() + 1);
+                    }
                     toolRouter.release(run.id());
                     return;
                 }

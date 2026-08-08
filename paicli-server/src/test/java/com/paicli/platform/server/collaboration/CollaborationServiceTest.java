@@ -157,6 +157,9 @@ class CollaborationServiceTest {
                 "USER", null, "additional evidence", false, false, now);
         when(collaboration.task(task.id())).thenReturn(Optional.of(task));
         when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(activeRun));
+        when(runtime.findRun("run-active")).thenReturn(Optional.of(
+                run("run-active", "session-a", RunStatus.WAITING_MODEL, "agent-a")));
+        when(runtime.appendUserMessageIfRunActive(eq("session-a"), eq("run-active"), any())).thenReturn(true);
         when(collaboration.addComment(eq(task.id()), nullable(String.class), eq("USER"),
                 nullable(String.class), eq("additional evidence"), eq(false), any())).thenReturn(comment);
 
@@ -530,11 +533,13 @@ class CollaborationServiceTest {
                 nullable(String.class), eq("please reconsider the delivery"), eq(false), any()))
                 .thenReturn(comment);
 
+        when(runtime.appendUserMessageIfRunActive(eq("session-a"), eq("run-active"), any())).thenReturn(true);
+
         var result = service.comment(task.id(), null, "USER", null,
                 "please reconsider the delivery", false, List.of());
 
         assertThat(result.executions()).isEmpty();
-        verify(runtime).appendMessage(eq("session-a"), eq("run-active"), eq("user"),
+        verify(runtime).appendUserMessageIfRunActive(eq("session-a"), eq("run-active"),
                 contains("please reconsider the delivery"));
         verify(collaboration, org.mockito.Mockito.never()).createOrGetTrigger(
                 any(), any(), any(), any(), any(), any(), any());
@@ -713,6 +718,73 @@ class CollaborationServiceTest {
         verify(runtime).createRunInWorkspace(eq("session-1"), inputCaptor.capture(), any(), any(), any(),
                 any(), any(), anyInt(), anyInt(), any(), any());
         assertThat(inputCaptor.getValue()).doesNotContain("<expert_thread_resume>");
+    }
+
+    @Test
+    void stageDispatchInjectsExpertThreadResumeIntoDelegationInput() {
+        var parent = task("IN_PROGRESS", "TEAM", "team-a");
+        Instant now = parent.createdAt();
+        var thread = new CollaborationStore.ExpertThread("expert_thread_1", "task-a", "backend-a", "EXPERT",
+                "ACTIVE", "{\"thread_id\":\"expert_thread_1\",\"completed_work\":[\"export\"]}", "run-prev",
+                now, now);
+        var agent = agent("backend-a");
+        var subtask = new CollaborationStore.CollaborationTask("task_stage_toola", "default", "Stage 1",
+                "Implement", "IN_PROGRESS", 0, "AGENT", agent.id(), "Done", parent.id(), 1,
+                null, "AGENT:leader-a", now, now);
+        var delegation = new RunDelegationRecord("delegation-a", "run-parent", "tool-a", "session-child",
+                "run-child", agent.id(), agent.name(), "Implement", null, null, "{}", "{}", "QUEUED",
+                null, "BLOCK_GRAPH", null, null, null, now);
+        var childRun = run("run-child", "session-child", RunStatus.QUEUED, agent.id());
+        when(collaboration.task(parent.id())).thenReturn(Optional.of(parent));
+        when(productivity.resolveAgentProfile("default", agent.id())).thenReturn(Optional.of(agent));
+        when(expertThreadService.getOrCreate("task-a", "backend-a", "EXPERT")).thenReturn(thread);
+        when(collaboration.saveTask(eq("task_stage_toola"), eq("default"), eq("Stage 1"), eq("Implement"),
+                eq("IN_PROGRESS"), eq(0), eq("AGENT"), eq(agent.id()), eq("Done"), eq(parent.id()), eq(1),
+                eq(null), eq("AGENT:leader-a"))).thenReturn(subtask);
+        when(runtime.createOrGetDelegation(eq("run-parent"), eq("tool-a"), eq(agent.name()), any(),
+                eq(agent.id()), nullable(String.class), nullable(String.class), nullable(String.class),
+                eq(null), eq(null), eq("{}"))).thenReturn(delegation);
+        when(runtime.findRun("run-child")).thenReturn(Optional.of(childRun));
+
+        service.createAndDispatchSubtask(parent.id(), "run-parent", "tool-a",
+                new CollaborationService.TaskCommand("default", "Stage 1", "Implement", "TODO", 0,
+                        "AGENT", agent.id(), "Done", parent.id(), 1, null, "AGENT:leader-a"));
+
+        ArgumentCaptor<String> inputCaptor = ArgumentCaptor.forClass(String.class);
+        verify(runtime).createOrGetDelegation(eq("run-parent"), eq("tool-a"), eq(agent.name()),
+                inputCaptor.capture(), eq(agent.id()), nullable(String.class), nullable(String.class),
+                nullable(String.class), eq(null), eq(null), eq("{}"));
+        assertThat(inputCaptor.getValue())
+                .contains("<expert_thread_resume>")
+                .contains("expert_thread_1");
+        verify(expertThreadService).attachRun("expert_thread_1", "run-child");
+    }
+
+    @Test
+    void commentFallsBackToNewTriggerWhenActiveRunTerminatedBeforeDelivery() {
+        var task = task("IN_PROGRESS", "AGENT", "agent-a");
+        Instant now = task.createdAt();
+        var staleLink = new CollaborationStore.TaskRun(task.id(), "run-active", "trigger-a", "TRIGGERED",
+                "session-a", "WAITING_MODEL", "agent-a", null, null, null, now, null);
+        var terminalRun = run("run-active", "session-a", RunStatus.COMPLETED, "agent-a");
+        var comment = new CollaborationStore.CollaborationComment("comment-a", task.id(), null,
+                "USER", null, "rework please", false, false, now);
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(runtime.findRun("run-active")).thenReturn(Optional.of(terminalRun));
+        when(runtime.appendUserMessageIfRunActive(any(), any(), any())).thenReturn(false);
+        when(collaboration.addComment(eq(task.id()), nullable(String.class), eq("USER"),
+                nullable(String.class), eq("rework please"), eq(false), any())).thenReturn(comment);
+        stubTriggerFlow(task, "AGENT", "agent-a", "agent-a", "comment-a", "session-new");
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(staleLink));
+        when(expertThreadService.getOrCreate("task-a", "agent-a", "LEADER")).thenReturn(
+                new CollaborationStore.ExpertThread("expert_thread_1", "task-a", "agent-a", "LEADER",
+                        "ACTIVE", "{}", null, now, now));
+
+        var result = service.comment(task.id(), null, "USER", null, "rework please", false, List.of());
+
+        assertThat(result.executions()).hasSize(1);
+        verify(collaboration).createOrGetTrigger(eq(task.id()), eq("MENTION"), eq(comment.id()),
+                eq("AGENT"), eq("agent-a"), any(), any());
     }
 
     /** Stubs the full trigger flow: idempotent trigger lookup, routing, run creation and completion. */

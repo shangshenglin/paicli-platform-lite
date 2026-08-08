@@ -106,16 +106,21 @@ public class CollaborationService {
                         command.priority(), command.assigneeType(), command.assigneeId(),
                         command.acceptanceCriteria(), parent.id(), command.stage(), command.latestPlanId(),
                         command.createdBy()));
+        CollaborationStore.ExpertThread expertThread = stageExpertThread(subtask, agent);
         String input = "执行协作阶段任务，不要创建新的阶段任务。\n"
                 + "阶段任务：" + subtask.title() + "\n"
                 + "目标：\n" + subtask.description() + "\n"
                 + "验收标准：\n" + subtask.acceptanceCriteria() + "\n"
                 + "在当前共享工作区完成交付，并通过协作评论说明结果与证据。";
+        if (expertThread != null) {
+            String resume = expertThreadResume(expertThread);
+            if (!resume.isBlank()) input = input + "\n" + resume;
+        }
         RunDelegationRecord delegation = runtime.createOrGetDelegation(parentRunId, toolCallId,
                 agent.name(), input, agent.id(), agent.modelProfileId(), agent.thinkingMode(),
                 agent.reasoningEffort(), null, null, "{}");
         collaboration.linkRun(subtask.id(), delegation.childRunId(), null, "STAGE_DELEGATION");
-        bindStageRunToExpertThread(subtask, agent, delegation.childRunId());
+        if (expertThread != null) attachRunToExpertThreadSafely(expertThread.id(), delegation.childRunId());
         collaboration.recordActivity(subtask.id(), "STAGE_DISPATCHED", "AGENT", agent.id(),
                 delegation.childRunId(), write(Map.of("parentRunId", parentRunId, "stage", subtask.stage())));
         return new StageExecution(subtask, delegation,
@@ -219,21 +224,20 @@ public class CollaborationService {
                 authorType, authorId, content, conclusion, mentions);
         List<TriggerExecution> executions = new ArrayList<>();
         for (CollaborationStore.MentionTarget mention : mentions.stream().distinct().toList()) {
-            if (hasActiveRunForTarget(taskId, mention)) {
-                deliverCommentToActiveRuns(taskId, mention, comment, content);
-                continue;
+            // Deliver into every active Run of the target; if all Runs reached a terminal state in
+            // the meantime (TOCTOU), fall back to creating a new idempotent Trigger/Run so the
+            // comment is never stranded behind a completed Run.
+            if (!deliverCommentToActiveRuns(taskId, mention, comment, content)) {
+                executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
+                        "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
             }
-            executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
-                    "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
         }
         if ("AGENT".equalsIgnoreCase(authorType) && "TEAM".equals(task.assigneeType())) {
             ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
             if (team != null && !team.leaderAgentProfileId().equals(authorId)) {
                 CollaborationStore.MentionTarget leader = new CollaborationStore.MentionTarget(
                         "AGENT", team.leaderAgentProfileId());
-                if (hasActiveRunForTarget(taskId, leader)) {
-                    deliverCommentToActiveRuns(taskId, leader, comment, content);
-                } else {
+                if (!deliverCommentToActiveRuns(taskId, leader, comment, content)) {
                     executions.add(trigger(taskId, "REPLY", comment.id(), leader.type(), leader.id(), content,
                             "agent-comment:" + comment.id() + ":leader:" + leader.id()));
                 }
@@ -695,30 +699,42 @@ public class CollaborationService {
      * silently dropped (no concurrent second Run is created by design, and the running Run has no
      * way to learn about the new comment).
      */
-    private void deliverCommentToActiveRuns(String taskId, CollaborationStore.MentionTarget mention,
-                                            CollaborationStore.CollaborationComment comment, String content) {
+    /**
+     * Delivers a durable comment into the session of every active Run owned by the mentioned
+     * agent/Leader, so the running expert actually reads and reacts to it on its next model turn.
+     * Each append re-confirms inside one transaction that the Run is still active; returns true
+     * only when at least one Run received the message. When every candidate Run reached a terminal
+     * state in the meantime, returns false so the caller can create a new Trigger/Run instead of
+     * stranding the comment behind a completed Run.
+     */
+    private boolean deliverCommentToActiveRuns(String taskId, CollaborationStore.MentionTarget mention,
+                                               CollaborationStore.CollaborationComment comment, String content) {
         String targetAgentId = mention.id();
         if ("TEAM".equalsIgnoreCase(mention.type())) {
             targetAgentId = productivity.findAgentTeam(mention.id())
                     .map(ProductivityStore.AgentTeam::leaderAgentProfileId).orElse(null);
         }
-        if (blank(targetAgentId)) return;
+        if (blank(targetAgentId)) return false;
         String agentId = targetAgentId;
         String message = "用户追加评论（collaboration task " + taskId + "，comment " + comment.id() + "）：\n"
                 + (content == null ? "" : content)
                 + "\n请先通过 get_collaboration_task 读取该评论及最新证据，再决定是否调整当前执行。";
-        collaboration.taskTreeRuns(taskId).stream()
+        boolean delivered = false;
+        for (String runId : collaboration.taskTreeRuns(taskId).stream()
                 .filter(link -> agentId.equals(link.agentProfileId()))
                 .filter(link -> !TERMINAL_RUN_STATUSES.contains(link.status()))
                 .map(CollaborationStore.TaskRun::runId)
                 .distinct()
-                .forEach(runId -> runtime.findRun(runId).ifPresent(run -> {
-                    try {
-                        runtime.appendMessage(run.sessionId(), run.id(), "user", message);
-                    } catch (Exception error) {
-                        log.warn("Unable to deliver user comment to active run={} task={}", runId, taskId, error);
-                    }
-                }));
+                .toList()) {
+            RunRecord run = runtime.findRun(runId).orElse(null);
+            if (run == null) continue;
+            try {
+                if (runtime.appendUserMessageIfRunActive(run.sessionId(), run.id(), message)) delivered = true;
+            } catch (Exception error) {
+                log.warn("Unable to deliver user comment to active run={} task={}", runId, taskId, error);
+            }
+        }
+        return delivered;
     }
 
     private boolean hasActiveRunForTarget(String taskId, CollaborationStore.MentionTarget target) {
@@ -752,16 +768,35 @@ public class CollaborationService {
         }
     }
 
-    /** Binds stage delegation runs (expert work) to the expert's thread so its digest accumulates them. */
-    private void bindStageRunToExpertThread(CollaborationStore.CollaborationTask subtask,
-                                            ProductivityStore.AgentProfile agent, String runId) {
+    /**
+     * Resolves the expert thread for a stage delegation run BEFORE the run input is built, so the
+     * follow-up Run of the same expert actually receives the compact resume digest in its input.
+     * Returns null when the thread layer is unavailable so stage dispatch never breaks.
+     */
+    private CollaborationStore.ExpertThread stageExpertThread(CollaborationStore.CollaborationTask subtask,
+                                                              ProductivityStore.AgentProfile agent) {
         try {
-            CollaborationStore.ExpertThread thread = expertThreadService.getOrCreate(
-                    rootTask(subtask).id(), agent.id(), "EXPERT");
-            attachRunToExpertThreadSafely(thread.id(), runId);
+            return expertThreadService.getOrCreate(rootTask(subtask).id(), agent.id(), "EXPERT");
         } catch (Exception error) {
-            log.warn("Unable to bind stage run={} to expert thread", runId, error);
+            log.warn("Unable to bind stage expert thread for task={} agent={}", subtask.id(), agent.id(), error);
+            return null;
         }
+    }
+
+    /**
+     * Renders the <expert_thread_resume> block for a follow-up Run of the same expert thread.
+     * Only EXPERT threads get it (the Leader continues via TaskDigest) and only once the thread
+     * has durable digest content; otherwise an empty string is returned.
+     */
+    private String expertThreadResume(CollaborationStore.ExpertThread thread) {
+        if (thread == null || !"EXPERT".equals(thread.threadRole())
+                || thread.digestJson() == null || thread.digestJson().isBlank()
+                || "{}".equals(thread.digestJson().trim())) return "";
+        return "\n你正在继续此前专家线程中的工作。\n<expert_thread_resume>\n"
+                + thread.digestJson()
+                + "\n</expert_thread_resume>\n"
+                + "不要假定旧文件内容仍然正确；需要具体内容时使用 read_file/read_artifact 按需读取，"
+                + "不要重新读取与当前任务无关的完整历史。";
     }
 
     private void attachRunToExpertThreadSafely(String threadId, String runId) {
@@ -860,14 +895,9 @@ public class CollaborationService {
                 log.warn("Unable to append task digest run={} task={}", task.id(), error);
             }
         }
-        if (expertThread != null && "EXPERT".equals(expertThread.threadRole())
-                && expertThread.digestJson() != null && !expertThread.digestJson().isBlank()
-                && !"{}".equals(expertThread.digestJson().trim())) {
-            value.append("\n你正在继续此前专家线程中的工作。\n<expert_thread_resume>\n")
-                    .append(expertThread.digestJson())
-                    .append("\n</expert_thread_resume>\n")
-                    .append("不要假定旧文件内容仍然正确；需要具体内容时使用 read_file/read_artifact 按需读取，"
-                            + "不要重新读取与当前任务无关的完整历史。\n");
+        if (expertThread != null) {
+            String resume = expertThreadResume(expertThread);
+            if (!resume.isBlank()) value.append(resume).append("\n");
         }
         return value.toString();
     }

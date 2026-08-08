@@ -65,8 +65,11 @@ class TaskDigestManifestTest {
                 "AGENT", "backend-a", "works", task.id(), 1, null, "AGENT:leader-a");
         collaboration.saveTask("task-stage-2", "default", "stage 2", "fix csv bom", "TODO", 0,
                 "AGENT", "backend-a", "utf8", task.id(), 2, null, "AGENT:leader-a");
+        collaboration.saveTask("task-stage-3", "default", "stage 3 前端页面", "frontend", "IN_REVIEW", 0,
+                "AGENT", "frontend-a", "ui", task.id(), 3, null, "AGENT:leader-a");
         collaboration.addComment(task.id(), null, "USER", null, "修复乱码，不改变接口协议", false, List.of());
 
+        DeliveryManifestService manifests = new DeliveryManifestService(collaboration, runtime, mapper);
         var thread = collaboration.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
         var session1 = runtime.createSession("协作任务 · build the widget", "default");
         var run1 = runtime.createRun(session1.id(), "backend work", "auto", "", List.of(),
@@ -81,9 +84,17 @@ class TaskDigestManifestTest {
         runtime.appendMessage(session1.id(), run1.id(), "user", "完整的旧会话评论不应出现在摘要");
         runtime.appendAssistantMessage(session2.id(), run2.id(), "修复 CSV UTF-8 BOM", null);
         runtime.createArtifact(run2.id(), "test-report", "export-test.html", "export-test.html", 2048, "abc");
-        java.nio.file.Files.createDirectories(properties.workspaceRoot().resolve(run2.id()));
-        java.nio.file.Files.writeString(properties.workspaceRoot().resolve(run2.id()).resolve("ExportController.java"),
-                "class ExportController {}");
+        manifests.recordStageDelivery("task-stage-1", 1, run2.id(),
+                List.of("ExportController.java"), List.of("artifact-export-1"), List.of(), Map.of());
+
+        // A different expert on the same shared workspace must never leak into this thread's digest.
+        var frontendThread = collaboration.getOrCreateExpertThread(task.id(), "frontend-a", "EXPERT");
+        var session3 = runtime.createSession("协作任务 · build the widget 3", "default");
+        var run3 = runtime.createRun(session3.id(), "frontend work", "auto", "", List.of(),
+                null, "frontend-a", 0, 0, "bash");
+        collaboration.attachExpertThreadRun(frontendThread.id(), run3.id());
+        manifests.recordStageDelivery("task-stage-3", 3, run3.id(),
+                List.of("frontend.js"), List.of("artifact-ui-1"), List.of(), Map.of());
 
         String digestJson = builder.build(thread.id());
 
@@ -95,9 +106,12 @@ class TaskDigestManifestTest {
                 .contains("\"run_id\":\"" + run2.id() + "\"")
                 .contains("修复 CSV UTF-8 BOM")
                 .contains("export-test.html")
-                .contains("ExportController.java");
+                .contains("ExportController.java")
+                .contains("stage 1");
         assertThat(digestJson)
                 .doesNotContain("secret tool result")
-                .doesNotContain("完整的旧会话评论不应出现在摘要");
+                .doesNotContain("完整的旧会话评论不应出现在摘要")
+                .doesNotContain("frontend.js")
+                .doesNotContain("stage 3 前端页面");
     }
 }

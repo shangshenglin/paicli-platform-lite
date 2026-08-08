@@ -1182,6 +1182,56 @@ class SqliteRuntimeStoreTest {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
     }
 
+    @Test
+    void commitFinalAssistantAndCompleteRefusesWhenNewInputArrivedDuringModel() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("race-final");
+        var run = store.createRun(session.id(), "work");
+        store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
+        long contextSeq = store.maxMessageSequence(session.id());
+
+        store.appendMessage(session.id(), run.id(), "user", "评论在模型执行期间到达");
+
+        boolean completed = store.commitFinalAssistantAndComplete(session.id(), run.id(),
+                "final answer", null, "{\"content\":\"final answer\"}", contextSeq);
+
+        assertThat(completed).isFalse();
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.WAITING_MODEL);
+        assertThat(store.messages(session.id()).stream()
+                .anyMatch(message -> "assistant".equals(message.role()))).isFalse();
+    }
+
+    @Test
+    void commitIntermediateAssistantAndRequeuePersistsAtomically() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("race-requeue");
+        var run = store.createRun(session.id(), "work");
+        store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
+
+        boolean requeued = store.commitIntermediateAssistantAndRequeue(session.id(), run.id(),
+                "intermediate answer", null, "{\"contextMessageSequence\":1,\"latestSequence\":2}", 1);
+
+        assertThat(requeued).isTrue();
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(store.messages(session.id())).extracting("role").contains("assistant");
+        assertThat(store.events(run.id(), 0)).extracting("type")
+                .contains("run.new_input_during_model", "run.queued");
+    }
+
+    @Test
+    void appendUserMessageIfRunActiveRefusesForTerminalRun() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("race-append");
+        var run = store.createRun(session.id(), "work");
+        store.completeRun(run.id());
+
+        boolean appended = store.appendUserMessageIfRunActive(session.id(), run.id(), "late comment");
+
+        assertThat(appended).isFalse();
+        assertThat(store.messages(session.id()).stream()
+                .noneMatch(message -> "late comment".equals(message.content()))).isTrue();
+    }
+
     private long countWhere(String table, String column, String value) throws Exception {
         String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
         try (Connection connection = DriverManager.getConnection(url);

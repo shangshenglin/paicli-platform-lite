@@ -438,7 +438,8 @@ public class SqliteRuntimeStore {
                     "digest_json TEXT NOT NULL DEFAULT '{}',latest_run_id TEXT," +
                     "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
                     "UNIQUE(root_task_id,agent_profile_id,thread_role)," +
-                    "FOREIGN KEY(root_task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
+                    "FOREIGN KEY(root_task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(latest_run_id) REFERENCES runs(id) ON DELETE SET NULL)");
             statement.execute("CREATE TABLE IF NOT EXISTS collaboration_expert_thread_runs (" +
                     "thread_id TEXT NOT NULL,run_id TEXT NOT NULL UNIQUE,ordinal INTEGER NOT NULL," +
                     "created_at TEXT NOT NULL,PRIMARY KEY(thread_id,run_id),UNIQUE(thread_id,ordinal)," +
@@ -1807,14 +1808,95 @@ public class SqliteRuntimeStore {
      * past what the built context saw, the model may have missed the new message.
      */
     public long maxMessageSequence(String sessionId) {
-        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+        try (Connection connection = open()) {
+            return maxMessageSequence(connection, sessionId);
+        } catch (SQLException e) {
+            throw failure("read max message sequence", e);
+        }
+    }
+
+    private long maxMessageSequence(Connection connection, String sessionId) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
                 "SELECT COALESCE(MAX(sequence),0) FROM messages WHERE session_id=?")) {
             ps.setString(1, sessionId);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
             }
+        }
+    }
+
+    /**
+     * Atomically appends a user message only while the run is still active (not terminal).
+     * Returns false when the run already terminated, so callers (e.g. collaboration comment
+     * delivery) can fall back to creating a new Run instead of losing the comment behind a
+     * terminal Run. The status re-check and the append share one SQLite transaction.
+     */
+    public boolean appendUserMessageIfRunActive(String sessionId, String runId, String content) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                boolean active;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT status FROM runs WHERE id=?")) {
+                    ps.setString(1, runId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        active = rs.next() && !RunStatus.valueOf(rs.getString("status")).terminal();
+                    }
+                }
+                if (!active) {
+                    connection.rollback();
+                    return false;
+                }
+                insertMessage(connection, sessionId, runId, "user", content == null ? "" : content,
+                        null, null, null, false);
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
         } catch (SQLException e) {
-            throw failure("read max message sequence", e);
+            throw failure("append user message to active run", e);
+        }
+    }
+
+    /**
+     * Persists the model's intermediate answer and requeues the run in one transaction. Used when
+     * user input arrived while the model was generating: the answer is preserved as history and the
+     * run re-runs to see the new message. A crash mid-way cannot leave the answer written while the
+     * run is still stuck in its old status.
+     */
+    public boolean commitIntermediateAssistantAndRequeue(String sessionId, String runId, String content,
+                                                         String reasoningContent, String eventJson, int nextStep) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                insertMessage(connection, sessionId, runId, "assistant", content == null ? "" : content,
+                        reasoningContent, null, null, false);
+                insertEvent(connection, runId, "run.new_input_during_model",
+                        eventJson == null ? "{}" : eventJson);
+                Instant now = Instant.now();
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,current_step=?,error=NULL,queued_at=?,version=version+1 " +
+                                "WHERE id=? AND status NOT IN ('COMPLETED','FAILED','CANCELED')")) {
+                    ps.setString(1, RunStatus.QUEUED.name());
+                    ps.setInt(2, Math.max(0, nextStep));
+                    ps.setString(3, now.toString());
+                    ps.setString(4, runId);
+                    if (ps.executeUpdate() == 0) {
+                        connection.rollback();
+                        return false;
+                    }
+                }
+                insertEvent(connection, runId, "run.queued", "{\"status\":\"QUEUED\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("commit intermediate assistant and requeue", e);
         }
     }
 
@@ -2621,9 +2703,28 @@ public class SqliteRuntimeStore {
 
     public boolean commitFinalAssistantAndComplete(String sessionId, String runId, String content,
                                                     String reasoningContent, String completedEventJson) {
+        return commitFinalAssistantAndComplete(sessionId, runId, content, reasoningContent,
+                completedEventJson, -1);
+    }
+
+    /**
+     * Atomically completes the run only if no message was appended after the model context was
+     * built. This closes the check-then-act window where user input arriving during the model call
+     * could be missed: the sequence check and the COMPLETED transition share one SQLite transaction.
+     * Returns false when a new message appeared (run left untouched) or when the run was no longer
+     * WAITING_MODEL (e.g. already canceled by another actor).
+     */
+    public boolean commitFinalAssistantAndComplete(String sessionId, String runId, String content,
+                                                    String reasoningContent, String completedEventJson,
+                                                    long expectedMaxMessageSequence) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
+                if (expectedMaxMessageSequence >= 0
+                        && maxMessageSequence(connection, sessionId) > expectedMaxMessageSequence) {
+                    connection.rollback();
+                    return false;
+                }
                 try (PreparedStatement ps = connection.prepareStatement(
                         "UPDATE runs SET status=?,error=NULL,finished_at=?,version=version+1 " +
                                 "WHERE id=? AND status=?")) {
@@ -4056,7 +4157,27 @@ public class SqliteRuntimeStore {
                 }
                 deleteRows(connection, "tool_calls", "run_id", ids);
                 deleteRows(connection, "messages", "run_id", ids);
+                List<String> affectedExpertThreadIds = new ArrayList<>();
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT DISTINCT thread_id FROM collaboration_expert_thread_runs WHERE run_id IN (" + in + ")")) {
+                    bindStrings(ps, ids);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) affectedExpertThreadIds.add(rs.getString(1));
+                    }
+                }
+                deleteRows(connection, "collaboration_expert_thread_runs", "run_id", ids);
                 deleteRows(connection, "runs", "id", ids);
+                for (String threadId : affectedExpertThreadIds) {
+                    try (PreparedStatement ps = connection.prepareStatement(
+                            "UPDATE collaboration_expert_threads SET latest_run_id=" +
+                                    "(SELECT run_id FROM collaboration_expert_thread_runs WHERE thread_id=? " +
+                                    "ORDER BY ordinal DESC LIMIT 1), digest_json='{}', updated_at=? WHERE id=?")) {
+                        ps.setString(1, threadId);
+                        ps.setString(2, Instant.now().toString());
+                        ps.setString(3, threadId);
+                        ps.executeUpdate();
+                    }
+                }
 
                 for (String id : ids) {
                     try (PreparedStatement ps = connection.prepareStatement(

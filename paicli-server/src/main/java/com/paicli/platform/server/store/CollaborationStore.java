@@ -7,6 +7,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -557,11 +558,36 @@ public class CollaborationStore {
         } catch (SQLException e) { throw failure("list expert thread runs", e); }
     }
 
+    /**
+     * Binds a Run to an ExpertThread with a monotonic ordinal. The whole operation runs in a single
+     * BEGIN IMMEDIATE transaction: a Run is only ever bound to one thread, ordinal allocation and the
+     * latest_run_id update happen atomically, and attaching an already-bound Run is idempotent.
+     *
+     * @throws IllegalStateException when the Run is already bound to a different thread
+     */
     public void attachExpertThreadRun(String threadId, String runId) {
         Instant now = Instant.now();
         try (Connection c = open()) {
-            c.setAutoCommit(false);
+            try (Statement statement = c.createStatement()) {
+                statement.execute("BEGIN IMMEDIATE");
+            }
             try {
+                String existingThread = null;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT thread_id FROM collaboration_expert_thread_runs WHERE run_id=?")) {
+                    ps.setString(1, runId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) existingThread = rs.getString(1);
+                    }
+                }
+                if (existingThread != null) {
+                    if (existingThread.equals(threadId)) {
+                        try (Statement statement = c.createStatement()) { statement.execute("COMMIT"); }
+                        return; // idempotent re-attach
+                    }
+                    throw new IllegalStateException("run " + runId + " is already bound to expert thread "
+                            + existingThread);
+                }
                 int ordinal;
                 try (PreparedStatement ps = c.prepareStatement(
                         "SELECT COALESCE(MAX(ordinal),0)+1 FROM collaboration_expert_thread_runs WHERE thread_id=?")) {
@@ -569,7 +595,7 @@ public class CollaborationStore {
                     try (ResultSet rs = ps.executeQuery()) { ordinal = rs.next() ? rs.getInt(1) : 1; }
                 }
                 try (PreparedStatement ps = c.prepareStatement(
-                        "INSERT OR IGNORE INTO collaboration_expert_thread_runs(thread_id,run_id,ordinal,created_at) "
+                        "INSERT INTO collaboration_expert_thread_runs(thread_id,run_id,ordinal,created_at) "
                                 + "VALUES(?,?,?,?)")) {
                     ps.setString(1, threadId);
                     ps.setString(2, runId);
@@ -584,9 +610,9 @@ public class CollaborationStore {
                     ps.setString(3, threadId);
                     ps.executeUpdate();
                 }
-                c.commit();
+                try (Statement statement = c.createStatement()) { statement.execute("COMMIT"); }
             } catch (Exception e) {
-                c.rollback();
+                try (Statement statement = c.createStatement()) { statement.execute("ROLLBACK"); }
                 throw e;
             }
         } catch (SQLException e) { throw failure("attach expert thread run", e); }
