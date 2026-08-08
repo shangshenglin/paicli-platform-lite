@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
+import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -28,6 +29,20 @@ public class DeferredAgentResultService {
         this.store = store;
         this.delegationToolProvider = delegationToolProvider;
         this.mapper = mapper;
+    }
+
+    /** Startup recovery: resolve parked deferred calls whose child is already terminal. */
+    @PostConstruct
+    void recover() {
+        try {
+            for (String childRunId : store.waitingExternalChildRunRefs()) {
+                boolean terminal = store.findRun(childRunId)
+                        .map(run -> run.status().terminal()).orElse(false);
+                if (terminal) resolveChildTerminal(childRunId);
+            }
+        } catch (Exception ignored) {
+            // recovery must never block startup; deferred calls are also resolved lazily
+        }
     }
 
     /** Resolves all parents waiting on the supplied child. Returns resolved count. */

@@ -1070,6 +1070,42 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void deferredToolCallLifecycleIsIdempotent() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("deferred", "project-d");
+        var run = store.createRun(session.id(), "wait for child");
+        var call = store.createToolCall(run.id(), "provider-1", "get_agent_result",
+                "{\"child_run_id\":\"run_child\"}", "deferred-key-1");
+        store.markToolRunning(call.id());
+
+        assertThat(store.markToolCallWaitingExternal(call.id(), "CHILD_RUN", "run_child")).isTrue();
+        var parked = store.findToolCall(call.id()).orElseThrow();
+        assertThat(parked.status()).isEqualTo(ToolCallStatus.WAITING_EXTERNAL);
+        assertThat(parked.waitKind()).isEqualTo("CHILD_RUN");
+        assertThat(parked.waitRef()).isEqualTo("run_child");
+        assertThat(parked.waitingSince()).isNotNull();
+        assertThat(store.waitingExternalToolCalls("CHILD_RUN", "run_child")).hasSize(1);
+        assertThat(store.waitingExternalChildRunRefs()).contains("run_child");
+
+        store.markRunStatus(run.id(), RunStatus.WAITING_AGENT);
+        boolean first = store.completeDeferredToolCallAndAppendResult(
+                session.id(), run.id(), call.id(), "{\"status\":\"COMPLETED\"}", "{\"deferred\":false}");
+        assertThat(first).isTrue();
+        assertThat(store.findToolCall(call.id()).orElseThrow().status()).isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(store.messages(session.id()).stream().filter(message -> "tool".equals(message.role())).count())
+                .isEqualTo(1);
+
+        // Duplicate terminal callback: second resolver is a no-op.
+        boolean second = store.completeDeferredToolCallAndAppendResult(
+                session.id(), run.id(), call.id(), "{\"status\":\"COMPLETED\"}", "{\"deferred\":false}");
+        assertThat(second).isFalse();
+        assertThat(store.messages(session.id()).stream().filter(message -> "tool".equals(message.role())).count())
+                .isEqualTo(1);
+        assertThat(store.waitingExternalToolCalls("CHILD_RUN", "run_child")).isEmpty();
+    }
+
+    @Test
     void persistsStructuredToolResultMetadataForEvidence() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("evidence", "project-e");

@@ -39,6 +39,67 @@ class DeferredAgentResultTest {
     Path tempDir;
 
     @Test
+    void startupRecoveryResolvesTerminalChildAndKeepsRunningChild() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ProductivityStore productivity = new ProductivityStore(properties);
+        PlanStore plans = new PlanStore(properties);
+        CollaborationStore collaboration = new CollaborationStore(properties);
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        DelegationEnvelopeBuilder envelopeBuilder = new DelegationEnvelopeBuilder();
+        AgentResultValidator validator = new AgentResultValidator();
+        RunEvidenceCollector evidenceCollector = new RunEvidenceCollector(store,
+                new ToolRouter(new LocalSandboxDriver(properties)), mapper);
+        CompletionContractService contracts = new CompletionContractService(store, plans, mapper);
+        AgentResultService agentResultService = new AgentResultService(store, evidenceCollector, contracts);
+        DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,
+                collaboration, envelopeBuilder, validator, agentResultService);
+        DeferredAgentResultService deferred = new DeferredAgentResultService(store, provider, mapper);
+
+        var parentSession = store.createSession("recover-parent", "project-r");
+        var parentRun = store.createRun(parentSession.id(), "wait");
+        var parentTool = store.createToolCall(parentRun.id(), "provider-r", "spawn_agent", "{}", "spawn-key-r");
+        store.createOrGetDelegation(parentRun.id(), parentTool.id(), "Backend", "task", null, null, null, null, "{}");
+        store.completeTool(parentTool.id(), "ok");
+        var childRunId = store.delegationsForRun(parentRun.id()).get(0).childRunId();
+
+        // Terminal child parked before restart.
+        var parked = store.createToolCall(parentRun.id(), "provider-p", "get_agent_result",
+                "{\"child_run_id\":\"" + childRunId + "\"}", "deferred-key-r1");
+        store.markToolRunning(parked.id());
+        store.markToolCallWaitingExternal(parked.id(), "CHILD_RUN", childRunId);
+        store.markRunStatus(childRunId, RunStatus.WAITING_MODEL);
+        store.completeRun(childRunId);
+        store.markRunStatus(parentRun.id(), RunStatus.WAITING_AGENT);
+
+        deferred.recover();
+
+        assertThat(store.findToolCall(parked.id()).orElseThrow().status())
+                .isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(store.findRun(parentRun.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+
+        // A non-terminal child stays parked across restarts.
+        var parentSession2 = store.createSession("recover-parent2", "project-r");
+        var parentRun2 = store.createRun(parentSession2.id(), "wait2");
+        var parentTool2 = store.createToolCall(parentRun2.id(), "provider-r2", "spawn_agent", "{}", "spawn-key-r2");
+        store.createOrGetDelegation(parentRun2.id(), parentTool2.id(), "Backend", "task2", null, null, null, null, "{}");
+        store.completeTool(parentTool2.id(), "ok");
+        var childRunId2 = store.delegationsForRun(parentRun2.id()).get(0).childRunId();
+        var parked2 = store.createToolCall(parentRun2.id(), "provider-p2", "get_agent_result",
+                "{\"child_run_id\":\"" + childRunId2 + "\"}", "deferred-key-r2");
+        store.markToolRunning(parked2.id());
+        store.markToolCallWaitingExternal(parked2.id(), "CHILD_RUN", childRunId2);
+
+        deferred.recover();
+
+        assertThat(store.findToolCall(parked2.id()).orElseThrow().status())
+                .isEqualTo(ToolCallStatus.WAITING_EXTERNAL);
+    }
+
+    @Test
     void deferredGetAgentResultResolvesOnChildTerminal() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");

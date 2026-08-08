@@ -3090,6 +3090,22 @@ public class SqliteRuntimeStore {
         }
     }
 
+    /** Distinct child run refs parked by deferred CHILD_RUN tool calls (startup recovery). */
+    public List<String> waitingExternalChildRunRefs() {
+        List<String> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT DISTINCT wait_ref FROM tool_calls WHERE status=? AND wait_kind=? AND wait_ref IS NOT NULL")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, "CHILD_RUN");
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(rs.getString(1));
+            }
+            return List.copyOf(values);
+        } catch (SQLException e) {
+            throw failure("list waiting external child run refs", e);
+        }
+    }
+
     /**
      * Atomically completes the original deferred tool call, appends the final
      * tool message to the parent session and requeues the parked parent. Only
