@@ -1917,6 +1917,25 @@ public class SqliteRuntimeStore {
         }
     }
 
+    /**
+     * Semantic run history: only active (archived=0) messages of the run. Archived messages are
+     * preserved for audit (see {@link #messagesForRun(String)}) but must never be consumed by any
+     * agent-semantic chain such as digests, agent results or memory extraction.
+     */
+    public List<MessageRecord> activeMessagesForRun(String runId) {
+        List<MessageRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM messages WHERE run_id=? AND archived=0 ORDER BY sequence")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapMessage(rs));
+            }
+            return values;
+        } catch (SQLException e) {
+            throw failure("list active run messages", e);
+        }
+    }
+
     public String planContextForRun(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "SELECT p.id plan_id,p.objective,p.status plan_status,ps.id step_id,ps.title," +
@@ -2435,7 +2454,8 @@ public class SqliteRuntimeStore {
             try {
                 List<MemoryExtractionMessage> snapshot = new ArrayList<>();
                 try (PreparedStatement select = connection.prepareStatement(
-                        "SELECT id,sequence,role,content,tool_call_id FROM messages WHERE run_id=? ORDER BY sequence")) {
+                        "SELECT id,sequence,role,content,tool_call_id FROM messages WHERE run_id=? AND archived=0 "
+                                + "ORDER BY sequence")) {
                     select.setString(1, runId);
                     try (ResultSet rs = select.executeQuery()) {
                         while (rs.next()) snapshot.add(new MemoryExtractionMessage(

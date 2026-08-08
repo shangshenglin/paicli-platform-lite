@@ -92,7 +92,7 @@ public class ExpertThreadDigestBuilder {
     }
 
     private String runSummary(String runId) {
-        return store.messagesForRun(runId).stream()
+        return store.activeMessagesForRun(runId).stream()
                 .filter(message -> "assistant".equals(message.role()))
                 .max(Comparator.comparingLong(MessageRecord::sequence))
                 .map(message -> truncate(message.content()))

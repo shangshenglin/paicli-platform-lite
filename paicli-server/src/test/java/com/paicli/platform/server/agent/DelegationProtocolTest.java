@@ -86,6 +86,31 @@ class DelegationProtocolTest {
     }
 
     @Test
+    void emptyCriterionEvidenceContainersAreNotEvidenced() {
+        AgentResultValidator validator = new AgentResultValidator();
+        for (Object empty : List.of("", List.of(), Map.of())) {
+            var result = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                    "status", "COMPLETED", "summary", "done",
+                    "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                    "criterion_evidence", Map.of("tests pass", empty)),
+                    List.of("tests pass"));
+            assertThat(result.criteria()).extracting("status").containsExactly("UNVERIFIED");
+        }
+        var evidencedList = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                "criterion_evidence", Map.of("tests pass", List.of("test-report-1"))),
+                List.of("tests pass"));
+        assertThat(evidencedList.criteria()).extracting("status").containsExactly("EVIDENCED");
+        var evidencedText = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                "criterion_evidence", Map.of("tests pass", "test-report-1")),
+                List.of("tests pass"));
+        assertThat(evidencedText.criteria()).extracting("status").containsExactly("EVIDENCED");
+    }
+
+    @Test
     void legacyValidateWithoutCriteriaKeepsOldBehavior() {
         AgentResultValidator validator = new AgentResultValidator();
         var result = validator.validate(run(RunStatus.COMPLETED), Map.of(

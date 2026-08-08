@@ -259,7 +259,7 @@ public class DelegationToolProvider implements ServerToolProvider {
                 "criterion", criterion.criterion(), "status", criterion.status())).toList());
         value.put("validation", validationView);
         if (child.status().terminal()) {
-            String answer = store.messages(delegation.childSessionId()).stream()
+            String answer = store.activeMessages(delegation.childSessionId()).stream()
                     .filter(message -> "assistant".equals(message.role()))
                     .map(MessageRecord::content).filter(content -> content != null && !content.isBlank())
                     .reduce((first, second) -> second).orElse("");
@@ -454,7 +454,7 @@ public class DelegationToolProvider implements ServerToolProvider {
     }
 
     private String latestAssistantAnswer(String sessionId) {
-        return store.messages(sessionId).stream()
+        return store.activeMessages(sessionId).stream()
                 .filter(message -> "assistant".equals(message.role()))
                 .map(MessageRecord::content)
                 .filter(content -> content != null && !content.isBlank())

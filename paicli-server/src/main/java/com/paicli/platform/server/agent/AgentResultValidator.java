@@ -68,11 +68,24 @@ public class AgentResultValidator {
         List<CriterionResult> criteria = new ArrayList<>();
         for (String criterion : doneCriteria) {
             if (criterion == null || criterion.isBlank()) continue;
-            boolean evidenced = evidenceByCriterion.containsKey(criterion.trim())
-                    && !String.valueOf(evidenceByCriterion.get(criterion.trim())).trim().isBlank();
+            String key = criterion.trim();
+            boolean evidenced = evidenceByCriterion.containsKey(key)
+                    && hasExplicitEvidence(evidenceByCriterion.get(key));
             criteria.add(new CriterionResult(criterion, evidenced ? "EVIDENCED" : "UNVERIFIED"));
         }
         return criteria;
+    }
+
+    /**
+     * An empty container is NOT evidence: empty string, empty list and empty map all mean the
+     * child did not report anything verifiable for this criterion.
+     */
+    private static boolean hasExplicitEvidence(Object value) {
+        if (value == null) return false;
+        if (value instanceof CharSequence text) return !text.toString().isBlank();
+        if (value instanceof List<?> list) return !list.isEmpty();
+        if (value instanceof Map<?, ?> map) return !map.isEmpty();
+        return false;
     }
 
     /**

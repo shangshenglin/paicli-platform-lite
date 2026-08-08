@@ -7,6 +7,7 @@ import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.RunDelegationRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.agent.DelegationEnvelopeBuilder;
 import com.paicli.platform.server.model.ModelClient;
 import com.paicli.platform.server.store.CollaborationStore;
 import com.paicli.platform.server.store.ProductivityStore;
@@ -53,7 +54,8 @@ class CollaborationServiceTest {
         routing = mock(CollaborationRoutingService.class);
         expertThreadService = mock(ExpertThreadService.class);
         service = new CollaborationService(collaboration, runtime, productivity,
-                routing, new ObjectMapper(), modelClient, sandboxDriver, null, null, expertThreadService);
+                routing, new ObjectMapper(), modelClient, sandboxDriver, null, null, expertThreadService,
+                new DelegationEnvelopeBuilder());
     }
 
     @Test
@@ -227,7 +229,7 @@ class CollaborationServiceTest {
                 eq(null), eq("AGENT:leader-a"))).thenReturn(subtask);
         when(runtime.createOrGetDelegation(eq("run-parent"), eq("tool-a"), eq(agent.name()), any(),
                 eq(agent.id()), nullable(String.class), nullable(String.class), nullable(String.class),
-                eq(null), eq(null), eq("{}"))).thenReturn(delegation);
+                eq(null), eq(null), any())).thenReturn(delegation);
         when(runtime.findRun("run-child")).thenReturn(Optional.of(childRun));
 
         var result = service.createAndDispatchSubtask(parent.id(), "run-parent", "tool-a",
@@ -743,7 +745,7 @@ class CollaborationServiceTest {
                 eq(null), eq("AGENT:leader-a"))).thenReturn(subtask);
         when(runtime.createOrGetDelegation(eq("run-parent"), eq("tool-a"), eq(agent.name()), any(),
                 eq(agent.id()), nullable(String.class), nullable(String.class), nullable(String.class),
-                eq(null), eq(null), eq("{}"))).thenReturn(delegation);
+                eq(null), eq(null), any())).thenReturn(delegation);
         when(runtime.findRun("run-child")).thenReturn(Optional.of(childRun));
 
         service.createAndDispatchSubtask(parent.id(), "run-parent", "tool-a",
@@ -753,7 +755,7 @@ class CollaborationServiceTest {
         ArgumentCaptor<String> inputCaptor = ArgumentCaptor.forClass(String.class);
         verify(runtime).createOrGetDelegation(eq("run-parent"), eq("tool-a"), eq(agent.name()),
                 inputCaptor.capture(), eq(agent.id()), nullable(String.class), nullable(String.class),
-                nullable(String.class), eq(null), eq(null), eq("{}"));
+                nullable(String.class), eq(null), eq(null), any());
         assertThat(inputCaptor.getValue())
                 .contains("<expert_thread_resume>")
                 .contains("expert_thread_1");

@@ -1,6 +1,7 @@
 package com.paicli.platform.server.collaboration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.server.agent.DelegationEnvelopeBuilder;
 import com.paicli.platform.common.SandboxDriver;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.domain.RunRecord;
@@ -36,12 +37,14 @@ public class CollaborationService {
     private final TaskDigestService taskDigestService;
     private final DeliveryManifestService deliveryManifestService;
     private final ExpertThreadService expertThreadService;
+    private final DelegationEnvelopeBuilder delegationEnvelopeBuilder;
 
     public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
                                 ProductivityStore productivity, CollaborationRoutingService routing,
                                 ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver,
                                 TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService,
-                                ExpertThreadService expertThreadService) {
+                                ExpertThreadService expertThreadService,
+                                DelegationEnvelopeBuilder delegationEnvelopeBuilder) {
         this.collaboration = collaboration;
         this.runtime = runtime;
         this.productivity = productivity;
@@ -52,6 +55,7 @@ public class CollaborationService {
         this.taskDigestService = taskDigestService;
         this.deliveryManifestService = deliveryManifestService;
         this.expertThreadService = expertThreadService;
+        this.delegationEnvelopeBuilder = delegationEnvelopeBuilder;
     }
 
     public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
@@ -116,9 +120,10 @@ public class CollaborationService {
             String resume = expertThreadResume(expertThread);
             if (!resume.isBlank()) input = input + "\n" + resume;
         }
+        String stageEnvelopeJson = stageEnvelopeJson(subtask, parentRunId, agent);
         RunDelegationRecord delegation = runtime.createOrGetDelegation(parentRunId, toolCallId,
                 agent.name(), input, agent.id(), agent.modelProfileId(), agent.thinkingMode(),
-                agent.reasoningEffort(), null, null, "{}");
+                agent.reasoningEffort(), null, null, stageEnvelopeJson);
         collaboration.linkRun(subtask.id(), delegation.childRunId(), null, "STAGE_DELEGATION");
         if (expertThread != null) attachRunToExpertThreadSafely(expertThread.id(), delegation.childRunId());
         collaboration.recordActivity(subtask.id(), "STAGE_DISPATCHED", "AGENT", agent.id(),
@@ -823,6 +828,41 @@ public class CollaborationService {
      * experts, directly mentioned team experts, and the assigned agent of a single-AGENT task -
      * is an EXPERT thread and receives the {@code <expert_thread_resume>} digest on follow-up Runs.
      */
+    /**
+     * Builds the durable delegation envelope for a stage run at dispatch time (a snapshot contract),
+     * reusing {@link DelegationEnvelopeBuilder} so the stage's acceptance criteria become the child's
+     * {@code done_criteria} and reach the AgentResultValidator via get_agent_result. Includes the
+     * stage task id and the parent run id; falls back to "{}" if the envelope cannot be built so
+     * stage dispatch never breaks.
+     */
+    private String stageEnvelopeJson(CollaborationStore.CollaborationTask subtask, String parentRunId,
+                                     ProductivityStore.AgentProfile agent) {
+        try {
+            Map<String, Object> envelope = new java.util.LinkedHashMap<>(delegationEnvelopeBuilder.build(
+                    new DelegationEnvelopeBuilder.EnvelopeInput(
+                            subtask.title(),
+                            subtask.description() == null ? "" : subtask.description(),
+                            List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+                            null,
+                            stageDoneCriteria(subtask.acceptanceCriteria()),
+                            null, null, List.of(), List.of(),
+                            DelegationEnvelopeBuilder.defaultMode(agent.collaborationRole()),
+                            null, "BLOCK_GRAPH", List.of())));
+            envelope.put("collaboration_task_id", subtask.id());
+            envelope.put("parent_run_id", parentRunId);
+            return write(envelope);
+        } catch (Exception error) {
+            log.warn("Unable to build stage envelope for task={}", subtask.id(), error);
+            return "{}";
+        }
+    }
+
+    private List<String> stageDoneCriteria(String acceptanceCriteria) {
+        if (acceptanceCriteria == null || acceptanceCriteria.isBlank()) return List.of();
+        return java.util.Arrays.stream(acceptanceCriteria.split("\\R"))
+                .map(String::trim).filter(value -> !value.isBlank()).toList();
+    }
+
     private String resolveThreadRole(CollaborationStore.CollaborationTask task,
                                      CollaborationRoutingService.RoutePreview preview,
                                      ProductivityStore.AgentProfile agent) {
