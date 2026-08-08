@@ -28,7 +28,7 @@ class AgentResultServiceTest {
         PlanStore plans = new PlanStore(properties);
         ObjectMapper mapper = new ObjectMapper();
         ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties));
-        RunEvidenceCollector collector = new RunEvidenceCollector(store, router, mapper);
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, mapper);
         CompletionContractService contracts = new CompletionContractService(store, plans, mapper);
         AgentResultService service = new AgentResultService(store, collector, contracts);
 

@@ -26,7 +26,7 @@ class RunEvidenceCollectorTest {
         SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
         store.initialize();
         ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties));
-        RunEvidenceCollector collector = new RunEvidenceCollector(store, router, new ObjectMapper());
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, new ObjectMapper());
 
         var session = store.createSession("evidence", "project-e");
         var run = store.createRun(session.id(), "modify and test");
@@ -61,7 +61,7 @@ class RunEvidenceCollectorTest {
         SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
         store.initialize();
         ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties));
-        RunEvidenceCollector collector = new RunEvidenceCollector(store, router, new ObjectMapper());
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, new ObjectMapper());
 
         var session = store.createSession("evidence2", "project-e");
         var run = store.createRun(session.id(), "no-op write then failing test");
@@ -89,7 +89,7 @@ class RunEvidenceCollectorTest {
         SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
         store.initialize();
         ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties));
-        RunEvidenceCollector collector = new RunEvidenceCollector(store, router, new ObjectMapper());
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, new ObjectMapper());
 
         var session = store.createSession("evidence3", "project-e");
         var run = store.createRun(session.id(), "build only");

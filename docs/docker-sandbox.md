@@ -57,6 +57,11 @@ paicli:
     command-timeout-seconds: 90
 ```
 
+## 结构化工具证据
+
+- `write_file` 返回结构化 metadata：`path`、`changed`（写入前后 sha256 不同）、`beforeSha256`、`afterSha256`、`bytesWritten`；相同内容重写 `changed=false`，不进入 `files_changed` 证据。
+- `execute_command` 返回 `exitCode`、`timedOut`、`shell`、`cwd`、`durationMs` 等 metadata；测试族由 Server 侧 `TestCommandClassifier` 按命令精确识别（`mvn compile`、`./check-status.sh` 不算测试）。
+- metadata 随 `ToolResult.metadata` 持久化到 `tool_calls.result_metadata_json`（迁移 39），供 `RunEvidenceCollector` 作为完成验证、AgentResult 与交付清单的统一证据来源。
 ## 已知限制
 
 - Docker Desktop/WSL2 需要单独安装。

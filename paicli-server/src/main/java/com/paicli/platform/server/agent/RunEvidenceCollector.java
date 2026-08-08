@@ -7,7 +7,6 @@ import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
-import com.paicli.platform.server.tool.ToolRouter;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -25,12 +24,10 @@ public class RunEvidenceCollector {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() { };
 
     private final SqliteRuntimeStore store;
-    private final ToolRouter toolRouter;
     private final ObjectMapper mapper;
 
-    public RunEvidenceCollector(SqliteRuntimeStore store, ToolRouter toolRouter, ObjectMapper mapper) {
+    public RunEvidenceCollector(SqliteRuntimeStore store, ObjectMapper mapper) {
         this.store = store;
-        this.toolRouter = toolRouter;
         this.mapper = mapper;
     }
 

@@ -262,7 +262,7 @@ X-API-Key: your-key
 
 ### 完成验证、失败反思与只读工具批次（Harness Loop v2 PR2–PR4）
 
-- **CompletionVerifier**：最终答案非空不再等于完成。Run 执行过写操作但工作区无变化、或测试命令失败时，平台把验证结果注入下一轮并要求修复，连续 2 次仍不过才 `FAILED`；普通问答仍直接完成。验证结果持久化为 `run.verification` Event。
+- **CompletionVerifier**：最终答案非空不再等于完成。平台先为 Run 建立持久化 **Completion Contract**（`run_completion_contracts`，来源按 DelegationEnvelope → PlanStep → Root 保守分类器 → WorkingPlan completion 排序，只可加强不可被模型削弱），再通过 **RunEvidenceCollector** 收集真实执行证据（write_file/execute_command 的结构化 metadata、Artifact），按 `TEXT_ONLY / MUTATION_REQUIRED / TEST_REQUIRED / MUTATION_AND_TEST` 验证合同 vs 证据；required test families 必须在最后一次真实文件变更之后通过，不同测试族互不覆盖；不通过时把验证结果注入下一轮并要求修复，连续 2 次仍不过才 `FAILED`。测试命令使用高精度 `TestCommandClassifier`（`mvn compile`、`./check-status.sh` 不再误判）。验证结果持久化为 `run.verification` / `run.evidence.collected` Event。
 - **失败反思**：测试/工具失败与重复工具调用会记录结构化 `run_reflections`（失败分类、诊断、决策、证据引用、下一步），每轮注入最新 `<reflection>`，不保存模型隐藏思维链；重复相同工具+参数超限后停止 Run。
 - **只读工具批次**：同一模型响应中连续的只读 ToolCall 单次领取并行执行（≤4 并发），按模型原始顺序写 Tool Message；写工具与审批工具保持顺序执行屏障。
 
@@ -414,7 +414,7 @@ data/workspaces/{runId}/PAI.md
 - 工具白名单会过滤传给模型的 Tool Definition；Skill 白名单会过滤上下文中的 Skill 索引，为后续 Leader/Worker 小队调度预留稳定专家目录。
 - `spawn_agent` 经审批后创建内部子 Session/Run，并以父 ToolCall 为唯一键避免恢复时重复派生。
 - 委派限制三层深度、每个父 Run 最多六个子 Run；取消父 Run 会级联取消后代。
-- 父 Run 通过 `get_agent_result` 查询结果，不同步占住 Worker 等待。
+- 父 Run 通过 `get_agent_result` 查询结果：child 未终态时该 ToolCall 持久化为 `WAITING_EXTERNAL`（`wait_kind=CHILD_RUN`、`wait_ref=child`），父 Run 进入 `WAITING_AGENT` 且不占用模型轮次；child 终态后 Server 原子完成原始 ToolCall、追加真实 ToolResult 并唤醒父 Run，重启后由启动恢复补齐，重复终态回调幂等。
 - `list_agents`、`cancel_agent` 继续走普通 ToolCall 和审批链路。
 
 #### 图片与文档附件
@@ -539,7 +539,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–38：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性）。
+SQLite `schema_migrations` 当前记录版本 1–39：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性），39 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 

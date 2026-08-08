@@ -33,6 +33,7 @@ public class DeliveryManifestService {
         this(collaboration, store, mapper, null);
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper,
                                    com.paicli.platform.server.agent.RunEvidenceCollector evidenceCollector) {
         this.collaboration = collaboration;

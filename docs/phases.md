@@ -1,5 +1,14 @@
 # 交付阶段
 
+## 2026-08-09 Harness Loop v2 · PR10：完成合同、执行证据与 Deferred get_agent_result
+
+- 迁移 39：`run_completion_contracts`（完成合同）、`tool_calls.result_metadata_json`（结构化工具证据）、`tool_calls.wait_kind/wait_ref/waiting_since`（Deferred 外部工具调用）。
+- Completion Contract：`CompletionContractService` 按 DelegationEnvelope → PlanStep → WorkingPlan completion → Root 保守分类器建立合同，只可加强不可被模型削弱；`CompletionRequirementClassifier` 对 Root 任务做高置信度命令式识别。
+- Evidence：`RunEvidenceCollector` 统一收集 files/commands/tests/artifacts/lastMutationOrdinal；`TestCommandClassifier` 高精度测试族分类；`write_file` 结构化 before/after sha256。
+- 验证：`RunVerificationService` 按合同模式验证，required tests 在最后一次 mutation 后通过、不同 TestFamily 互不覆盖。
+- AgentResult：`AgentResultService` 自动归集结构化结果，`AgentResultValidator` contract-aware，DeliveryManifest/WorkspaceMerge 复用同一证据。
+- Deferred：`WAITING_EXTERNAL` + child 终态自动 resolve 原始 `get_agent_result` ToolCall；启动恢复、Lost Wakeup 双边保护、幂等。
+- 状态：完成。`.\mvnw.cmd clean test` 全量通过；无 REST 路径变更，产品站无展示变更（不适用）。
 ## 2026-08-08 ExpertThread · PR9：专家线程与执行期新输入竞态保护
 
 - [x] 迁移 38：`collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一，`latest_run_id` 带 `ON DELETE SET NULL` 外键）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。

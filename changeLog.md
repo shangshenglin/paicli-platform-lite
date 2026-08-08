@@ -2,6 +2,21 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-09
+
+### Harness Loop v2 · PR：Completion Contract、执行证据与 Deferred get_agent_result（9 个提交）
+
+- 变更（Commit 1·结构化工具证据）：迁移 39 新增 `tool_calls.result_metadata_json`；LocalSandboxDriver 与 Sandbox 代理的 `write_file` 统一返回 `path/changed/beforeSha256/afterSha256/bytesWritten`，`execute_command` 继续带 `exitCode/timedOut/shell/cwd/durationMs`；ToolResult.metadata 持久化，证据不再依赖解析 stdout 文本。
+- 变更（Commit 2·测试族分类）：新增 `TestFamily` 与 `TestCommandClassifier`，删除 `contains("mvn")/contains("check")` 粗糙启发式；`mvn compile`、`./check-status.sh` 不再误判为测试。
+- 变更（Commit 3·证据收集）：新增 `RunEvidenceCollector` 与 `RunEvidence/FileEvidence/CommandEvidence/TestEvidence/ArtifactEvidence/TestStatus`；`lastMutationOrdinal` 仅由真实 write_file 变更决定，供“最后 mutation 之后测试必须通过”判定。
+- 变更（Commit 4·完成合同）：新增 `CompletionMode`、`RunCompletionContractRecord` 与 `run_completion_contracts` 表；`CompletionContractService` 按 DelegationEnvelope → PlanStep → Root 保守分类器 → WorkingPlan completion 的可靠性顺序建立合同，只可加强不可被模型削弱；`CompletionRequirementClassifier` 只识别高置信度命令式任务，问答默认 TEXT_ONLY；`update_working_plan` 增加可选 `completion` 结构化声明。
+- 变更（Commit 5·合同驱动验证）：`RunVerificationService` 重构为纯逻辑 `verify(run, finalAnswer, contract, evidence)`，按 TEXT_ONLY / MUTATION_REQUIRED / TEST_REQUIRED / MUTATION_AND_TEST 验证；不同 TestFamily 互不覆盖，required tests 必须在最后一次真实 mutation 之后通过。
+- 变更（Commit 6·AgentResult 证据闭环）：新增 `AgentResultService` 自动归集 `files_changed/commands_executed/tests/artifacts/completion_contract/evidence`；`AgentResultValidator` 增加 contract-aware 校验；`DeliveryManifestService.recordStageDelivery(taskId, stage, runId)` 与 `WorkspaceMergeService.ChildChanges.of` 复用统一证据。
+- 变更（Commit 7·Deferred get_agent_result）：`ToolCallStatus.WAITING_EXTERNAL`；`tool_calls` 增加 `wait_kind/wait_ref/waiting_since`；`get_agent_result` 在 child 未终态时返回 deferred metadata，RunProcessor 标记 WAITING_EXTERNAL 且 Parent 进入 WAITING_AGENT（不追加最终 tool 消息、不轮询）；child 终态由 `DeferredAgentResultService` 原子完成原始 ToolCall、追加 tool 消息并重排队 Parent。
+- 变更（Commit 8·恢复/竞态/审计）：`@PostConstruct` 启动恢复扫描 WAITING_EXTERNAL CHILD_RUN（child 已终态立即 resolve）；Lost Wakeup 双边幂等保护；事件 `tool.deferred / tool.deferred.resolved / agent.result.validated / run.evidence.collected / run.completion_contract.created / strengthened`。
+- 变更（Commit 9·文档与回归）：README、docs/architecture.md、docs/phases.md、docs/docker-sandbox.md、changeLog 同步；`.\mvnw.cmd clean test` 全量通过（paicli-common + paicli-server + paicli-sandbox-agent）。
+- 思路：Harness 从“行为驱动”升级为“任务要求驱动”——模型负责策略与代码生成，系统环境提供真实执行事实（ToolCall/ToolResult/Workspace/Artifact），CompletionVerifier 用机器可验证的合同 vs 证据决定是否完成；自然语言业务语义仍由 Parent Reviewer/人工/真实测试负责，不引入 Completion Judge LLM，不假装自动理解所有 done_criteria。
+- 验证：`.\mvnw.cmd clean test` 全量通过（含新增 TestCommandClassifierTest、RunEvidenceCollectorTest、CompletionRequirementClassifierTest、CompletionContractServiceTest、RunVerificationServiceTest、AgentResultValidatorTest、AgentResultServiceTest、DeferredAgentResultTest、LocalSandboxDriverTest/SqliteRuntimeStoreTest 扩展）；OpenAPI 无 REST 路径变更（get_agent_result 行为变化为 Server 内部协议，不改变请求/响应 schema），`paicli-site/README.md` 无产品可见能力变更，故二者本次不适用；`git diff --check` 通过。
 ## 2026-08-08
 
 ### ExpertThread：同一专家在协作任务内的逻辑线程 + 模型执行期间新评论竞态保护

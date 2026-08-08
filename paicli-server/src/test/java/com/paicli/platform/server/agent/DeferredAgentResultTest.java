@@ -51,8 +51,7 @@ class DeferredAgentResultTest {
         LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
         DelegationEnvelopeBuilder envelopeBuilder = new DelegationEnvelopeBuilder();
         AgentResultValidator validator = new AgentResultValidator();
-        RunEvidenceCollector evidenceCollector = new RunEvidenceCollector(store,
-                new ToolRouter(new LocalSandboxDriver(properties)), mapper);
+        RunEvidenceCollector evidenceCollector = new RunEvidenceCollector(store, mapper);
         CompletionContractService contracts = new CompletionContractService(store, plans, mapper);
         AgentResultService agentResultService = new AgentResultService(store, evidenceCollector, contracts);
         DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,
@@ -112,8 +111,7 @@ class DeferredAgentResultTest {
         LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
         DelegationEnvelopeBuilder envelopeBuilder = new DelegationEnvelopeBuilder();
         AgentResultValidator validator = new AgentResultValidator();
-        RunEvidenceCollector evidenceCollector = new RunEvidenceCollector(store,
-                new ToolRouter(new LocalSandboxDriver(properties)), mapper);
+        RunEvidenceCollector evidenceCollector = new RunEvidenceCollector(store, mapper);
         CompletionContractService contracts = new CompletionContractService(store, plans, mapper);
         AgentResultService agentResultService = new AgentResultService(store, evidenceCollector, contracts);
         DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,

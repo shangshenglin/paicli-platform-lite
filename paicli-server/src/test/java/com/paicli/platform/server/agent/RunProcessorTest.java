@@ -377,7 +377,7 @@ class RunProcessorTest {
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
                 new RunVerificationService(store,
-                        new RunEvidenceCollector(store, router, mapper),
+                        new RunEvidenceCollector(store, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
                 new ReflectionService(store, mapper), null);
         var session = store.createSession("batch");
@@ -422,7 +422,7 @@ class RunProcessorTest {
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
                 new RunVerificationService(store,
-                        new RunEvidenceCollector(store, router, mapper),
+                        new RunEvidenceCollector(store, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
                 new ReflectionService(store, mapper), null);
         var session = store.createSession("verify");
@@ -467,7 +467,7 @@ class RunProcessorTest {
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
                 new RunVerificationService(store,
-                        new RunEvidenceCollector(store, router, mapper),
+                        new RunEvidenceCollector(store, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
                 new ReflectionService(store, mapper), null);
         var session = store.createSession("loop");
