@@ -1803,9 +1803,11 @@ public class SqliteRuntimeStore {
     }
 
     /**
-     * Highest message sequence currently recorded in the session. Used by the run processor to
-     * detect user input that arrived while the model was generating: if the sequence advanced
-     * past what the built context saw, the model may have missed the new message.
+     * Highest ACTIVE message sequence in the session, mirroring exactly what the model context
+     * saw (activeMessages excludes archived messages). Used by the run processor to detect user
+     * input that arrived while the model was generating: if the active sequence advanced past
+     * what the built context saw, the model may have missed the new message. Archived messages
+     * (e.g. a stale intermediate answer) never count as new input.
      */
     public long maxMessageSequence(String sessionId) {
         try (Connection connection = open()) {
@@ -1817,7 +1819,7 @@ public class SqliteRuntimeStore {
 
     private long maxMessageSequence(Connection connection, String sessionId) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT COALESCE(MAX(sequence),0) FROM messages WHERE session_id=?")) {
+                "SELECT COALESCE(MAX(sequence),0) FROM messages WHERE session_id=? AND archived=0")) {
             ps.setString(1, sessionId);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
@@ -1862,9 +1864,10 @@ public class SqliteRuntimeStore {
 
     /**
      * Persists the model's intermediate answer and requeues the run in one transaction. Used when
-     * user input arrived while the model was generating: the answer is preserved as history and the
-     * run re-runs to see the new message. A crash mid-way cannot leave the answer written while the
-     * run is still stuck in its old status.
+     * user input arrived while the model was generating: the answer is preserved for audit as an
+     * ARCHIVED assistant message (never part of the next round's active context) and the run re-runs
+     * to see the new message. A crash mid-way cannot leave the answer written while the run is still
+     * stuck in its old status.
      */
     public boolean commitIntermediateAssistantAndRequeue(String sessionId, String runId, String content,
                                                          String reasoningContent, String eventJson, int nextStep) {
@@ -1872,7 +1875,7 @@ public class SqliteRuntimeStore {
             connection.setAutoCommit(false);
             try {
                 insertMessage(connection, sessionId, runId, "assistant", content == null ? "" : content,
-                        reasoningContent, null, null, false);
+                        reasoningContent, null, null, true);
                 insertEvent(connection, runId, "run.new_input_during_model",
                         eventJson == null ? "{}" : eventJson);
                 Instant now = Instant.now();

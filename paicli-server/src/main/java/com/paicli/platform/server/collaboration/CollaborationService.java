@@ -817,6 +817,12 @@ public class CollaborationService {
         }
     }
 
+    /**
+     * Thread role is an orchestration role, not a synonym for "task assignee": only a real TEAM
+     * leader gets a LEADER thread (which continues via TaskDigest). Everything else - team stage
+     * experts, directly mentioned team experts, and the assigned agent of a single-AGENT task -
+     * is an EXPERT thread and receives the {@code <expert_thread_resume>} digest on follow-up Runs.
+     */
     private String resolveThreadRole(CollaborationStore.CollaborationTask task,
                                      CollaborationRoutingService.RoutePreview preview,
                                      ProductivityStore.AgentProfile agent) {
@@ -826,8 +832,6 @@ public class CollaborationService {
             if (team != null && team.leaderAgentProfileId().equals(agent.id())) return "LEADER";
             return "EXPERT";
         }
-        if ("AGENT".equals(preview.targetType()) && task.assigneeId() != null
-                && task.assigneeId().equals(agent.id())) return "LEADER";
         return "EXPERT";
     }
 

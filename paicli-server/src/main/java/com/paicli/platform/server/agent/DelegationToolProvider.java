@@ -248,8 +248,16 @@ public class DelegationToolProvider implements ServerToolProvider {
         if (child.error() != null && !child.error().isBlank()) value.put("error", child.error());
         Map<String, Object> agentResult = persistedAgentResult(delegation);
         if (agentResult.isEmpty()) agentResult = agentResult(delegation, child);
-        AgentResultValidator.ValidationResult validation = resultValidator.validate(child, agentResult);
-        value.put("validation", Map.of("valid", validation.valid(), "issues", validation.issues()));
+        List<String> doneCriteria = doneCriteria(delegation);
+        AgentResultValidator.ValidationResult validation =
+                resultValidator.validate(child, agentResult, doneCriteria);
+        value.put("done_criteria", doneCriteria);
+        Map<String, Object> validationView = new LinkedHashMap<>();
+        validationView.put("valid", validation.valid());
+        validationView.put("issues", validation.issues());
+        validationView.put("criteria", validation.criteria().stream().map(criterion -> Map.of(
+                "criterion", criterion.criterion(), "status", criterion.status())).toList());
+        value.put("validation", validationView);
         if (child.status().terminal()) {
             String answer = store.messages(delegation.childSessionId()).stream()
                     .filter(message -> "assistant".equals(message.role()))
@@ -355,7 +363,7 @@ public class DelegationToolProvider implements ServerToolProvider {
                         listArg(request.arguments().get("input_artifacts")),
                         List.of(),
                         expectedSchema.isBlank() ? nullToBlank(profileOutputSchema) : expectedSchema,
-                        doneCriteria.isEmpty() && step != null ? List.of(step.doneCriteriaJson()) : doneCriteria,
+                        doneCriteria.isEmpty() && step != null ? jsonList(step.doneCriteriaJson()) : doneCriteria,
                         stringArg(request.arguments(), "budget"),
                         stringArg(request.arguments(), "deadline"),
                         listArg(request.arguments().get("dependencies")),
@@ -414,6 +422,25 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("risks", List.of());
         value.put("memory_candidates", List.of());
         return value;
+    }
+
+    /**
+     * Reads the done criteria that were actually persisted on the delegation envelope at spawn
+     * time, so validation and the returned result always match what the child was asked to do.
+     */
+    private List<String> doneCriteria(RunDelegationRecord delegation) {
+        if (delegation.envelopeJson() == null || delegation.envelopeJson().isBlank()) return List.of();
+        try {
+            Map<String, Object> envelope = mapper.readValue(delegation.envelopeJson(), OBJECT_MAP);
+            Object raw = envelope.get("done_criteria");
+            if (raw instanceof List<?> list) {
+                return list.stream().map(String::valueOf).map(String::trim)
+                        .filter(item -> !item.isBlank()).toList();
+            }
+            return List.of();
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private Map<String, Object> persistedAgentResult(RunDelegationRecord delegation) {

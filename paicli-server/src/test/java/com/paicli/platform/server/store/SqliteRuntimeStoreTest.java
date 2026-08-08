@@ -1209,11 +1209,19 @@ class SqliteRuntimeStoreTest {
         store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
 
         boolean requeued = store.commitIntermediateAssistantAndRequeue(session.id(), run.id(),
-                "intermediate answer", null, "{\"contextMessageSequence\":1,\"latestSequence\":2}", 1);
+                "intermediate answer", null, "{\"contextMessageSequence\":1,\"latestSequence\":2,"
+                        + "\"staleAssistantArchived\":true}", 1);
 
         assertThat(requeued).isTrue();
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
-        assertThat(store.messages(session.id())).extracting("role").contains("assistant");
+        // Stale answer stays in the full audit history ...
+        assertThat(store.messages(session.id())).anySatisfy(message -> {
+            assertThat(message.role()).isEqualTo("assistant");
+            assertThat(message.archived()).isTrue();
+        });
+        // ... but never enters the next round's active context.
+        assertThat(store.activeMessages(session.id()).stream()
+                .anyMatch(message -> "assistant".equals(message.role()))).isFalse();
         assertThat(store.events(run.id(), 0)).extracting("type")
                 .contains("run.new_input_during_model", "run.queued");
     }

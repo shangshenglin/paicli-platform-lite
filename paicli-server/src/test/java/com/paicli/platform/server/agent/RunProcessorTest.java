@@ -498,9 +498,14 @@ class RunProcessorTest {
         var run = store.createRun(session.id(), "collaboration task input");
         java.util.concurrent.atomic.AtomicBoolean appended =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.atomic.AtomicInteger calls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<ModelRequest> secondRequest =
+                new java.util.concurrent.atomic.AtomicReference<>();
         ModelClient racingModel = new ModelClient() {
             @Override
             public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                if (calls.incrementAndGet() == 2) secondRequest.set(request);
                 if (appended.compareAndSet(false, true)) {
                     store.appendMessage(session.id(), runId, "user", "模型执行期间用户追加评论");
                 }
@@ -517,11 +522,13 @@ class RunProcessorTest {
 
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
         assertThat(store.events(run.id(), 0)).extracting("type").contains("run.new_input_during_model");
-        assertThat(store.messages(session.id())).extracting("role")
-                .contains("user", "assistant", "user");
+        // The stale answer stays in the full audit history as an ARCHIVED assistant message ...
         assertThat(store.messages(session.id()).stream()
-                .anyMatch(message -> "assistant".equals(message.role())
-                        && message.content().contains("我已完成"))).isTrue();
+                .filter(message -> "assistant".equals(message.role()))
+                .anyMatch(message -> message.archived() && message.content().contains("我已完成"))).isTrue();
+        // ... but is excluded from the next round's active context.
+        assertThat(store.activeMessages(session.id()).stream()
+                .anyMatch(message -> "assistant".equals(message.role()))).isFalse();
 
         processor.process(store.claimNextRun().orElseThrow());
 
@@ -529,6 +536,11 @@ class RunProcessorTest {
         assertThat(store.messages(session.id()).stream()
                 .anyMatch(message -> "user".equals(message.role())
                         && message.content().contains("模型执行期间用户追加评论"))).isTrue();
+        // The second model request must see the new comment and must NOT see the stale answer.
+        assertThat(secondRequest.get()).isNotNull();
+        String secondRequestText = secondRequest.get().messages().toString();
+        assertThat(secondRequestText).contains("模型执行期间用户追加评论")
+                .doesNotContain("我已完成，但可能没看到新评论");
     }
 
     private static ModelProperties modelProperties() {

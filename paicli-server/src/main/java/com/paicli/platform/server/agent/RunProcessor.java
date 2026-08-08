@@ -251,7 +251,8 @@ public class RunProcessor {
                         store.commitIntermediateAssistantAndRequeue(run.sessionId(), run.id(),
                                 response.content(), response.reasoningContent(), json(Map.of(
                                 "contextMessageSequence", context.maxMessageSequence(),
-                                "latestSequence", store.maxMessageSequence(run.sessionId()))),
+                                "latestSequence", store.maxMessageSequence(run.sessionId()),
+                                "staleAssistantArchived", true)),
                                 run.currentStep() + 1);
                     }
                     toolRouter.release(run.id());

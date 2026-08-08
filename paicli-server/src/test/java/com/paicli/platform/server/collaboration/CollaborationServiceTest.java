@@ -776,8 +776,8 @@ class CollaborationServiceTest {
                 nullable(String.class), eq("rework please"), eq(false), any())).thenReturn(comment);
         stubTriggerFlow(task, "AGENT", "agent-a", "agent-a", "comment-a", "session-new");
         when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of(staleLink));
-        when(expertThreadService.getOrCreate("task-a", "agent-a", "LEADER")).thenReturn(
-                new CollaborationStore.ExpertThread("expert_thread_1", "task-a", "agent-a", "LEADER",
+        when(expertThreadService.getOrCreate("task-a", "agent-a", "EXPERT")).thenReturn(
+                new CollaborationStore.ExpertThread("expert_thread_1", "task-a", "agent-a", "EXPERT",
                         "ACTIVE", "{}", null, now, now));
 
         var result = service.comment(task.id(), null, "USER", null, "rework please", false, List.of());
@@ -785,6 +785,50 @@ class CollaborationServiceTest {
         assertThat(result.executions()).hasSize(1);
         verify(collaboration).createOrGetTrigger(eq(task.id()), eq("MENTION"), eq(comment.id()),
                 eq("AGENT"), eq("agent-a"), any(), any());
+    }
+
+    @Test
+    void singleAgentRetriggerUsesExpertThreadResume() {
+        var task = task("IN_PROGRESS", "AGENT", "backend-a");
+        Instant now = task.createdAt();
+        var thread = new CollaborationStore.ExpertThread("expert_thread_1", "task-a", "backend-a", "EXPERT",
+                "ACTIVE", "{\"thread_id\":\"expert_thread_1\",\"completed_work\":[\"export\"],"
+                        + "\"latest_run\":{\"run_id\":\"run-1\",\"status\":\"COMPLETED\"}}", "run-1", now, now);
+        when(collaboration.task(task.id())).thenReturn(Optional.of(task));
+        when(collaboration.taskTreeRuns(task.id())).thenReturn(List.of());
+        when(productivity.resolveAgentProfile("default", "backend-a")).thenReturn(Optional.of(agent("backend-a")));
+        when(expertThreadService.getOrCreate("task-a", "backend-a", "EXPERT")).thenReturn(thread);
+        when(routing.preview(any(), any(), eq("AGENT"), eq("backend-a"))).thenReturn(
+                new CollaborationRoutingService.RoutePreview("AGENT", "backend-a", "backend-a",
+                        "Backend expert", List.of(), "MEDIUM", "LOW", 1, List.of()));
+        when(routing.persist(any(), any(), any(), any(), any())).thenReturn(
+                new CollaborationStore.RouteDecision("route-a", "default", task.id(), "trigger-a", "input",
+                        "MEDIUM", "LOW", "AGENT", "backend-a", "backend-a", "[]", "[]", 1, now));
+        when(runtime.createSession(any(), eq("default"))).thenReturn(
+                new SessionRecord("session-2", "title", "default", null, "ACTIVE", now, now));
+        when(runtime.createRunInWorkspace(any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt(),
+                any(), any())).thenReturn(run("run-2", "session-2", RunStatus.QUEUED, "backend-a"));
+        when(collaboration.createOrGetTrigger(eq(task.id()), eq("HUMAN_ACTION"), eq("REQUEST_REWORK"),
+                eq("AGENT"), eq("backend-a"), any(), any())).thenReturn(new CollaborationStore.Trigger(
+                "trigger-r", task.id(), "default", "HUMAN_ACTION", "REQUEST_REWORK", "AGENT", "backend-a",
+                "{}", "rework-key", "PENDING", null, null, now, null));
+        when(collaboration.completeTrigger(any(), any())).thenAnswer(invocation ->
+                new CollaborationStore.Trigger("trigger-done", task.id(), "default", "HUMAN_ACTION",
+                        "REQUEST_REWORK", "AGENT", "backend-a", "{}", "rework-key", "COMPLETED",
+                        invocation.getArgument(1), null, now, now));
+
+        service.trigger(task.id(), "HUMAN_ACTION", "REQUEST_REWORK", "AGENT", "backend-a",
+                "修复 CSV 编码", "rework-key");
+
+        verify(expertThreadService).getOrCreate("task-a", "backend-a", "EXPERT");
+        verify(expertThreadService).attachRun("expert_thread_1", "run-2");
+        ArgumentCaptor<String> inputCaptor = ArgumentCaptor.forClass(String.class);
+        verify(runtime).createRunInWorkspace(eq("session-2"), inputCaptor.capture(), any(), any(), any(),
+                any(), any(), anyInt(), anyInt(), any(), any());
+        assertThat(inputCaptor.getValue())
+                .contains("<expert_thread_resume>")
+                .contains("expert_thread_1")
+                .contains("修复 CSV 编码");
     }
 
     /** Stubs the full trigger flow: idempotent trigger lookup, routing, run creation and completion. */
