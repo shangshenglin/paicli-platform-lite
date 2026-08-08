@@ -1,5 +1,13 @@
 # 交付阶段
 
+## 2026-08-08 ExpertThread · PR9：专家线程与执行期新输入竞态保护
+
+- [x] 迁移 38：`collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。
+- [x] `ExpertThreadService`（getOrCreate 幂等 / attachRun / findByRun / refreshDigest）与 `ExpertThreadDigestBuilder`（紧凑 resume 摘要：最新 Run 状态/摘要、已完成/剩余工作、blockers、changed files、artifact refs、test 报告引用、最新人工指令，不含全文/正文/reasoning）。
+- [x] `CollaborationService.trigger` 绑定线程、阶段派发子 Run 绑定线程、`onRunTerminal` 终态后刷新 Digest；后续 Run 输入注入 `<expert_thread_resume>`，Leader 线程（role=LEADER）不重复注入。
+- [x] Active Run 竞态保护：`PreparedContext.maxMessageSequence` + `RunProcessor` 最终完成前重查，模型执行期间新输入 → `run.new_input_during_model` + 保留 assistant 中间消息 + 重新排队。
+- [x] `GET /v1/collaboration/tasks/{id}` 返回 `expertThreads`，Console 执行层按专家线程分组展示 `#序号 状态` 并可打开会话。
+
 ## 2026-08-06 Harness Loop v2 · PR1：轻量 WorkingPlan 与交互修复
 
 - [x] 迁移 35：`run_working_plans`（每 Run 单行、revision 自增）；`update_working_plan` 工具（objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目 + evidenceRefs）。

@@ -480,6 +480,57 @@ class RunProcessorTest {
                 assertThat(value.failureClass()).isEqualTo("DUPLICATE_CALL"));
     }
 
+    @Test
+    void newUserInputDuringModelGenerationPreventsFalseCompletionAndRequeues() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = modelProperties();
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        var session = store.createSession("collab");
+        var run = store.createRun(session.id(), "collaboration task input");
+        java.util.concurrent.atomic.AtomicBoolean appended =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        ModelClient racingModel = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                if (appended.compareAndSet(false, true)) {
+                    store.appendMessage(session.id(), runId, "user", "模型执行期间用户追加评论");
+                }
+                return ModelResponse.text("我已完成，但可能没看到新评论");
+            }
+
+            @Override public String name() { return "racing-model-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, racingModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties));
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(store.events(run.id(), 0)).extracting("type").contains("run.new_input_during_model");
+        assertThat(store.messages(session.id())).extracting("role")
+                .contains("user", "assistant", "user");
+        assertThat(store.messages(session.id()).stream()
+                .anyMatch(message -> "assistant".equals(message.role())
+                        && message.content().contains("我已完成"))).isTrue();
+
+        processor.process(store.claimNextRun().orElseThrow());
+
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.COMPLETED);
+        assertThat(store.messages(session.id()).stream()
+                .anyMatch(message -> "user".equals(message.role())
+                        && message.content().contains("模型执行期间用户追加评论"))).isTrue();
+    }
+
     private static ModelProperties modelProperties() {
         return new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
                 0.75, 6, 16_000, 60, "auto", "");

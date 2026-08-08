@@ -35,11 +35,13 @@ public class CollaborationService {
     private final SandboxDriver sandboxDriver;
     private final TaskDigestService taskDigestService;
     private final DeliveryManifestService deliveryManifestService;
+    private final ExpertThreadService expertThreadService;
 
     public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
                                 ProductivityStore productivity, CollaborationRoutingService routing,
                                 ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver,
-                                TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService) {
+                                TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService,
+                                ExpertThreadService expertThreadService) {
         this.collaboration = collaboration;
         this.runtime = runtime;
         this.productivity = productivity;
@@ -49,6 +51,7 @@ public class CollaborationService {
         this.sandboxDriver = sandboxDriver;
         this.taskDigestService = taskDigestService;
         this.deliveryManifestService = deliveryManifestService;
+        this.expertThreadService = expertThreadService;
     }
 
     public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
@@ -112,6 +115,7 @@ public class CollaborationService {
                 agent.name(), input, agent.id(), agent.modelProfileId(), agent.thinkingMode(),
                 agent.reasoningEffort(), null, null, "{}");
         collaboration.linkRun(subtask.id(), delegation.childRunId(), null, "STAGE_DELEGATION");
+        bindStageRunToExpertThread(subtask, agent, delegation.childRunId());
         collaboration.recordActivity(subtask.id(), "STAGE_DISPATCHED", "AGENT", agent.id(),
                 delegation.childRunId(), write(Map.of("parentRunId", parentRunId, "stage", subtask.stage())));
         return new StageExecution(subtask, delegation,
@@ -152,9 +156,10 @@ public class CollaborationService {
         try {
             ProductivityStore.AgentProfile agent = productivity.resolveAgentProfile(
                     task.projectKey(), preview.leaderAgentProfileId()).orElseThrow();
+            CollaborationStore.ExpertThread expertThread = bindRunToExpertThread(task, preview, agent);
             String sessionTitle = "协作任务 · " + task.title();
             var session = runtime.createSession(sessionTitle, task.projectKey());
-            String input = runInput(task, trigger, preview, instruction);
+            String input = runInput(task, trigger, preview, instruction, expertThread);
             String modelProfileId = productivity.resolveModelProfile(task.projectKey(), agent.modelProfileId())
                     .map(ProductivityStore.ModelProfile::id).orElse(null);
             String workspaceOwner = SqliteRuntimeStore.collaborationWorkspaceOwner(rootTask(task).id());
@@ -162,6 +167,7 @@ public class CollaborationService {
                     blank(agent.thinkingMode()) ? "auto" : agent.thinkingMode(), agent.reasoningEffort(),
                     List.of(), modelProfileId, agent.id(), task.priority(), 0, agent.executionShell(),
                     workspaceOwner);
+            if (expertThread != null) attachRunToExpertThreadSafely(expertThread.id(), run.id());
             if ("TEAM".equals(preview.targetType())) {
                 ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElseThrow();
                 runtime.saveCollaborationPolicy(run.id(), true, preview.complexity(), preview.risk(),
@@ -393,6 +399,13 @@ public class CollaborationService {
     }
 
     public void onRunTerminal(RunRecord run, String event) {
+        handleRunTerminal(run, event);
+        // Refresh the expert thread digest after terminal state, delivery manifests and agent
+        // results are durable so the next Run of the same thread resumes from compact state.
+        refreshExpertThreadDigest(run);
+    }
+
+    private void handleRunTerminal(RunRecord run, String event) {
         CollaborationStore.CollaborationTask task = collaboration.taskForRun(run.id()).orElse(null);
         if (task == null) return;
         collaboration.recordActivity(task.id(), "RUN_" + event, "AGENT", run.agentProfileId(), run.id(),
@@ -721,6 +734,68 @@ public class CollaborationService {
                         && !TERMINAL_RUN_STATUSES.contains(link.status()));
     }
 
+    /**
+     * Resolves (idempotently) the ExpertThread for a triggered run and returns it so the run input
+     * can include the compact resume digest. The same root task + agent + role always map to the
+     * same thread; a terminal Run is never resurrected, the next Run is attached to this thread.
+     * Returns null when the thread layer is unavailable so collaboration triggering never breaks.
+     */
+    private CollaborationStore.ExpertThread bindRunToExpertThread(CollaborationStore.CollaborationTask task,
+                                                                  CollaborationRoutingService.RoutePreview preview,
+                                                                  ProductivityStore.AgentProfile agent) {
+        try {
+            return expertThreadService.getOrCreate(rootTask(task).id(), agent.id(),
+                    resolveThreadRole(task, preview, agent));
+        } catch (Exception error) {
+            log.warn("Unable to bind expert thread for task={} agent={}", task.id(), agent.id(), error);
+            return null;
+        }
+    }
+
+    /** Binds stage delegation runs (expert work) to the expert's thread so its digest accumulates them. */
+    private void bindStageRunToExpertThread(CollaborationStore.CollaborationTask subtask,
+                                            ProductivityStore.AgentProfile agent, String runId) {
+        try {
+            CollaborationStore.ExpertThread thread = expertThreadService.getOrCreate(
+                    rootTask(subtask).id(), agent.id(), "EXPERT");
+            attachRunToExpertThreadSafely(thread.id(), runId);
+        } catch (Exception error) {
+            log.warn("Unable to bind stage run={} to expert thread", runId, error);
+        }
+    }
+
+    private void attachRunToExpertThreadSafely(String threadId, String runId) {
+        if (threadId == null) return;
+        try {
+            expertThreadService.attachRun(threadId, runId);
+        } catch (Exception error) {
+            log.warn("Unable to attach run={} to expert thread={}", runId, threadId, error);
+        }
+    }
+
+    private void refreshExpertThreadDigest(RunRecord run) {
+        try {
+            expertThreadService.findByRun(run.id())
+                    .ifPresent(thread -> expertThreadService.refreshDigest(thread.id()));
+        } catch (Exception error) {
+            log.warn("Unable to refresh expert thread digest run={}", run.id(), error);
+        }
+    }
+
+    private String resolveThreadRole(CollaborationStore.CollaborationTask task,
+                                     CollaborationRoutingService.RoutePreview preview,
+                                     ProductivityStore.AgentProfile agent) {
+        if (preview == null) return "EXPERT";
+        if ("TEAM".equals(preview.targetType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElse(null);
+            if (team != null && team.leaderAgentProfileId().equals(agent.id())) return "LEADER";
+            return "EXPERT";
+        }
+        if ("AGENT".equals(preview.targetType()) && task.assigneeId() != null
+                && task.assigneeId().equals(agent.id())) return "LEADER";
+        return "EXPERT";
+    }
+
     private void validateLeaderConclusion(CollaborationStore.CollaborationTask task, String authorType,
                                           String authorId, String authorRunId, boolean conclusion) {
         if (!conclusion || !"AGENT".equalsIgnoreCase(authorType)
@@ -756,7 +831,8 @@ public class CollaborationService {
     }
 
     private String runInput(CollaborationStore.CollaborationTask task, CollaborationStore.Trigger trigger,
-                            CollaborationRoutingService.RoutePreview preview, String instruction) {
+                            CollaborationRoutingService.RoutePreview preview, String instruction,
+                            CollaborationStore.ExpertThread expertThread) {
         StringBuilder value = new StringBuilder("你正在处理持久化协作任务。\n")
                 .append("task_id: ").append(task.id()).append("\n")
                 .append("title: ").append(task.title()).append("\n")
@@ -783,6 +859,15 @@ public class CollaborationService {
             } catch (Exception error) {
                 log.warn("Unable to append task digest run={} task={}", task.id(), error);
             }
+        }
+        if (expertThread != null && "EXPERT".equals(expertThread.threadRole())
+                && expertThread.digestJson() != null && !expertThread.digestJson().isBlank()
+                && !"{}".equals(expertThread.digestJson().trim())) {
+            value.append("\n你正在继续此前专家线程中的工作。\n<expert_thread_resume>\n")
+                    .append(expertThread.digestJson())
+                    .append("\n</expert_thread_resume>\n")
+                    .append("不要假定旧文件内容仍然正确；需要具体内容时使用 read_file/read_artifact 按需读取，"
+                            + "不要重新读取与当前任务无关的完整历史。\n");
         }
         return value.toString();
     }

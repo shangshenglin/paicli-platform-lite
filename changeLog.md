@@ -4,6 +4,16 @@
 
 ## 2026-08-08
 
+### ExpertThread：同一专家在协作任务内的逻辑线程 + 模型执行期间新评论竞态保护
+
+- 变更：新增轻量 `ExpertThread`（迁移 38）：`collaboration_expert_threads`（`root_task_id + agent_profile_id + thread_role` 唯一确定一个逻辑线程）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。新增 `ExpertThreadService`（`getOrCreate` 幂等 / `attachRun` / `findByRun` / `refreshDigest`）与 `ExpertThreadDigestBuilder`。`CollaborationService.trigger` 在确定 agent 与根任务后先 getOrCreate 线程，新 Run 创建后 attachRun；阶段派发子 Run 同样绑定对应专家线程（非致命，异常只记录警告不阻断协作）。
+- 变更：终端 Run 永远不复活。同一专家后续再次执行创建新 Session + 新 Run，并挂到原 ExpertThread；不同根任务、不同专家、不同 role 各自独立线程，互不串线。新 Run 不加载旧 Run 完整历史，只在输入注入 `<expert_thread_resume>` 紧凑摘要（最新 Run 状态/摘要、已完成/剩余工作、blockers、changed files、artifact refs、test 报告引用、最新人工指令），不含 ToolResult 全文、Artifact 正文、reasoning 与全量旧对话；需要具体内容时由模型按需 `read_file/read_artifact`。Leader 线程（role=LEADER）继续走既有 TaskDigest，不重复注入 resume。
+- 变更：`CollaborationService.onRunTerminal` 末尾统一刷新 ExpertThread Digest（AgentResult/交付清单已落库后再构建），保证顺序为 AgentResult/DeliveryManifest → Digest。
+- 变更：Active Run 竞态保护。`ContextManager.PreparedContext` 新增 `maxMessageSequence`（本次模型上下文构建时 Session 最大 message sequence）；`RunProcessor` 在模型返回无工具调用的最终回答后、提交 COMPLETED 前重新查询 `store.maxMessageSequence(sessionId)`，若大于 context 构建值，说明模型执行期间有新用户输入（例如评论被注入活跃 Run 会话），此时：持久化 `run.new_input_during_model` 事件、把当前模型回答保留为 assistant 中间消息、Run 重新 QUEUED、下一轮必含新增消息；无新增消息时保持原完成流程。
+- 变更：`GET /v1/collaboration/tasks/{id}` 响应新增 `expertThreads`（每个线程含 threadId/agentProfileId/threadRole/digestJson/latestRunId 与绑定 Runs 的 ordinal/实时状态）；Console 执行层新增“专家线程”分组展示（`#序号 状态`，可直接打开会话），OpenAPI 描述同步。
+- 思路：现有协作层用 TaskDigest 服务 Leader 复唤醒，但没有“同一专家多次执行之间的逻辑连续性”。ExpertThread 把 `root task + agent + role` 作为唯一键，保持三层分离：Thread=逻辑连续、Session=单次执行上下文、Run=单次执行事实；Digest 只带引用不携带正文，避免把旧历史逐步重新塞回模型上下文（Session 复用会导致 Run-B1 50K + Run-B2 30K 逐轮膨胀）。竞态修复针对“Context 已构建→模型请求发送→用户追加评论→模型返回 Final→直接完成 Run”的漏消息窗口。
+- 验证：`.\mvnw.cmd clean test` 全量 232 项通过（paicli-common 3 + paicli-server 226 + paicli-sandbox-agent 3）。新增测试覆盖：ExpertThread 幂等复用与 Worker 重启恢复、不同任务/专家/角色不串线、Digest 只含引用不含全文、trigger 绑定线程且二次触发复用同线程、专家 Run 注入 resume 而 Leader 不注入、`PreparedContext.maxMessageSequence`、RunProcessor 模型期间新评论不假完成并重排队（事件 + 中间 assistant 消息 + 再完成）、迁移版本 1–38；既有 `terminalRunCannotBeCompletedOrRequeuedAfterCancellation` 继续保证终端 Run 不回退。`node --check app.js` 通过，`git diff --check` 通过。本次未改 Sandbox 协议、Approval 核心、ToolRouter 核心、Plan 执行与 Memory 架构，故 `docs/docker-sandbox.md`、`paicli-site/README.md` 不适用；README、`docs/architecture.md`、`docs/phases.md` 与 OpenAPI 已同步。
+
 ### 协作执行层状态展示修正：失败 Run 的触发关系与待验收语义不再误导
 
 - 变更：Console 执行层把根任务 Run 的展示标签从原始 relationship（TRIGGERED/HUMAN_ACTION/STAGE_BARRIER…）改为中文触发语义（触发执行/人工发起/阶段完成触发…），失败 Run 仍显示真实状态“失败”，不再让人把“TRIGGERED”误读为卡住的状态。

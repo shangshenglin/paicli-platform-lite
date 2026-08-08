@@ -182,6 +182,8 @@ ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计�
 
 路由评分与评测（PR8）：`CollaborationRoutingService` 在能力匹配基础上引入历史验证通过率与当前活跃负载综合评分，候选携带 `score`；官方评测集新增“官方·08 Harness Loop”用例；`GET /runs/{runId}/audit` 返回 workingPlan/reflection/verifications，Run 审计页展示 Harness 状态；效率工作台“长期记忆”“持久化审批策略”“Artifact 工作台”列表默认收缩；长期记忆移除关系地图（图谱）视图，保留 Wiki 页面浏览。
 
+专家线程（PR9）：迁移 38 新增 `collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一）与 `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。`ExpertThreadService` 提供幂等 `getOrCreate`/`attachRun`/`findByRun`/`refreshDigest`；`ExpertThreadDigestBuilder` 从任务树、Run 终态、最终 assistant 摘要、工作区变更文件与 Artifact 元数据构建紧凑 resume 摘要。`CollaborationService.trigger` 创建新 Run 时绑定线程（阶段派发子 Run 同样绑定），`onRunTerminal` 终态后刷新 Digest；后续 Run 输入只注入 `<expert_thread_resume>` 引用摘要，不加载旧 Run 历史。Active Run 竞态保护：`PreparedContext.maxMessageSequence` 记录上下文构建时的 Session 最大 sequence，`RunProcessor` 最终完成前重新比对，若模型执行期间有新输入则持久化 `run.new_input_during_model`、保留 assistant 中间消息并重新排队，避免遗漏新评论。
+
 ## Prompt Cache 命中率优化
 
 优化前观测样本为 `8,714,118` 输入 Token、`544,640` 缓存命中 Token，累计命中率约 `6.25%`。旧组装顺序在历史消息之前注入每轮变化的 `Instant.now()`、运行工作区、RAG 和 Memory；Prompt Cache 按共同前缀复用，因此任一早期动态值变化都会让其后的长会话失去复用机会。
@@ -209,7 +211,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 34：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 38：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

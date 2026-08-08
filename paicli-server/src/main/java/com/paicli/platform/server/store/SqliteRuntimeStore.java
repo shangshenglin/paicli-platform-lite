@@ -432,6 +432,22 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(trigger_id) REFERENCES collaboration_triggers(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_collaboration_task_runs_task " +
                     "ON collaboration_task_runs(task_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_expert_threads (" +
+                    "id TEXT PRIMARY KEY,root_task_id TEXT NOT NULL,agent_profile_id TEXT NOT NULL," +
+                    "thread_role TEXT NOT NULL DEFAULT 'EXPERT',status TEXT NOT NULL DEFAULT 'ACTIVE'," +
+                    "digest_json TEXT NOT NULL DEFAULT '{}',latest_run_id TEXT," +
+                    "created_at TEXT NOT NULL,updated_at TEXT NOT NULL," +
+                    "UNIQUE(root_task_id,agent_profile_id,thread_role)," +
+                    "FOREIGN KEY(root_task_id) REFERENCES collaboration_tasks(id) ON DELETE CASCADE)");
+            statement.execute("CREATE TABLE IF NOT EXISTS collaboration_expert_thread_runs (" +
+                    "thread_id TEXT NOT NULL,run_id TEXT NOT NULL UNIQUE,ordinal INTEGER NOT NULL," +
+                    "created_at TEXT NOT NULL,PRIMARY KEY(thread_id,run_id),UNIQUE(thread_id,ordinal)," +
+                    "FOREIGN KEY(thread_id) REFERENCES collaboration_expert_threads(id) ON DELETE CASCADE," +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_expert_thread_runs_run " +
+                    "ON collaboration_expert_thread_runs(run_id)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_expert_threads_root " +
+                    "ON collaboration_expert_threads(root_task_id,updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS collaboration_route_decisions (" +
                     "id TEXT PRIMARY KEY,project_key TEXT NOT NULL,task_id TEXT,trigger_id TEXT,input TEXT NOT NULL," +
                     "complexity TEXT NOT NULL,risk TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT," +
@@ -1783,6 +1799,23 @@ public class SqliteRuntimeStore {
 
     public List<MessageRecord> activeMessages(String sessionId) {
         return messages(sessionId, true);
+    }
+
+    /**
+     * Highest message sequence currently recorded in the session. Used by the run processor to
+     * detect user input that arrived while the model was generating: if the sequence advanced
+     * past what the built context saw, the model may have missed the new message.
+     */
+    public long maxMessageSequence(String sessionId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COALESCE(MAX(sequence),0) FROM messages WHERE session_id=?")) {
+            ps.setString(1, sessionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        } catch (SQLException e) {
+            throw failure("read max message sequence", e);
+        }
     }
 
     public List<MessageRecord> messagesForRun(String runId) {

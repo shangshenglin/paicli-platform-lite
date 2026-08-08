@@ -359,4 +359,25 @@ class ContextManagerTest {
 
         assertThat(text).anyMatch(value -> value.contains("<reflection>") && value.contains("VERIFICATION_FAILURE"));
     }
+
+    @Test
+    void preparedContextTracksMaxMessageSequenceOfSession() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("sequence", "alpha");
+        var run = store.createRun(session.id(), "first input");
+
+        var before = manager.prepare(session.id(), run.id());
+        store.appendMessage(session.id(), run.id(), "user", "second input arrives later");
+
+        var after = manager.prepare(session.id(), run.id());
+        assertThat(after.maxMessageSequence()).isGreaterThan(before.maxMessageSequence());
+        assertThat(before.maxMessageSequence()).isGreaterThanOrEqualTo(1);
+    }
 }

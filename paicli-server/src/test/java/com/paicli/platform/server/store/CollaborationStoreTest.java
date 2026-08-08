@@ -187,6 +187,57 @@ class CollaborationStoreTest {
         assertThat(runtime.findSession(session.id())).isPresent();
     }
 
+    @Test
+    void expertThreadIsIdempotentPerRootAgentRoleAndRecoversAfterReopen() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task = store.saveTask(null, "project-a", "Thread task", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        CollaborationStore.ExpertThread first = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread again = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        assertThat(again.id()).isEqualTo(first.id());
+
+        var session1 = runtime.createSession("collaboration", "project-a");
+        var session2 = runtime.createSession("collaboration 2", "project-a");
+        var run1 = runtime.createRun(session1.id(), "first attempt", "auto", "", List.of(),
+                null, "backend-a", 0, 0, "bash");
+        var run2 = runtime.createRun(session2.id(), "second attempt", "auto", "", List.of(),
+                null, "backend-a", 0, 0, "bash");
+        store.attachExpertThreadRun(first.id(), run1.id());
+        store.attachExpertThreadRun(first.id(), run2.id());
+        assertThat(store.expertThreadRuns(first.id())).extracting("ordinal").containsExactly(1, 2);
+        assertThat(store.expertThreadForRun(run1.id())).get().extracting("id").isEqualTo(first.id());
+        assertThat(store.expertThreadForRun(run2.id())).get().extracting("id").isEqualTo(first.id());
+        store.updateExpertThreadDigest(first.id(), "{\\\"x\\\":1}");
+        assertThat(store.expertThread(first.id())).get().extracting("digestJson").isEqualTo("{\\\"x\\\":1}");
+        assertThat(store.expertThread(first.id())).get().extracting("latestRunId").isEqualTo(run2.id());
+
+        // Worker restart: a fresh store over the same database still resolves the thread graph.
+        CollaborationStore reopened = new CollaborationStore(properties());
+        assertThat(reopened.expertThread(first.id())).get().extracting("digestJson").isEqualTo("{\\\"x\\\":1}");
+        assertThat(reopened.expertThreadRuns(first.id())).hasSize(2);
+        assertThat(reopened.expertThreadForRun(run1.id())).get().extracting("id").isEqualTo(first.id());
+    }
+
+    @Test
+    void expertThreadIsDistinctPerRootTaskAndAgentAndRole() throws Exception {
+        runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task1 = store.saveTask(null, "project-a", "Task 1", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var task2 = store.saveTask(null, "project-a", "Task 2", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        CollaborationStore.ExpertThread t1 = store.getOrCreateExpertThread(task1.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread sameRootOtherTask = store.getOrCreateExpertThread(task2.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread otherAgent = store.getOrCreateExpertThread(task1.id(), "reviewer-a", "EXPERT");
+        CollaborationStore.ExpertThread otherRole = store.getOrCreateExpertThread(task1.id(), "backend-a", "LEADER");
+
+        assertThat(sameRootOtherTask.id()).isNotEqualTo(t1.id());
+        assertThat(otherAgent.id()).isNotEqualTo(t1.id());
+        assertThat(otherRole.id()).isNotEqualTo(t1.id());
+        assertThat(store.getOrCreateExpertThread(task1.id(), "backend-a", "EXPERT").id()).isEqualTo(t1.id());
+    }
+
     private SqliteRuntimeStore runtime() throws Exception {
         SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
         store.initialize();
