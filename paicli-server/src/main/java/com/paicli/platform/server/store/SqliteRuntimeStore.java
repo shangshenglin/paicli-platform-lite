@@ -135,6 +135,8 @@ public class SqliteRuntimeStore {
                     "created_at TEXT NOT NULL, finished_at TEXT, FOREIGN KEY(run_id) REFERENCES runs(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "effect",
                     "TEXT NOT NULL DEFAULT 'NON_IDEMPOTENT_WRITE'");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "result_metadata_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS approvals (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL UNIQUE, " +
@@ -2783,20 +2785,21 @@ public class SqliteRuntimeStore {
      * requeues the Run once after all outcomes are committed in model order.
      */
     public boolean commitToolMessage(String sessionId, String runId, ToolCallRecord call, boolean success,
-                                     String modelContent, String error, String eventJson) {
+                                     String modelContent, String error, String metadataJson, String eventJson) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
                 ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                        "UPDATE tool_calls SET status=?,result=?,error=?,result_metadata_json=?,finished_at=? " +
                                 "WHERE id=? AND status=?")) {
                     ps.setString(1, toolStatus.name());
                     ps.setString(2, success ? modelContent : null);
                     ps.setString(3, success ? null : error);
-                    ps.setString(4, Instant.now().toString());
-                    ps.setString(5, call.id());
-                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(5, Instant.now().toString());
+                    ps.setString(6, call.id());
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
                     if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
                 }
                 insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
@@ -2816,7 +2819,7 @@ public class SqliteRuntimeStore {
 
     public boolean commitToolOutcome(String sessionId, String runId, ToolCallRecord call,
                                      boolean success, String modelContent, String error,
-                                     String eventJson, int currentStep) {
+                                     String metadataJson, String eventJson, int currentStep) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -2826,14 +2829,15 @@ public class SqliteRuntimeStore {
                 }
                 ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                        "UPDATE tool_calls SET status=?,result=?,error=?,result_metadata_json=?,finished_at=? " +
                                 "WHERE id=? AND status=?")) {
                     ps.setString(1, toolStatus.name());
                     ps.setString(2, success ? modelContent : null);
                     ps.setString(3, success ? null : error);
-                    ps.setString(4, Instant.now().toString());
-                    ps.setString(5, call.id());
-                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(5, Instant.now().toString());
+                    ps.setString(6, call.id());
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
                     if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
                 }
                 insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
@@ -5133,13 +5137,19 @@ public class SqliteRuntimeStore {
     }
 
     private void updateTool(String id, ToolCallStatus status, String result, String error, boolean finished) {
+        updateTool(id, status, result, error, "{}", finished);
+    }
+
+    private void updateTool(String id, ToolCallStatus status, String result, String error,
+                            String metadataJson, boolean finished) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "UPDATE tool_calls SET status=?, result=?, error=?, finished_at=? WHERE id=?")) {
+                "UPDATE tool_calls SET status=?, result=?, error=?, result_metadata_json=?, finished_at=? WHERE id=?")) {
             ps.setString(1, status.name());
             ps.setString(2, result);
             ps.setString(3, error);
-            ps.setString(4, finished ? Instant.now().toString() : null);
-            ps.setString(5, id);
+            ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+            ps.setString(5, finished ? Instant.now().toString() : null);
+            ps.setString(6, id);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw failure("update tool", e);
@@ -5283,10 +5293,12 @@ public class SqliteRuntimeStore {
     }
 
     private static ToolCallRecord mapToolCall(ResultSet rs) throws SQLException {
+        String metadata = rs.getString("result_metadata_json");
         return new ToolCallRecord(rs.getString("id"), rs.getString("run_id"), rs.getString("provider_call_id"),
                 rs.getString("tool_name"), rs.getString("arguments"), ToolCallStatus.valueOf(rs.getString("status")),
                 rs.getString("result"), rs.getString("error"), rs.getString("idempotency_key"),
-                rs.getInt("retry_count"), instant(rs.getString("created_at")), instant(rs.getString("finished_at")));
+                rs.getInt("retry_count"), instant(rs.getString("created_at")), instant(rs.getString("finished_at")),
+                metadata == null ? "{}" : metadata);
     }
 
     private static RunDelegationRecord mapDelegation(ResultSet rs) throws SQLException {

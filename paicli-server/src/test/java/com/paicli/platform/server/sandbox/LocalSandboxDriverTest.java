@@ -49,6 +49,34 @@ class LocalSandboxDriverTest {
         assertThat(denied.error()).contains("escapes");
     }
 
+    @Test
+    void writeFileExposesStructuredChangeEvidence() throws Exception {
+        LocalSandboxDriver driver = driver();
+
+        var created = driver.execute(new ToolRequest("tool_1", "run_1", "write_file",
+                Map.of("path", "src/A.java", "content", "class A {}"), "key_1"));
+        assertThat(created.success()).isTrue();
+        assertThat(created.metadata().get("path")).isEqualTo("src/A.java");
+        assertThat(created.metadata().get("changed")).isEqualTo(Boolean.TRUE);
+        assertThat((String) created.metadata().get("beforeSha256")).isEmpty();
+        assertThat((String) created.metadata().get("afterSha256")).isNotBlank();
+        assertThat(created.metadata().get("bytesWritten")).isEqualTo(10L);
+
+        var sameContent = driver.execute(new ToolRequest("tool_2", "run_1", "write_file",
+                Map.of("path", "src/A.java", "content", "class A {}"), "key_2"));
+        assertThat(sameContent.success()).isTrue();
+        assertThat(sameContent.metadata().get("changed")).isEqualTo(Boolean.FALSE);
+        assertThat(sameContent.metadata().get("beforeSha256"))
+                .isEqualTo(sameContent.metadata().get("afterSha256"));
+
+        var changedContent = driver.execute(new ToolRequest("tool_3", "run_1", "write_file",
+                Map.of("path", "src/A.java", "content", "class A { int x; }"), "key_3"));
+        assertThat(changedContent.success()).isTrue();
+        assertThat(changedContent.metadata().get("changed")).isEqualTo(Boolean.TRUE);
+        assertThat(changedContent.metadata().get("beforeSha256"))
+                .isNotEqualTo(changedContent.metadata().get("afterSha256"));
+    }
+
     private LocalSandboxDriver driver() throws Exception {
         return new LocalSandboxDriver(new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local"));

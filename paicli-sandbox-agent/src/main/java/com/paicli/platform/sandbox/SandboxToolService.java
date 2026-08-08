@@ -55,6 +55,11 @@ public class SandboxToolService {
                 case "write_file" -> writeFile(path(request, "path", null), argument(request, "content", ""));
                 default -> throw new IllegalArgumentException("Unknown sandbox tool: " + request.name());
             };
+            if ("write_file".equals(request.name())) {
+                Path target = path(request, "path", null);
+                return ToolResult.success(request.toolCallId(), content, elapsed(start),
+                        writeFileMetadata(target, argument(request, "path", null)));
+            }
             return ToolResult.success(request.toolCallId(), content, elapsed(start));
         } catch (Exception e) {
             return ToolResult.failure(request.toolCallId(), e.getMessage(), elapsed(start));
@@ -83,6 +88,30 @@ public class SandboxToolService {
         if (target.getParent() != null) Files.createDirectories(target.getParent());
         Files.write(target, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         return "Wrote " + bytes.length + " bytes to " + workspace.relativize(target);
+    }
+
+    private Map<String, Object> writeFileMetadata(Path target, String requestedRelative) throws Exception {
+        String before = Files.exists(target) ? sha256(target) : null;
+        String after = sha256(target);
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("path", requestedRelative.replace('\\', '/'));
+        value.put("changed", !java.util.Objects.equals(before, after));
+        value.put("beforeSha256", before == null ? "" : before);
+        value.put("afterSha256", after == null ? "" : after);
+        value.put("bytesWritten", Files.size(target));
+        return Map.copyOf(value);
+    }
+
+    private static String sha256(Path target) {
+        try (var in = Files.newInputStream(target)) {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) >= 0) digest.update(buffer, 0, read);
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private ToolResult executeCommand(ToolRequest request, long start) throws Exception {

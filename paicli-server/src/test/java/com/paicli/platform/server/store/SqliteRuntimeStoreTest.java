@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
         }
     }
 
@@ -1053,7 +1053,7 @@ class SqliteRuntimeStoreTest {
             }
 
             var commit = executor.submit(() -> store.commitToolOutcome(
-                    session.id(), run.id(), call, true, "[]", null, "{}", 0));
+                    session.id(), run.id(), call, true, "[]", null, "{}", "{}", 0));
             Thread.sleep(200);
             assertThat(commit.isDone()).isFalse();
 
@@ -1067,6 +1067,27 @@ class SqliteRuntimeStoreTest {
                 .isEqualTo(ToolCallStatus.COMPLETED);
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
         assertThat(store.messages(session.id())).extracting("role").containsExactly("user", "tool");
+    }
+
+    @Test
+    void persistsStructuredToolResultMetadataForEvidence() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("evidence", "project-e");
+        var run = store.createRun(session.id(), "write a file");
+        var call = store.createToolCall(run.id(), "provider-1", "write_file",
+                "{\"path\":\"src/A.java\",\"content\":\"class A {}\"}", "tool-evidence-1");
+        store.markToolRunning(call.id());
+        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+
+        boolean committed = store.commitToolOutcome(session.id(), run.id(), call, true,
+                "Wrote 10 bytes", null,
+                "{\"path\":\"src/A.java\",\"changed\":true,\"afterSha256\":\"abc\"}",
+                "{\"path\":\"src/A.java\",\"changed\":true,\"afterSha256\":\"abc\"}", 0);
+
+        assertThat(committed).isTrue();
+        var persisted = store.findToolCall(call.id()).orElseThrow();
+        assertThat(persisted.status()).isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(persisted.resultMetadataJson()).contains("src/A.java").contains("changed");
     }
 
     @Test

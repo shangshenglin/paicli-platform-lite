@@ -16,7 +16,14 @@ public record ToolCallRecord(
         String idempotencyKey,
         int retryCount,
         Instant createdAt,
-        Instant finishedAt
+        Instant finishedAt,
+        String resultMetadataJson
 ) {
+    public ToolCallRecord(String id, String runId, String providerCallId, String toolName,
+                          String arguments, ToolCallStatus status, String result, String error,
+                          String idempotencyKey, int retryCount, Instant createdAt, Instant finishedAt) {
+        this(id, runId, providerCallId, toolName, arguments, status, result, error,
+                idempotencyKey, retryCount, createdAt, finishedAt, "{}");
+    }
 }
 
