@@ -7,6 +7,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -475,6 +476,165 @@ public class CollaborationStore {
         } catch (SQLException e) { throw failure("find task for run", e); }
     }
 
+    public Optional<ExpertThread> expertThread(String id) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM collaboration_expert_threads WHERE id=?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? Optional.of(expertThread(rs)) : Optional.empty(); }
+        } catch (SQLException e) { throw failure("find expert thread", e); }
+    }
+
+    /**
+     * Idempotently resolves the logical expert thread for a root task + agent + role.
+     * The unique key keeps one expert's continuation within one collaboration task, while the
+     * same agent participating in another task gets its own thread.
+     */
+    public ExpertThread getOrCreateExpertThread(String rootTaskId, String agentProfileId, String threadRole) {
+        Optional<ExpertThread> existing = expertThreadByKey(rootTaskId, agentProfileId, threadRole);
+        if (existing.isPresent()) return existing.get();
+        String threadId = "expert_thread_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        Instant now = Instant.now();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "INSERT OR IGNORE INTO collaboration_expert_threads(id,root_task_id,agent_profile_id,thread_role,"
+                        + "status,digest_json,latest_run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
+            int i = 1;
+            ps.setString(i++, threadId);
+            ps.setString(i++, rootTaskId);
+            ps.setString(i++, agentProfileId);
+            ps.setString(i++, blank(threadRole) ? "EXPERT" : threadRole.trim().toUpperCase());
+            ps.setString(i++, "ACTIVE");
+            ps.setString(i++, "{}");
+            ps.setString(i++, null);
+            ps.setString(i++, now.toString());
+            ps.setString(i, now.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) { throw failure("create expert thread", e); }
+        return expertThreadByKey(rootTaskId, agentProfileId, threadRole)
+                .orElseThrow(() -> new IllegalStateException("expert thread was not created"));
+    }
+
+    private Optional<ExpertThread> expertThreadByKey(String rootTaskId, String agentProfileId, String threadRole) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM collaboration_expert_threads WHERE root_task_id=? AND agent_profile_id=? AND thread_role=?")) {
+            ps.setString(1, rootTaskId);
+            ps.setString(2, agentProfileId);
+            ps.setString(3, blank(threadRole) ? "EXPERT" : threadRole.trim().toUpperCase());
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? Optional.of(expertThread(rs)) : Optional.empty(); }
+        } catch (SQLException e) { throw failure("find expert thread by key", e); }
+    }
+
+    public Optional<ExpertThread> expertThreadForRun(String runId) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT t.* FROM collaboration_expert_threads t "
+                        + "JOIN collaboration_expert_thread_runs r ON r.thread_id=t.id WHERE r.run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? Optional.of(expertThread(rs)) : Optional.empty(); }
+        } catch (SQLException e) { throw failure("find expert thread for run", e); }
+    }
+
+    public List<ExpertThread> expertThreadsForRoot(String rootTaskId) {
+        List<ExpertThread> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM collaboration_expert_threads WHERE root_task_id=? ORDER BY updated_at DESC")) {
+            ps.setString(1, rootTaskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(expertThread(rs));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list expert threads for root task", e); }
+    }
+
+    public List<ExpertThreadRun> expertThreadRuns(String threadId) {
+        List<ExpertThreadRun> values = new ArrayList<>();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT thread_id,run_id,ordinal,created_at FROM collaboration_expert_thread_runs "
+                        + "WHERE thread_id=? ORDER BY ordinal")) {
+            ps.setString(1, threadId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(new ExpertThreadRun(rs.getString("thread_id"), rs.getString("run_id"),
+                        rs.getInt("ordinal"), instant(rs.getString("created_at"))));
+            }
+            return values;
+        } catch (SQLException e) { throw failure("list expert thread runs", e); }
+    }
+
+    /**
+     * Binds a Run to an ExpertThread with a monotonic ordinal. The whole operation runs in a single
+     * BEGIN IMMEDIATE transaction: a Run is only ever bound to one thread, ordinal allocation and the
+     * latest_run_id update happen atomically, and attaching an already-bound Run is idempotent.
+     *
+     * @throws IllegalStateException when the Run is already bound to a different thread
+     */
+    public void attachExpertThreadRun(String threadId, String runId) {
+        Instant now = Instant.now();
+        try (Connection c = open()) {
+            try (Statement statement = c.createStatement()) {
+                statement.execute("BEGIN IMMEDIATE");
+            }
+            try {
+                String existingThread = null;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT thread_id FROM collaboration_expert_thread_runs WHERE run_id=?")) {
+                    ps.setString(1, runId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) existingThread = rs.getString(1);
+                    }
+                }
+                if (existingThread != null) {
+                    if (existingThread.equals(threadId)) {
+                        try (Statement statement = c.createStatement()) { statement.execute("COMMIT"); }
+                        return; // idempotent re-attach
+                    }
+                    throw new IllegalStateException("run " + runId + " is already bound to expert thread "
+                            + existingThread);
+                }
+                int ordinal;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT COALESCE(MAX(ordinal),0)+1 FROM collaboration_expert_thread_runs WHERE thread_id=?")) {
+                    ps.setString(1, threadId);
+                    try (ResultSet rs = ps.executeQuery()) { ordinal = rs.next() ? rs.getInt(1) : 1; }
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "INSERT INTO collaboration_expert_thread_runs(thread_id,run_id,ordinal,created_at) "
+                                + "VALUES(?,?,?,?)")) {
+                    ps.setString(1, threadId);
+                    ps.setString(2, runId);
+                    ps.setInt(3, ordinal);
+                    ps.setString(4, now.toString());
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE collaboration_expert_threads SET latest_run_id=?,updated_at=? WHERE id=?")) {
+                    ps.setString(1, runId);
+                    ps.setString(2, now.toString());
+                    ps.setString(3, threadId);
+                    ps.executeUpdate();
+                }
+                try (Statement statement = c.createStatement()) { statement.execute("COMMIT"); }
+            } catch (Exception e) {
+                try (Statement statement = c.createStatement()) { statement.execute("ROLLBACK"); }
+                throw e;
+            }
+        } catch (SQLException e) { throw failure("attach expert thread run", e); }
+    }
+
+    public void updateExpertThreadDigest(String threadId, String digestJson) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "UPDATE collaboration_expert_threads SET digest_json=?,updated_at=? WHERE id=?")) {
+            ps.setString(1, digestJson == null ? "{}" : digestJson);
+            ps.setString(2, Instant.now().toString());
+            ps.setString(3, threadId);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw failure("update expert thread digest", e); }
+    }
+
+    private ExpertThread expertThread(ResultSet rs) throws SQLException {
+        return new ExpertThread(rs.getString("id"), rs.getString("root_task_id"),
+                rs.getString("agent_profile_id"), rs.getString("thread_role"), rs.getString("status"),
+                rs.getString("digest_json"), rs.getString("latest_run_id"),
+                instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
+    }
+
     public List<TaskRun> taskRuns(String taskId) {
         List<TaskRun> values = new ArrayList<>();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
@@ -768,6 +928,10 @@ public class CollaborationStore {
                                     String status, int priority, String assigneeType, String assigneeId,
                                     String acceptanceCriteria, String parentId, int stage,
                                     String latestPlanId, String createdBy, Instant createdAt, Instant updatedAt) { }
+    public record ExpertThread(String id, String rootTaskId, String agentProfileId, String threadRole,
+                               String status, String digestJson, String latestRunId,
+                               Instant createdAt, Instant updatedAt) { }
+    public record ExpertThreadRun(String threadId, String runId, int ordinal, Instant createdAt) { }
     public record CollaborationComment(String id, String taskId, String parentCommentId,
                                        String authorType, String authorId, String content,
                                        boolean resolved, boolean conclusion, Instant createdAt) { }

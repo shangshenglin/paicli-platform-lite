@@ -1,6 +1,7 @@
 package com.paicli.platform.server.collaboration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.server.agent.DelegationEnvelopeBuilder;
 import com.paicli.platform.common.SandboxDriver;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.domain.RunRecord;
@@ -35,11 +36,15 @@ public class CollaborationService {
     private final SandboxDriver sandboxDriver;
     private final TaskDigestService taskDigestService;
     private final DeliveryManifestService deliveryManifestService;
+    private final ExpertThreadService expertThreadService;
+    private final DelegationEnvelopeBuilder delegationEnvelopeBuilder;
 
     public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
                                 ProductivityStore productivity, CollaborationRoutingService routing,
                                 ObjectMapper mapper, ModelClient modelClient, SandboxDriver sandboxDriver,
-                                TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService) {
+                                TaskDigestService taskDigestService, DeliveryManifestService deliveryManifestService,
+                                ExpertThreadService expertThreadService,
+                                DelegationEnvelopeBuilder delegationEnvelopeBuilder) {
         this.collaboration = collaboration;
         this.runtime = runtime;
         this.productivity = productivity;
@@ -49,6 +54,8 @@ public class CollaborationService {
         this.sandboxDriver = sandboxDriver;
         this.taskDigestService = taskDigestService;
         this.deliveryManifestService = deliveryManifestService;
+        this.expertThreadService = expertThreadService;
+        this.delegationEnvelopeBuilder = delegationEnvelopeBuilder;
     }
 
     public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
@@ -103,15 +110,22 @@ public class CollaborationService {
                         command.priority(), command.assigneeType(), command.assigneeId(),
                         command.acceptanceCriteria(), parent.id(), command.stage(), command.latestPlanId(),
                         command.createdBy()));
+        CollaborationStore.ExpertThread expertThread = stageExpertThread(subtask, agent);
         String input = "执行协作阶段任务，不要创建新的阶段任务。\n"
                 + "阶段任务：" + subtask.title() + "\n"
                 + "目标：\n" + subtask.description() + "\n"
                 + "验收标准：\n" + subtask.acceptanceCriteria() + "\n"
                 + "在当前共享工作区完成交付，并通过协作评论说明结果与证据。";
+        if (expertThread != null) {
+            String resume = expertThreadResume(expertThread);
+            if (!resume.isBlank()) input = input + "\n" + resume;
+        }
+        String stageEnvelopeJson = stageEnvelopeJson(subtask, parentRunId, agent);
         RunDelegationRecord delegation = runtime.createOrGetDelegation(parentRunId, toolCallId,
                 agent.name(), input, agent.id(), agent.modelProfileId(), agent.thinkingMode(),
-                agent.reasoningEffort(), null, null, "{}");
+                agent.reasoningEffort(), null, null, stageEnvelopeJson);
         collaboration.linkRun(subtask.id(), delegation.childRunId(), null, "STAGE_DELEGATION");
+        if (expertThread != null) attachRunToExpertThreadSafely(expertThread.id(), delegation.childRunId());
         collaboration.recordActivity(subtask.id(), "STAGE_DISPATCHED", "AGENT", agent.id(),
                 delegation.childRunId(), write(Map.of("parentRunId", parentRunId, "stage", subtask.stage())));
         return new StageExecution(subtask, delegation,
@@ -152,9 +166,10 @@ public class CollaborationService {
         try {
             ProductivityStore.AgentProfile agent = productivity.resolveAgentProfile(
                     task.projectKey(), preview.leaderAgentProfileId()).orElseThrow();
+            CollaborationStore.ExpertThread expertThread = bindRunToExpertThread(task, preview, agent);
             String sessionTitle = "协作任务 · " + task.title();
             var session = runtime.createSession(sessionTitle, task.projectKey());
-            String input = runInput(task, trigger, preview, instruction);
+            String input = runInput(task, trigger, preview, instruction, expertThread);
             String modelProfileId = productivity.resolveModelProfile(task.projectKey(), agent.modelProfileId())
                     .map(ProductivityStore.ModelProfile::id).orElse(null);
             String workspaceOwner = SqliteRuntimeStore.collaborationWorkspaceOwner(rootTask(task).id());
@@ -162,6 +177,7 @@ public class CollaborationService {
                     blank(agent.thinkingMode()) ? "auto" : agent.thinkingMode(), agent.reasoningEffort(),
                     List.of(), modelProfileId, agent.id(), task.priority(), 0, agent.executionShell(),
                     workspaceOwner);
+            if (expertThread != null) attachRunToExpertThreadSafely(expertThread.id(), run.id());
             if ("TEAM".equals(preview.targetType())) {
                 ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElseThrow();
                 runtime.saveCollaborationPolicy(run.id(), true, preview.complexity(), preview.risk(),
@@ -213,21 +229,20 @@ public class CollaborationService {
                 authorType, authorId, content, conclusion, mentions);
         List<TriggerExecution> executions = new ArrayList<>();
         for (CollaborationStore.MentionTarget mention : mentions.stream().distinct().toList()) {
-            if (hasActiveRunForTarget(taskId, mention)) {
-                deliverCommentToActiveRuns(taskId, mention, comment, content);
-                continue;
+            // Deliver into every active Run of the target; if all Runs reached a terminal state in
+            // the meantime (TOCTOU), fall back to creating a new idempotent Trigger/Run so the
+            // comment is never stranded behind a completed Run.
+            if (!deliverCommentToActiveRuns(taskId, mention, comment, content)) {
+                executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
+                        "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
             }
-            executions.add(trigger(taskId, "MENTION", comment.id(), mention.type(), mention.id(), content,
-                    "comment:" + comment.id() + ":" + mention.type() + ":" + mention.id()));
         }
         if ("AGENT".equalsIgnoreCase(authorType) && "TEAM".equals(task.assigneeType())) {
             ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
             if (team != null && !team.leaderAgentProfileId().equals(authorId)) {
                 CollaborationStore.MentionTarget leader = new CollaborationStore.MentionTarget(
                         "AGENT", team.leaderAgentProfileId());
-                if (hasActiveRunForTarget(taskId, leader)) {
-                    deliverCommentToActiveRuns(taskId, leader, comment, content);
-                } else {
+                if (!deliverCommentToActiveRuns(taskId, leader, comment, content)) {
                     executions.add(trigger(taskId, "REPLY", comment.id(), leader.type(), leader.id(), content,
                             "agent-comment:" + comment.id() + ":leader:" + leader.id()));
                 }
@@ -393,6 +408,13 @@ public class CollaborationService {
     }
 
     public void onRunTerminal(RunRecord run, String event) {
+        handleRunTerminal(run, event);
+        // Refresh the expert thread digest after terminal state, delivery manifests and agent
+        // results are durable so the next Run of the same thread resumes from compact state.
+        refreshExpertThreadDigest(run);
+    }
+
+    private void handleRunTerminal(RunRecord run, String event) {
         CollaborationStore.CollaborationTask task = collaboration.taskForRun(run.id()).orElse(null);
         if (task == null) return;
         collaboration.recordActivity(task.id(), "RUN_" + event, "AGENT", run.agentProfileId(), run.id(),
@@ -682,30 +704,42 @@ public class CollaborationService {
      * silently dropped (no concurrent second Run is created by design, and the running Run has no
      * way to learn about the new comment).
      */
-    private void deliverCommentToActiveRuns(String taskId, CollaborationStore.MentionTarget mention,
-                                            CollaborationStore.CollaborationComment comment, String content) {
+    /**
+     * Delivers a durable comment into the session of every active Run owned by the mentioned
+     * agent/Leader, so the running expert actually reads and reacts to it on its next model turn.
+     * Each append re-confirms inside one transaction that the Run is still active; returns true
+     * only when at least one Run received the message. When every candidate Run reached a terminal
+     * state in the meantime, returns false so the caller can create a new Trigger/Run instead of
+     * stranding the comment behind a completed Run.
+     */
+    private boolean deliverCommentToActiveRuns(String taskId, CollaborationStore.MentionTarget mention,
+                                               CollaborationStore.CollaborationComment comment, String content) {
         String targetAgentId = mention.id();
         if ("TEAM".equalsIgnoreCase(mention.type())) {
             targetAgentId = productivity.findAgentTeam(mention.id())
                     .map(ProductivityStore.AgentTeam::leaderAgentProfileId).orElse(null);
         }
-        if (blank(targetAgentId)) return;
+        if (blank(targetAgentId)) return false;
         String agentId = targetAgentId;
         String message = "用户追加评论（collaboration task " + taskId + "，comment " + comment.id() + "）：\n"
                 + (content == null ? "" : content)
                 + "\n请先通过 get_collaboration_task 读取该评论及最新证据，再决定是否调整当前执行。";
-        collaboration.taskTreeRuns(taskId).stream()
+        boolean delivered = false;
+        for (String runId : collaboration.taskTreeRuns(taskId).stream()
                 .filter(link -> agentId.equals(link.agentProfileId()))
                 .filter(link -> !TERMINAL_RUN_STATUSES.contains(link.status()))
                 .map(CollaborationStore.TaskRun::runId)
                 .distinct()
-                .forEach(runId -> runtime.findRun(runId).ifPresent(run -> {
-                    try {
-                        runtime.appendMessage(run.sessionId(), run.id(), "user", message);
-                    } catch (Exception error) {
-                        log.warn("Unable to deliver user comment to active run={} task={}", runId, taskId, error);
-                    }
-                }));
+                .toList()) {
+            RunRecord run = runtime.findRun(runId).orElse(null);
+            if (run == null) continue;
+            try {
+                if (runtime.appendUserMessageIfRunActive(run.sessionId(), run.id(), message)) delivered = true;
+            } catch (Exception error) {
+                log.warn("Unable to deliver user comment to active run={} task={}", runId, taskId, error);
+            }
+        }
+        return delivered;
     }
 
     private boolean hasActiveRunForTarget(String taskId, CollaborationStore.MentionTarget target) {
@@ -719,6 +753,126 @@ public class CollaborationService {
         return collaboration.taskTreeRuns(taskId).stream()
                 .anyMatch(link -> agentId.equals(link.agentProfileId())
                         && !TERMINAL_RUN_STATUSES.contains(link.status()));
+    }
+
+    /**
+     * Resolves (idempotently) the ExpertThread for a triggered run and returns it so the run input
+     * can include the compact resume digest. The same root task + agent + role always map to the
+     * same thread; a terminal Run is never resurrected, the next Run is attached to this thread.
+     * Returns null when the thread layer is unavailable so collaboration triggering never breaks.
+     */
+    private CollaborationStore.ExpertThread bindRunToExpertThread(CollaborationStore.CollaborationTask task,
+                                                                  CollaborationRoutingService.RoutePreview preview,
+                                                                  ProductivityStore.AgentProfile agent) {
+        try {
+            return expertThreadService.getOrCreate(rootTask(task).id(), agent.id(),
+                    resolveThreadRole(task, preview, agent));
+        } catch (Exception error) {
+            log.warn("Unable to bind expert thread for task={} agent={}", task.id(), agent.id(), error);
+            return null;
+        }
+    }
+
+    /**
+     * Resolves the expert thread for a stage delegation run BEFORE the run input is built, so the
+     * follow-up Run of the same expert actually receives the compact resume digest in its input.
+     * Returns null when the thread layer is unavailable so stage dispatch never breaks.
+     */
+    private CollaborationStore.ExpertThread stageExpertThread(CollaborationStore.CollaborationTask subtask,
+                                                              ProductivityStore.AgentProfile agent) {
+        try {
+            return expertThreadService.getOrCreate(rootTask(subtask).id(), agent.id(), "EXPERT");
+        } catch (Exception error) {
+            log.warn("Unable to bind stage expert thread for task={} agent={}", subtask.id(), agent.id(), error);
+            return null;
+        }
+    }
+
+    /**
+     * Renders the <expert_thread_resume> block for a follow-up Run of the same expert thread.
+     * Only EXPERT threads get it (the Leader continues via TaskDigest) and only once the thread
+     * has durable digest content; otherwise an empty string is returned.
+     */
+    private String expertThreadResume(CollaborationStore.ExpertThread thread) {
+        if (thread == null || !"EXPERT".equals(thread.threadRole())
+                || thread.digestJson() == null || thread.digestJson().isBlank()
+                || "{}".equals(thread.digestJson().trim())) return "";
+        return "\n你正在继续此前专家线程中的工作。\n<expert_thread_resume>\n"
+                + thread.digestJson()
+                + "\n</expert_thread_resume>\n"
+                + "不要假定旧文件内容仍然正确；需要具体内容时使用 read_file/read_artifact 按需读取，"
+                + "不要重新读取与当前任务无关的完整历史。";
+    }
+
+    private void attachRunToExpertThreadSafely(String threadId, String runId) {
+        if (threadId == null) return;
+        try {
+            expertThreadService.attachRun(threadId, runId);
+        } catch (Exception error) {
+            log.warn("Unable to attach run={} to expert thread={}", runId, threadId, error);
+        }
+    }
+
+    private void refreshExpertThreadDigest(RunRecord run) {
+        try {
+            expertThreadService.findByRun(run.id())
+                    .ifPresent(thread -> expertThreadService.refreshDigest(thread.id()));
+        } catch (Exception error) {
+            log.warn("Unable to refresh expert thread digest run={}", run.id(), error);
+        }
+    }
+
+    /**
+     * Thread role is an orchestration role, not a synonym for "task assignee": only a real TEAM
+     * leader gets a LEADER thread (which continues via TaskDigest). Everything else - team stage
+     * experts, directly mentioned team experts, and the assigned agent of a single-AGENT task -
+     * is an EXPERT thread and receives the {@code <expert_thread_resume>} digest on follow-up Runs.
+     */
+    /**
+     * Builds the durable delegation envelope for a stage run at dispatch time (a snapshot contract),
+     * reusing {@link DelegationEnvelopeBuilder} so the stage's acceptance criteria become the child's
+     * {@code done_criteria} and reach the AgentResultValidator via get_agent_result. Includes the
+     * stage task id and the parent run id; falls back to "{}" if the envelope cannot be built so
+     * stage dispatch never breaks.
+     */
+    private String stageEnvelopeJson(CollaborationStore.CollaborationTask subtask, String parentRunId,
+                                     ProductivityStore.AgentProfile agent) {
+        try {
+            Map<String, Object> envelope = new java.util.LinkedHashMap<>(delegationEnvelopeBuilder.build(
+                    new DelegationEnvelopeBuilder.EnvelopeInput(
+                            subtask.title(),
+                            subtask.description() == null ? "" : subtask.description(),
+                            List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
+                            null,
+                            stageDoneCriteria(subtask.acceptanceCriteria()),
+                            null, null, List.of(), List.of(),
+                            DelegationEnvelopeBuilder.defaultMode(agent.collaborationRole()),
+                            null, "BLOCK_GRAPH", List.of())));
+            envelope.put("collaboration_task_id", subtask.id());
+            envelope.put("parent_run_id", parentRunId);
+            return write(envelope);
+        } catch (Exception error) {
+            log.warn("Unable to build stage envelope for task={}", subtask.id(), error);
+            return "{}";
+        }
+    }
+
+    private List<String> stageDoneCriteria(String acceptanceCriteria) {
+        if (acceptanceCriteria == null || acceptanceCriteria.isBlank()) return List.of();
+        return java.util.Arrays.stream(acceptanceCriteria.split("\\R"))
+                .map(String::trim).filter(value -> !value.isBlank()).toList();
+    }
+
+    private String resolveThreadRole(CollaborationStore.CollaborationTask task,
+                                     CollaborationRoutingService.RoutePreview preview,
+                                     ProductivityStore.AgentProfile agent) {
+        if (preview == null) return "EXPERT";
+        if ("TEAM".equals(preview.targetType())) {
+            ProductivityStore.AgentTeam team = productivity.findAgentTeam(preview.targetId()).orElse(null);
+            if (team != null && team.leaderAgentProfileId().equals(agent.id())) return "LEADER";
+            return "EXPERT";
+        }
+        return "EXPERT";
     }
 
     private void validateLeaderConclusion(CollaborationStore.CollaborationTask task, String authorType,
@@ -756,7 +910,8 @@ public class CollaborationService {
     }
 
     private String runInput(CollaborationStore.CollaborationTask task, CollaborationStore.Trigger trigger,
-                            CollaborationRoutingService.RoutePreview preview, String instruction) {
+                            CollaborationRoutingService.RoutePreview preview, String instruction,
+                            CollaborationStore.ExpertThread expertThread) {
         StringBuilder value = new StringBuilder("你正在处理持久化协作任务。\n")
                 .append("task_id: ").append(task.id()).append("\n")
                 .append("title: ").append(task.title()).append("\n")
@@ -783,6 +938,10 @@ public class CollaborationService {
             } catch (Exception error) {
                 log.warn("Unable to append task digest run={} task={}", task.id(), error);
             }
+        }
+        if (expertThread != null) {
+            String resume = expertThreadResume(expertThread);
+            if (!resume.isBlank()) value.append(resume).append("\n");
         }
         return value.toString();
     }

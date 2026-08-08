@@ -141,6 +141,9 @@ public class ContextManager {
         var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
 
         List<MessageRecord> active = store.activeMessages(sessionId);
+        // Highest message sequence the model context saw when it was built; the run processor
+        // compares it with the live session max to detect user input arriving mid-generation.
+        long maxMessageSequence = active.stream().mapToLong(MessageRecord::sequence).max().orElse(0L);
         List<ModelMessage> summaries = active.stream().filter(message -> "summary".equals(message.role()))
                 .sorted(Comparator.comparingLong(MessageRecord::sequence))
                 .map(message -> ModelMessage.user(
@@ -243,7 +246,7 @@ public class ContextManager {
                         stablePrefix.size() + summaries.size() + priorConversation.size())));
         return new PreparedContext(new ModelRequest(messages, toolDefinitions,
                 outputLimit, run.thinkingMode(), run.reasoningEffort()),
-                estimated, compaction, manifest);
+                estimated, compaction, manifest, maxMessageSequence);
     }
 
     private static DynamicBlocks fitDynamicBlocks(String knowledge, String memories, int tokenBudget) {
@@ -629,5 +632,5 @@ public class ContextManager {
 
     public record PreparedContext(ModelRequest request, int estimatedInputTokens,
                                   ConversationCompactor.CompactionResult compaction,
-                                  ContextManifest manifest) { }
+                                  ContextManifest manifest, long maxMessageSequence) { }
 }

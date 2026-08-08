@@ -102,7 +102,10 @@ public class CollaborationController {
                     + "Each linked Run includes agentProfileId, modelProfileId, modelProfileName, and the latest recorded modelName "
                     + "so clients can render the actual executor and model without exposing internal identifiers. "
                     + "Runs and workspace files include all staged descendants, while stages remain nested under their root task. "
-                    + "Final delivery files are only marked ready after the root task reaches DONE.")
+                    + "Final delivery files are only marked ready after the root task reaches DONE. "
+                    + "expertThreads groups every Run by the expert's logical thread (root task + agent + role): each thread lists "
+                    + "its bound Runs with ordinal and live status, so a follow-up Run of the same expert is visibly a new attempt "
+                    + "of the same thread instead of an unrelated execution.")
     public Map<String, Object> task(@PathVariable String id) {
         CollaborationStore.CollaborationTask task = requireTask(id);
         List<CommentView> comments = store.treeComments(id).stream()
@@ -115,11 +118,29 @@ public class CollaborationController {
             }
         }
         boolean finalDeliveryReady = "DONE".equals(task.status());
+        List<Map<String, Object>> expertThreads = store.expertThreadsForRoot(id).stream().map(thread -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("threadId", thread.id());
+            value.put("agentProfileId", thread.agentProfileId());
+            value.put("threadRole", thread.threadRole());
+            value.put("digestJson", thread.digestJson());
+            value.put("latestRunId", thread.latestRunId());
+            value.put("runs", store.expertThreadRuns(thread.id()).stream().map(link -> {
+                Map<String, Object> runView = new LinkedHashMap<>();
+                runView.put("runId", link.runId());
+                runView.put("ordinal", link.ordinal());
+                runView.put("status", runtime.findRun(link.runId())
+                        .map(runStatus -> runStatus.status().name()).orElse(""));
+                return runView;
+            }).toList());
+            return value;
+        }).toList();
         return Map.of("task", task,
                 "children", store.descendantTasks(id),
                 "comments", comments,
                 "activities", store.treeActivities(id, 0, 1_000),
                 "runs", runs,
+                "expertThreads", expertThreads,
                 "finalDeliveryReady", finalDeliveryReady,
                 "workspaceFiles", List.copyOf(workspaceFiles.values()));
     }

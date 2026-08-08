@@ -1,5 +1,19 @@
 # 交付阶段
 
+## 2026-08-08 ExpertThread · PR9：专家线程与执行期新输入竞态保护
+
+- [x] 迁移 38：`collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一，`latest_run_id` 带 `ON DELETE SET NULL` 外键）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。
+- [x] `ExpertThreadService`（getOrCreate 幂等 / attachRun / findByRun / refreshDigest）与 `ExpertThreadDigestBuilder`（紧凑 resume 摘要：仅本专家阶段的已完成/剩余工作与 blockers、本 Run DeliveryManifest 的 changed files、artifact/test 引用、最新人工指令，不含全文/正文/reasoning）。
+- [x] `CollaborationService.trigger` 与 `createAndDispatchSubtask`（阶段再派）都在 Run 输入注入 `<expert_thread_resume>`，`onRunTerminal` 终态后刷新 Digest；Leader 线程（role=LEADER）不重复注入。
+- [x] `attachExpertThreadRun` 在单个 `BEGIN IMMEDIATE` 事务内完成跨线程校验 + ordinal 分配 + 挂载 + latest_run_id 更新；并发挂载安全、重复挂载幂等、跨线程挂载抛错。
+- [x] Active Run 竞态保护：`PreparedContext.maxMessageSequence`（仅 active 消息）+ `commitFinalAssistantAndComplete(..., expectedSequence)` 单事务“比对 + 置 COMPLETED”，新输入整体回滚；`commitIntermediateAssistantAndRequeue` 单事务把旧回答保存为 **archived** assistant（审计保留、不进下一轮 context）并重新排队；`appendUserMessageIfRunActive` 事务内重确认，Run 恰好终态时评论回退创建新 Trigger/Run。
+- [x] 线程角色：仅 TEAM leaderAgentProfileId 为 `LEADER`；单 Agent 被指派 Agent 与团队专家均为 `EXPERT`，单 Agent REQUEST_REWORK 后续 Run 同时获得 TaskDigest + `<expert_thread_resume>`。
+- [x] done_criteria 接通 Validator：`spawn_agent` 与协作阶段派遣 `createAndDispatchSubtask` 都通过 `DelegationEnvelopeBuilder` 把 done_criteria 持久化到 envelope；`get_agent_result` 返回逐 criterion 状态（显式且非空的 `criterion_evidence` → EVIDENCED / 否则 UNVERIFIED，空容器不算证据、不改 valid）；PlanStep `doneCriteriaJson` 按 JSON array 解析 fallback。
+- [x] archived 语义链路隔离：新增 `activeMessagesForRun`；ExpertThread Digest、`get_agent_result` 最终回答/摘要、Memory 提取快照都只读 `archived=0`，`messages()/messagesForRun()` 仅作审计历史。
+- [x] 删除终态 Run 时清理线程绑定、重选 `latest_run_id` 并置空受影响线程摘要。
+- [x] `GET /v1/collaboration/tasks/{id}` 返回 `expertThreads`，Console 执行层按专家线程分组展示 `#序号 状态` 并可打开会话。
+- [x] CI：`mvnw` 恢复可执行位，workflow 增加 `chmod +x mvnw`，`./mvnw -B -ntp clean verify` 可正常执行。
+
 ## 2026-08-06 Harness Loop v2 · PR1：轻量 WorkingPlan 与交互修复
 
 - [x] 迁移 35：`run_working_plans`（每 Run 单行、revision 自增）；`update_working_plan` 工具（objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目 + evidenceRefs）。

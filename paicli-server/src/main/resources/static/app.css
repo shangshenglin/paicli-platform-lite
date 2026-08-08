@@ -438,6 +438,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .task-run-row { padding: 11px 0; border-bottom: 1px solid var(--line); }
 .task-run-row > div { min-width: 0; display: grid; gap: 3px; }
 .task-run-row strong, .task-run-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-expert-thread { margin: 8px 0; padding: 8px 10px; border: 1px solid #2a313b; border-radius: 6px; background: #161c23; }
+.task-expert-thread > strong { color: #dce3ec; font-size: 12px; }
+.task-expert-thread-run { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; color: var(--muted); font-size: 12px; }
 .task-empty { padding: 28px 10px; color: var(--muted); text-align: center; }
 .message { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; margin-bottom: 23px; }
 .avatar { width: 31px; height: 31px; background: #262c35; font-weight: 700; }

@@ -700,6 +700,8 @@ function collaborationTaskDetailSignature(detail) {
       view.comment.conclusion, view.comment.createdAt, (view.mentions || []).map(value => `${value.type}:${value.id}`)]),
     activities: detail.activities.map(activity => [activity.id, activity.activityType, activity.payloadJson]),
     runs: detail.runs.map(run => [run.runId, run.taskId, run.status, run.modelName, run.createdAt, run.finishedAt]),
+    threads: (detail.expertThreads || []).map(thread => [thread.threadId, thread.latestRunId, thread.digestJson,
+      (thread.runs || []).map(run => [run.runId, run.ordinal, run.status])]),
     deliverables: [Boolean(detail.finalDeliveryReady),
       (detail.workspaceFiles || []).map(file => [file.runId, file.path, file.updatedAt || ''])]
   });
@@ -1224,6 +1226,38 @@ async function submitCollaborationComment(event, taskId) {
   } catch (error) { showNotice(`评论发布失败：${error.message}`, true); }
 }
 
+function renderExpertThreads(detail) {
+  const threads = detail.expertThreads || [];
+  if (!threads.length) return null;
+  const section = element('section', 'task-section task-expert-threads');
+  const head = element('div');
+  head.append(element('h3', '', '专家线程'),
+    element('small', 'hint', '同一专家在同一协作任务中的后续执行挂在同一个逻辑线程；每次执行都是不可复活的新 Run，跨 Run 只注入紧凑摘要。'));
+  section.append(head);
+  threads.forEach(thread => {
+    const group = element('div', 'task-expert-thread');
+    const header = element('strong', '', `${agentProfileName(thread.agentProfileId, '专家')} · ${thread.threadRole || 'EXPERT'}`);
+    group.append(header);
+    const runs = (thread.runs || []).slice().sort((a, b) => a.ordinal - b.ordinal);
+    runs.forEach(run => {
+      const row = element('div', 'task-expert-thread-run');
+      const status = statusNames[run.status] || run.status;
+      const shortRunId = (run.runId || '').replace(/^run_/, '');
+      const detailRun = (detail.runs || []).find(value => value.runId === run.runId);
+      const label = element('span', '', `#${run.ordinal} ${status} · ${shortRunId}`);
+      row.append(label);
+      if (detailRun) {
+        const open = element('button', 'secondary', '打开会话');
+        open.onclick = () => openCollaborationTaskSession(detail.task, detailRun.sessionId);
+        row.append(open);
+      }
+      group.append(row);
+    });
+    section.append(group);
+  });
+  return section;
+}
+
 function renderTaskExecutionLayer(detail) {
   const root = element('div', 'task-execution-layer');
   const activeRuns = detail.runs.filter(run => !terminal.has(run.status));
@@ -1262,6 +1296,8 @@ function renderTaskExecutionLayer(detail) {
     }
     root.append(deliverables);
   }
+  const expertThreads = renderExpertThreads(detail);
+  if (expertThreads) root.append(expertThreads);
   if (!detail.runs.length) root.append(element('div', 'task-empty', '尚未触发 Agent Run'));
   detail.runs.forEach(run => {
     const row = element('div', 'task-run-row');
