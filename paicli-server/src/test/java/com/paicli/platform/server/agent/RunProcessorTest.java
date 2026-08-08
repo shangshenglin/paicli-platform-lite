@@ -22,6 +22,7 @@ import com.paicli.platform.server.model.ModelMessage;
 import com.paicli.platform.server.model.ModelStreamListener;
 import com.paicli.platform.server.prompt.PromptAssembler;
 import com.paicli.platform.server.sandbox.LocalSandboxDriver;
+import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.tool.ToolCatalog;
@@ -375,7 +376,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, batchModel, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, router, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper));
         var session = store.createSession("batch");
         var run = store.createRun(session.id(), "read several files");
 
@@ -407,13 +411,9 @@ class RunProcessorTest {
                 new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
                 modelProperties, properties, mapper);
         ModelClient model = new ModelClient() {
-            int calls = 0;
             @Override
             public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
-                calls++;
-                if (calls == 1) {
-                    return ModelResponse.tool("c1", "write_file", Map.of("path", "x.txt", "content", "hello"));
-                }
+                // Case 02: the task requires a file change but the model never writes anything.
                 return ModelResponse.text("done");
             }
             @Override public String name() { return "verify-model-test"; }
@@ -421,7 +421,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, model, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, router, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper));
         var session = store.createSession("verify");
         var run = store.createRun(session.id(), "change a file");
 
@@ -463,7 +466,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, model, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, router, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper));
         var session = store.createSession("loop");
         var run = store.createRun(session.id(), "avoid loops");
 
