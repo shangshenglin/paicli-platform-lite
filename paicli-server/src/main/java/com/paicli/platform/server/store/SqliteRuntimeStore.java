@@ -139,6 +139,9 @@ public class SqliteRuntimeStore {
                     "TEXT NOT NULL DEFAULT 'NON_IDEMPOTENT_WRITE'");
             SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "result_metadata_json",
                     "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "wait_kind", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "wait_ref", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "waiting_since", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS approvals (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL UNIQUE, " +
@@ -3041,15 +3044,108 @@ public class SqliteRuntimeStore {
      */
     public boolean waitForAgent(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status=?")) {
+                "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status IN (?,?)")) {
             ps.setString(1, RunStatus.WAITING_AGENT.name());
             ps.setString(2, runId);
             ps.setString(3, RunStatus.QUEUED.name());
+            ps.setString(4, RunStatus.WAITING_TOOL.name());
             boolean updated = ps.executeUpdate() == 1;
             if (updated) insertEvent(connection, runId, "run.waiting_agent", "{\"status\":\"WAITING_AGENT\"}");
             return updated;
         } catch (SQLException e) {
             throw failure("wait for delegated agent", e);
+        }
+    }
+
+    /** Marks a submitted tool call as waiting on an external future condition. */
+    public boolean markToolCallWaitingExternal(String toolCallId, String waitKind, String waitRef) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE tool_calls SET status=?,wait_kind=?,wait_ref=?,waiting_since=? WHERE id=? AND status=?")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, waitKind);
+            ps.setString(3, waitRef);
+            ps.setString(4, Instant.now().toString());
+            ps.setString(5, toolCallId);
+            ps.setString(6, ToolCallStatus.RUNNING.name());
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw failure("mark tool call waiting external", e);
+        }
+    }
+
+    /** Tool calls parked on an external condition (e.g. a delegated child run). */
+    public List<ToolCallRecord> waitingExternalToolCalls(String waitKind, String waitRef) {
+        List<ToolCallRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM tool_calls WHERE status=? AND wait_kind=? AND wait_ref=? ORDER BY created_at")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, waitKind);
+            ps.setString(3, waitRef);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapToolCall(rs));
+            }
+            return List.copyOf(values);
+        } catch (SQLException e) {
+            throw failure("list waiting external tool calls", e);
+        }
+    }
+
+    /**
+     * Atomically completes the original deferred tool call, appends the final
+     * tool message to the parent session and requeues the parked parent. Only
+     * the first resolver wins (WHERE status='WAITING_EXTERNAL'), so duplicate
+     * terminal callbacks are idempotent no-ops.
+     */
+    public boolean completeDeferredToolCallAndAppendResult(String sessionId, String runId, String toolCallId,
+                                                           String result, String metadataJson) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                int updated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,result=?,result_metadata_json=?,finished_at=? " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, ToolCallStatus.COMPLETED.name());
+                    ps.setString(2, result);
+                    ps.setString(3, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, toolCallId);
+                    ps.setString(6, ToolCallStatus.WAITING_EXTERNAL.name());
+                    updated = ps.executeUpdate();
+                }
+                if (updated == 0) {
+                    connection.rollback();
+                    return false;
+                }
+                String providerCallId = null;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT provider_call_id FROM tool_calls WHERE id=?")) {
+                    ps.setString(1, toolCallId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) providerCallId = rs.getString(1);
+                    }
+                }
+                insertMessage(connection, sessionId, runId, "tool", result == null ? "" : result,
+                        null, providerCallId, null, false);
+                insertEvent(connection, runId, "tool.deferred.resolved", "{\"toolCallId\":\""
+                        + escape(toolCallId) + "\"}");
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,queued_at=?,version=version+1 WHERE id=? AND status=?")) {
+                    ps.setString(1, RunStatus.QUEUED.name());
+                    ps.setString(2, Instant.now().toString());
+                    ps.setString(3, runId);
+                    ps.setString(4, RunStatus.WAITING_AGENT.name());
+                    ps.executeUpdate();
+                }
+                insertEvent(connection, runId, "run.queued", "{\"reason\":\"deferred_agent_result_resolved\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("complete deferred tool call", e);
         }
     }
 
@@ -5402,7 +5498,8 @@ public class SqliteRuntimeStore {
                 rs.getString("tool_name"), rs.getString("arguments"), ToolCallStatus.valueOf(rs.getString("status")),
                 rs.getString("result"), rs.getString("error"), rs.getString("idempotency_key"),
                 rs.getInt("retry_count"), instant(rs.getString("created_at")), instant(rs.getString("finished_at")),
-                metadata == null ? "{}" : metadata);
+                metadata == null ? "{}" : metadata, rs.getString("wait_kind"), rs.getString("wait_ref"),
+                instant(rs.getString("waiting_since")));
     }
 
     private static RunDelegationRecord mapDelegation(ResultSet rs) throws SQLException {

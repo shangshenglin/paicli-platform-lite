@@ -379,7 +379,7 @@ class RunProcessorTest {
                 new RunVerificationService(store,
                         new RunEvidenceCollector(store, router, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
-                new ReflectionService(store, mapper));
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("batch");
         var run = store.createRun(session.id(), "read several files");
 
@@ -424,7 +424,7 @@ class RunProcessorTest {
                 new RunVerificationService(store,
                         new RunEvidenceCollector(store, router, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
-                new ReflectionService(store, mapper));
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("verify");
         var run = store.createRun(session.id(), "change a file");
 
@@ -469,7 +469,7 @@ class RunProcessorTest {
                 new RunVerificationService(store,
                         new RunEvidenceCollector(store, router, mapper),
                         new CompletionContractService(store, new PlanStore(properties), mapper)),
-                new ReflectionService(store, mapper));
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("loop");
         var run = store.createRun(session.id(), "avoid loops");
 

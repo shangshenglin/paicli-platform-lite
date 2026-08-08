@@ -101,6 +101,13 @@ public class DelegationToolProvider implements ServerToolProvider {
                         String.valueOf(request.arguments().getOrDefault("child_run_id", "")));
                 default -> throw new IllegalArgumentException("unsupported agent tool");
             };
+            if ("get_agent_result".equals(request.name())
+                    && output instanceof Map<?, ?> map
+                    && isNonTerminalStatus(map)) {
+                String childRunId = String.valueOf(request.arguments().getOrDefault("child_run_id", ""));
+                return ToolResult.success(request.toolCallId(), mapper.writeValueAsString(output), elapsed(start),
+                        Map.of("deferred", true, "waitKind", "CHILD_RUN", "waitRef", childRunId));
+            }
             return ToolResult.success(request.toolCallId(), mapper.writeValueAsString(output), elapsed(start));
         } catch (Exception e) {
             return ToolResult.failure(request.toolCallId(), message(e), elapsed(start));
@@ -280,6 +287,20 @@ public class DelegationToolProvider implements ServerToolProvider {
         return value;
     }
 
+    /** Server-internal terminal resolution: returns the same map as get_agent_result for a finished child. */
+    public Map<String, Object> buildDeferredResult(String parentRunId, String childRunId) {
+        return result(parentRunId, childRunId);
+    }
+
+    private static boolean isNonTerminalStatus(Map<?, ?> value) {
+        Object status = value.get("status");
+        if (status == null) return false;
+        try {
+            return !com.paicli.platform.common.RunStatus.valueOf(String.valueOf(status)).terminal();
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
     private List<Map<String, Object>> list(String parentRunId) {
         List<Map<String, Object>> values = new ArrayList<>();
         for (RunDelegationRecord delegation : store.delegationsForRun(parentRunId)) {

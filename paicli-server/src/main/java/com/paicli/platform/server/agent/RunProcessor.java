@@ -61,6 +61,7 @@ public class RunProcessor {
     private final CollaborationService collaboration;
     private final RunVerificationService runVerification;
     private final ReflectionService reflectionService;
+    private final DeferredAgentResultService deferredAgentResultService;
 
     @Autowired
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -72,7 +73,8 @@ public class RunProcessor {
                         CompletionNotificationService notifications,
                         CollaborationService collaboration,
                         RunVerificationService runVerification,
-                        ReflectionService reflectionService) {
+                        ReflectionService reflectionService,
+                        DeferredAgentResultService deferredAgentResultService) {
         this.store = store;
         this.modelClient = modelClient;
         this.toolRouter = toolRouter;
@@ -89,6 +91,7 @@ public class RunProcessor {
         this.collaboration = collaboration;
         this.runVerification = runVerification;
         this.reflectionService = reflectionService;
+        this.deferredAgentResultService = deferredAgentResultService;
     }
 
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -97,7 +100,7 @@ public class RunProcessor {
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -105,10 +108,11 @@ public class RunProcessor {
                  ApprovalService approvalService, AuditService auditService,
                  ContextManager contextManager, ToolResultMaterializer resultMaterializer,
                  ModelProperties modelProperties,
-                 RunVerificationService runVerification, ReflectionService reflectionService) {
+                 RunVerificationService runVerification, ReflectionService reflectionService,
+                 DeferredAgentResultService deferredAgentResultService) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, modelProperties, null, null, null, null,
-                runVerification, reflectionService);
+                runVerification, reflectionService, deferredAgentResultService);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -120,7 +124,7 @@ public class RunProcessor {
                  CompletionNotificationService notifications) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, memoryService, modelProperties, metrics,
-                productivity, notifications, null, null, null);
+                productivity, notifications, null, null, null, null);
     }
 
     public void process(RunRecord claimedRun) {
@@ -258,6 +262,7 @@ public class RunProcessor {
                     toolRouter.release(run.id());
                     return;
                 }
+                resolveDeferredChild(run.id());
                 notify(run, "COMPLETED", "任务已完成");
                 store.recordMemoryOutcome(run.id(), "RUN_COMPLETED");
                 if (memoryService != null) {
@@ -317,6 +322,7 @@ public class RunProcessor {
             }
             store.failRun(run.id(), e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+            resolveDeferredChild(run.id());
             store.requeueWaitingParentRuns(run.id());
             notify(run, "FAILED", e.getMessage());
             if (metrics != null) metrics.failed(System.nanoTime() - processStarted);
@@ -380,6 +386,7 @@ public class RunProcessor {
                 "message", budget.message(),
                 "tokens", budget.tokens(),
                 "maxTokens", budget.maxTokens())));
+        resolveDeferredChild(run.id());
         store.requeueWaitingParentRuns(run.id());
         toolRouter.release(run.id());
         notify(run, "COMPLETED", "任务已达到运行预算并停止，已保留可用的部分结果");
@@ -466,6 +473,10 @@ public class RunProcessor {
             toolRouter.release(run.id());
             return;
         }
+        if (isDeferredResult(result)) {
+            parkForDeferredResult(run, call, result);
+            return;
+        }
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
@@ -549,6 +560,10 @@ public class RunProcessor {
             store.failTool(call.id(), "Run canceled");
             return false;
         }
+        if (isDeferredResult(result)) {
+            parkForDeferredResult(run, call, result);
+            return true;
+        }
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
@@ -622,6 +637,41 @@ public class RunProcessor {
         return Map.copyOf(arguments);
     }
 
+    /** A tool result that defers its final output to an external future condition. */
+    private static boolean isDeferredResult(ToolResult result) {
+        return Boolean.TRUE.equals(result.metadata().get("deferred"));
+    }
+
+    /** Parks the run and marks the tool call WAITING_EXTERNAL without a final tool message. */
+    private void parkForDeferredResult(RunRecord run, ToolCallRecord call, ToolResult result) {
+        String waitKind = String.valueOf(result.metadata().getOrDefault("waitKind", ""));
+        String waitRef = String.valueOf(result.metadata().getOrDefault("waitRef", ""));
+        store.markToolCallWaitingExternal(call.id(), waitKind, waitRef);
+        store.appendEvent(run.id(), "tool.deferred", json(Map.of(
+                "toolCallId", call.id(), "waitKind", waitKind, "waitRef", waitRef)));
+        store.waitForAgent(run.id());
+        // Lost-wakeup guard: if the child became terminal just before we parked, resolve now.
+        if ("CHILD_RUN".equals(waitKind) && waitRef != null && !waitRef.isBlank()) {
+            RunRecord child = store.findRun(waitRef).orElse(null);
+            if (child != null && child.status().terminal()) resolveDeferredChild(waitRef);
+        }
+        toolRouter.release(run.id());
+    }
+
+    /** Resolves deferred get_agent_result calls parked on this run once it is terminal. */
+    private void resolveDeferredChild(String childRunId) {
+        if (deferredAgentResultService == null) return;
+        try {
+            deferredAgentResultService.resolveChildTerminal(childRunId);
+        } catch (Exception e) {
+            store.appendEvent(childRunId, "tool.deferred.resolve_failed", json(Map.of(
+                    "error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage())));
+        }
+    }
+
+    private static boolean isBlankOrUnknown(String value) {
+        return value == null || value.isBlank() || "null".equals(value) || "".equals(value);
+    }
     private boolean isActiveAgentResult(ToolCallRecord call, String content) {
         if (!"get_agent_result".equals(call.toolName())) return false;
         try {
