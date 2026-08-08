@@ -172,7 +172,7 @@ public class CollaborationService {
             CollaborationStore.Trigger completed = collaboration.completeTrigger(trigger.id(), run.id());
             if (List.of("BACKLOG", "TODO", "BLOCKED").contains(task.status())
                     || ("IN_REVIEW".equals(task.status())
-                    && List.of("HUMAN_ACTION", "STAGE_BARRIER").contains(resolvedTriggerType))) {
+                    && List.of("HUMAN_ACTION", "STAGE_BARRIER", "MENTION", "REPLY").contains(resolvedTriggerType))) {
                 collaboration.updateStatus(task.id(), "IN_PROGRESS", "SYSTEM", null,
                         write(Map.of("triggerId", trigger.id(), "runId", run.id())));
             }
@@ -267,6 +267,7 @@ public class CollaborationService {
                 requireStatus(task, "IN_REVIEW", normalizedAction);
                 requireReason(normalizedReason, normalizedAction);
                 ensureNoActiveRuns(task);
+                persistHumanFeedbackComment(task, normalizedReason);
                 TriggerExecution execution = humanTrigger(task, normalizedAction, normalizedReason, idempotencyKey);
                 yield new HumanActionResult(collaboration.task(task.id()).orElseThrow(), execution);
             }
@@ -292,6 +293,7 @@ public class CollaborationService {
                 requireOneOf(task, normalizedAction, "TODO", "IN_PROGRESS");
                 requireReason(normalizedReason, normalizedAction);
                 ensureNoActiveRuns(task);
+                persistHumanFeedbackComment(task, normalizedReason);
                 yield new HumanActionResult(persistStatus(task, "BLOCKED", "USER", null,
                         normalizedReason, normalizedAction), null);
             }
@@ -436,6 +438,10 @@ public class CollaborationService {
                     updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
                             "Team execution ended without a Leader conclusion after the latest staged delivery");
                 }
+            } else if (hasDeliveredStages(task)) {
+                collaboration.updateStatus(task.id(), "IN_REVIEW", "SYSTEM", null,
+                        write(Map.of("reason", "Leader run " + run.id() + " failed after staged deliveries; re-review the delivered work",
+                                "runId", run.id())));
             } else {
                 updateStatus(task.id(), "BLOCKED", "SYSTEM", null,
                         "All linked Runs reached a terminal failure state");
@@ -531,6 +537,11 @@ public class CollaborationService {
         return woke;
     }
 
+    private boolean hasDeliveredStages(CollaborationStore.CollaborationTask task) {
+        return collaboration.descendantTasks(task.id()).stream()
+                .anyMatch(stage -> List.of("IN_REVIEW", "DONE").contains(stage.status()));
+    }
+
     private boolean readyForHumanReview(CollaborationStore.CollaborationTask task) {
         if (!"TEAM".equals(task.assigneeType())) return true;
         ProductivityStore.AgentTeam team = productivity.findAgentTeam(task.assigneeId()).orElse(null);
@@ -548,7 +559,10 @@ public class CollaborationService {
     }
 
     private boolean hasStageDeliveryEvidence(CollaborationStore.CollaborationTask task, RunRecord run) {
-        if (!runtime.artifactsForRun(run.id()).isEmpty()) return true;
+        // Only real delivery artifacts count; "tool_result" artifacts are read-externalizations
+        // (large read_file/execute_command outputs) and are NOT evidence of a stage delivery.
+        if (runtime.artifactsForRun(run.id()).stream()
+                .anyMatch(artifact -> !"tool_result".equals(artifact.type()))) return true;
         Instant threshold = run.createdAt().minusSeconds(1);
         if (runtime.hasCompletedMutatingToolCall(run.id()) && runtime.workspaceFiles(run.id(), 200).stream()
                 .anyMatch(file -> !file.modifiedAt().isBefore(threshold))) return true;
@@ -598,6 +612,20 @@ public class CollaborationService {
                     new IllegalStateException("collaboration parent task not found: " + parentId));
         }
         throw new IllegalStateException("collaboration task nesting exceeds 64 levels");
+    }
+
+    /**
+     * Persists human feedback (rework / block reason) as a durable USER comment so it is visible
+     * in the collaboration comments pane in time order, becomes the digest's latest human
+     * instruction, and stays readable by the re-woken Leader via get_collaboration_task. Skips
+     * exact duplicates so idempotent action retries do not create repeated comments.
+     */
+    private void persistHumanFeedbackComment(CollaborationStore.CollaborationTask task, String reason) {
+        if (blank(reason)) return;
+        boolean duplicate = collaboration.comments(task.id()).stream()
+                .anyMatch(comment -> "USER".equals(comment.authorType()) && reason.equals(comment.content()));
+        if (duplicate) return;
+        collaboration.addComment(task.id(), null, "USER", null, reason, false, List.of());
     }
 
     private TriggerExecution humanTrigger(CollaborationStore.CollaborationTask task, String action,

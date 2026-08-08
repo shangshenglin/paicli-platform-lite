@@ -143,6 +143,29 @@ class CollaborationStoreTest {
     }
 
     @Test
+    void treeCommentsAndActivitiesAggregateRootAndDescendantStages() throws Exception {
+        runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var parent = store.saveTask(null, "project-a", "Root", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var stage1 = store.saveTask(null, "project-a", "Stage one", "", "IN_REVIEW",
+                0, "AGENT", "agent-a", "", parent.id(), 1, null, "AGENT:leader-a");
+        var stage2 = store.saveTask(null, "project-a", "Stage two", "", "IN_REVIEW",
+                0, "AGENT", "agent-b", "", parent.id(), 2, null, "AGENT:leader-a");
+
+        store.addComment(parent.id(), null, "USER", null, "please rework", false, List.of());
+        store.addComment(stage1.id(), null, "AGENT", "agent-a", "stage one delivered", false, List.of());
+        store.addComment(stage2.id(), null, "AGENT", "agent-b", "stage two delivered", false, List.of());
+
+        assertThat(store.treeComments(parent.id())).extracting("content")
+                .containsExactlyInAnyOrder("please rework", "stage one delivered", "stage two delivered");
+        assertThat(store.treeActivities(parent.id(), 0, 100)).extracting("taskId")
+                .contains(parent.id(), stage1.id(), stage2.id());
+        assertThat(store.treeActivities(parent.id(), 0, 100)).extracting("activityType")
+                .contains("TASK_CREATED", "COMMENT_POSTED");
+    }
+
+    @Test
     void deletesTerminalTaskTreeButRetainsRunAndSessionAudit() throws Exception {
         SqliteRuntimeStore runtime = runtime();
         CollaborationStore store = new CollaborationStore(properties());

@@ -124,7 +124,6 @@ public class ContextManager {
         String reflection = store.latestReflection(runId).map(this::reflectionPrompt).orElse("");
         List<MessageRecord> initialActive = store.activeMessages(sessionId);
         String languageDirective = languageDirective(currentUserQuery(runId, initialActive));
-        if (!languageDirective.isBlank()) runtime = runtime + "\n" + languageDirective;
         Set<String> activatedTools = activatedToolNames(store.messages(sessionId));
         List<ModelToolDefinition> toolDefinitions =
                 toolCatalog.definitionsForContext(allowedTools, activatedTools);
@@ -134,6 +133,7 @@ public class ContextManager {
         if (!agentInstruction.isBlank()) stablePrefix.add(ModelMessage.system(agentInstruction));
         if (!projectRules.isBlank()) stablePrefix.add(ModelMessage.system(projectRules));
         if (!skillIndex.isBlank()) stablePrefix.add(ModelMessage.system(skillIndex));
+        if (!languageDirective.isBlank()) stablePrefix.add(ModelMessage.system(languageDirective));
         int toolTokens = TokenEstimator.estimateTools(toolDefinitions);
         int fixedTokens = TokenEstimator.estimateMessages(stablePrefix) + toolTokens
                 + messageTokens(runtime) + messageTokens(planState) + messageTokens(workingPlan)
@@ -584,15 +584,47 @@ public class ContextManager {
 
     private static String languageDirective(String query) {
         if (query == null || query.isBlank()) return "";
-        long han = query.chars().filter(c -> Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN).count();
-        long latin = query.chars().filter(c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')).count();
-        if ((han >= 1 && han >= latin) || latin == 0) {
-            return "<language>本回合用户使用中文提问，请全程使用中文回答（代码、命令、标识符与专有名词除外）。</language>";
+        String content = userIntentContent(query);
+        long han = content.chars().filter(c -> Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN).count();
+        long latin = content.chars().filter(c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')).count();
+        if (han > 0) {
+            return "<language>用户使用中文，请全程用中文输出：思考、步骤、结论、评论与最终回答一律中文（代码、命令、标识符、文件路径与专有名词除外）；遇到英文工具输出用中文转述要点，不要切换成英文。</language>";
         }
-        if (latin > han) {
+        if (latin > 0) {
             return "<language>The user is writing in English; respond in English.</language>";
         }
-        return "";
+        return "<language>用户未指定语言，默认使用中文输出。</language>";
+    }
+
+    /**
+     * Collaboration runs wrap the user's own words (title/description/acceptance criteria) in a
+     * system-generated envelope with English key labels, ids, status/trigger enums and tool names.
+     * Detecting language on the whole envelope makes Chinese tasks look English (latin > han) and
+     * would also force Chinese on English tasks because of the Chinese scaffolding. So language is
+     * detected on the user's original intent only, falling back to the whole query when the envelope
+     * structure is not recognized.
+     */
+    private static String userIntentContent(String query) {
+        if (query == null || query.isBlank()) return query;
+        int title = query.indexOf("title: ");
+        int description = query.indexOf("description:\n");
+        int criteria = query.indexOf("acceptance_criteria:\n");
+        int trigger = query.indexOf("\ntrigger:");
+        StringBuilder intent = new StringBuilder();
+        if (title >= 0) {
+            int lineEnd = query.indexOf('\n', title + 7);
+            if (lineEnd > title) intent.append(query, title + 7, lineEnd).append('\n');
+        }
+        if (description >= 0 && criteria > description) {
+            intent.append(query, description + "description:\n".length(), criteria).append('\n');
+        }
+        if (criteria >= 0 && trigger > criteria) {
+            intent.append(query, criteria + "acceptance_criteria:\n".length(), trigger).append('\n');
+        }
+        if (!intent.toString().isBlank()) return intent.toString();
+        int stage = query.indexOf("阶段任务：");
+        if (stage >= 0) return query.substring(stage);
+        return query;
     }
 
     public record PreparedContext(ModelRequest request, int estimatedInputTokens,

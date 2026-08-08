@@ -298,6 +298,46 @@ class ContextManagerTest {
                 .map(message -> message.content()).toList();
         assertThat(en).anyMatch(value -> value.contains("<language>") && value.contains("English"));
     }
+    @Test
+    void languageDirectiveUsesUserIntentNotCollaborationWrapperScaffolding() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+
+        // Chinese task wrapped in the English-heavy collaboration envelope must still be Chinese.
+        var zhSession = store.createSession("lang-zh-task", "alpha");
+        var zhRun = store.createRun(zhSession.id(),
+                "你正在处理持久化协作任务。\ntask_id: task_x\nstatus: IN_REVIEW\ntrigger: HUMAN_ACTION\n"
+                        + "title: 写一个蜘蛛纸牌小游戏\ndescription:\n只要求一种扑克牌花色。\n"
+                        + "acceptance_criteria:\n游戏可以直接运行游玩。\ninstruction:\n请修复纸牌移动");
+        var zh = manager.prepare(zhSession.id(), zhRun.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+        assertThat(zh).anyMatch(value -> value.contains("<language>") && value.contains("中文"));
+
+        // English task wrapped in the same envelope must be English, not forced to Chinese by scaffolding.
+        var enSession = store.createSession("lang-en-task", "alpha");
+        var enRun = store.createRun(enSession.id(),
+                "你正在处理持久化协作任务。\ntask_id: task_y\nstatus: IN_REVIEW\ntrigger: HUMAN_ACTION\n"
+                        + "title: Build a spider solitaire game\ndescription:\nOnly one card suit.\n"
+                        + "acceptance_criteria:\nThe game must run in a browser.\ninstruction:\nFix the game");
+        var en = manager.prepare(enSession.id(), enRun.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+        assertThat(en).anyMatch(value -> value.contains("<language>") && value.contains("English"));
+
+        // Stage subtask wrapper stays Chinese.
+        var stageSession = store.createSession("lang-stage-task", "alpha");
+        var stageRun = store.createRun(stageSession.id(),
+                "执行协作阶段任务，不要创建新的阶段任务。\n阶段任务：Stage 1 需求分析\n目标：输出需求规格\n"
+                        + "验收标准：完整覆盖规则\n在当前共享工作区完成交付。");
+        var stage = manager.prepare(stageSession.id(), stageRun.id()).request().messages().stream()
+                .map(message -> message.content()).toList();
+        assertThat(stage).anyMatch(value -> value.contains("<language>") && value.contains("中文"));
+    }
 
     @Test
     void injectsLatestReflectionIntoContext() throws Exception {

@@ -96,13 +96,16 @@ public class CollaborationController {
     @GetMapping("/tasks/{id}")
     @Operation(summary = "Read a collaboration task workspace",
             description = "Returns the task, child tasks, comments with explicit mentions, activity timeline, and linked Runs. "
+                    + "Comments and activities are aggregated across the whole task tree (root plus every staged descendant), so the "
+                    + "view includes every sub-agent's final replies, parallel deliveries and stage barrier events; each entry keeps "
+                    + "its owning taskId so clients can render the stage and agent context. "
                     + "Each linked Run includes agentProfileId, modelProfileId, modelProfileName, and the latest recorded modelName "
                     + "so clients can render the actual executor and model without exposing internal identifiers. "
                     + "Runs and workspace files include all staged descendants, while stages remain nested under their root task. "
                     + "Final delivery files are only marked ready after the root task reaches DONE.")
     public Map<String, Object> task(@PathVariable String id) {
         CollaborationStore.CollaborationTask task = requireTask(id);
-        List<CommentView> comments = store.comments(id).stream()
+        List<CommentView> comments = store.treeComments(id).stream()
                 .map(comment -> new CommentView(comment, store.mentions(comment.id()))).toList();
         List<CollaborationStore.TaskRun> runs = store.taskTreeRuns(id);
         Map<String, SqliteRuntimeStore.WorkspaceFile> workspaceFiles = new LinkedHashMap<>();
@@ -115,7 +118,7 @@ public class CollaborationController {
         return Map.of("task", task,
                 "children", store.descendantTasks(id),
                 "comments", comments,
-                "activities", store.activities(id, 0, 1_000),
+                "activities", store.treeActivities(id, 0, 1_000),
                 "runs", runs,
                 "finalDeliveryReady", finalDeliveryReady,
                 "workspaceFiles", List.copyOf(workspaceFiles.values()));
@@ -163,7 +166,8 @@ public class CollaborationController {
     @Operation(summary = "Post a collaboration comment",
             description = "Explicit mentions create idempotent Agent triggers. A plain reply to an Agent comment routes back to that Agent. "
                     + "The comment and mention remain durable; when the mentioned target already has an active Run in this task tree, "
-                    + "no parallel Run is created and the comment is delivered into that Run's session so the running Agent reacts to it on its next turn.")
+                    + "no parallel Run is created and the comment is delivered into that Run's session so the running Agent reacts to it on its next turn. "
+                    + "A comment (MENTION/REPLY) that starts a new Run on a task awaiting acceptance (IN_REVIEW) moves the task back to IN_PROGRESS until the rework Run finishes and is re-submitted.")
     public CollaborationService.CommentResult comment(@PathVariable String id,
             @Valid @RequestBody CommentRequest request) {
         requireTask(id);
