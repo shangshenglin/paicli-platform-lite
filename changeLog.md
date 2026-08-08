@@ -108,6 +108,13 @@
 - 变更：Micrometer 指标 `paicli.prd.tasks.started/completed/failed`、`paicli.prd.nodes.failed`、`paicli.prd.validation.failures`、`paicli.prd.questions.blocking`、`paicli.prd.stage.duration`（Token 不重复统计，仍由绑定 Run 的 model_usage 汇总）。
 - 验证：新增 6 个测试类共 22 项（`PrdAnalysisStoreTest`、`PrdAnalysisToolProviderTest`、`PrdAnalysisCoordinatorTest`（全链路 + barrier + 澄清恢复）、`PrdAnalysisValidatorTest`、`PrdAnalysisRendererTest`、`PrdAnalysisPlanHandoffServiceTest`、`PrdAnalysisEvaluationTest`），覆盖持久化/幂等/权限/并发/恢复/确定性校验/澄清/产物/Plan Handoff，全部通过；`node --check app.js` 通过。数据库迁移 40 与 OpenAPI（`PrdAnalysisController` @Operation）已同步，`README.md`、`docs/architecture.md`、`docs/phases.md` 已更新；`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用（本功能不改变 Sandbox 执行边界，产品站未展示 PRD 分析能力）。
 
+### 修复：Console PRD 分析前端资源缓存导致无法新建/查看详情
+
+- 变更：`index.html` 中 `app.js`/`app.css` 的缓存版本号升级为 `v=20260808-prd-analysis-1`。此前版本号停留在 20260804/20260805，浏览器会继续使用不含 PRD 代码的旧 `app.js`，导致点击「PRD 分析」无响应、无法新建任务、详情页打不开。
+- 变更：修复详情页节点重试传参（`renderPrdNodes` 改用任务级 `taskId`，不再读取节点对象上不存在的 `taskId`）。
+- 思路：前端静态资源用固定版本号做缓存破坏；新增功能后必须同步 bump，否则旧脚本仍在浏览器缓存里。
+- 验证：临时实例冒烟——`GET /` 返回新版本号且含 `prdAnalysis` 按钮；`GET /app.js?v=20260808-prd-analysis-1` 包含 `openPrdAnalysis`/`renderPrdDetail` 与事件绑定；REST 创建/列表/详情接口返回正常结构；`node --check app.js` 通过。
+
 
 ### 修复：阶段“空交付”被误判为已交付 + 失败 Leader 未把已交付任务送回重新验收
 

@@ -5771,7 +5771,7 @@ function renderPrdDetail(detail) {
   const content = element('div', 'prd-tab-content');
   const sections = {
     '概览': () => renderPrdOverview(detail),
-    '节点': () => renderPrdNodes(detail.nodes || [], detail.nodeStats || {}),
+    '节点': () => renderPrdNodes(detail.nodes || [], detail.nodeStats || {}, task.id),
     'Findings': () => renderPrdFindings(detail.findings || []),
     '问题': () => renderPrdQuestions(detail.questions || []),
     '校验': () => renderPrdChecks(detail.checks || []),
@@ -5813,7 +5813,7 @@ function renderPrdOverview(detail) {
   return wrap;
 }
 
-function renderPrdNodes(nodes, stats) {
+function renderPrdNodes(nodes, stats, taskId) {
   const wrap = element('div', 'managed-list');
   wrap.append(element('div', 'managed-item', '节点统计：' + JSON.stringify(stats)));
   nodes.forEach(node => {
@@ -5821,7 +5821,7 @@ function renderPrdNodes(nodes, stats) {
       node.clientKey + ' · ' + node.status + ' · chunks ' + node.startChunkOrdinal + '-' + node.endChunkOrdinal
       + (node.domainTags && node.domainTags !== '[]' ? ' · tags ' + node.domainTags : ''));
     if (node.status === 'FAILED') {
-      actionButton(item, '重试', () => retryPrdNode(node.id, node.taskId));
+      actionButton(item, '重试', () => retryPrdNode(node.id, taskId));
     }
     wrap.append(item);
   });
