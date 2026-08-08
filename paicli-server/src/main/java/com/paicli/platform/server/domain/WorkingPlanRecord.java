@@ -13,7 +13,12 @@ public record WorkingPlanRecord(
         String objective,
         String itemsJson,
         String status,
+        String completionJson,
         Instant createdAt,
         Instant updatedAt
 ) {
+    public WorkingPlanRecord(String runId, int revision, String objective, String itemsJson,
+                             String status, Instant createdAt, Instant updatedAt) {
+        this(runId, revision, objective, itemsJson, status, null, createdAt, updatedAt);
+    }
 }

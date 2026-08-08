@@ -9,6 +9,8 @@ import com.paicli.platform.common.ApprovalStatus;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.AcceptedSnapshotRecord;
 import com.paicli.platform.server.domain.ApprovalRecord;
+import com.paicli.platform.server.domain.CompletionMode;
+import com.paicli.platform.server.domain.RunCompletionContractRecord;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.DeliveryRecord;
 import com.paicli.platform.server.domain.MessageRecord;
@@ -307,12 +309,24 @@ public class SqliteRuntimeStore {
                     "items_json TEXT NOT NULL, status TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_working_plans", "completion_json", "TEXT");
             statement.execute("CREATE TABLE IF NOT EXISTS run_reflections (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, failure_class TEXT NOT NULL, " +
                     "diagnosis TEXT NOT NULL, decision TEXT NOT NULL, plan_patch_json TEXT NOT NULL, " +
                     "evidence_refs_json TEXT NOT NULL, next_action TEXT NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_run_reflections_run ON run_reflections(run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_completion_contracts (" +
+                    "run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, " +
+                    "requires_workspace_change INTEGER NOT NULL DEFAULT 0, " +
+                    "requires_tests INTEGER NOT NULL DEFAULT 0, " +
+                    "required_test_families_json TEXT NOT NULL DEFAULT '[]', " +
+                    "write_scope_json TEXT NOT NULL DEFAULT '[]', " +
+                    "done_criteria_json TEXT NOT NULL DEFAULT '[]', " +
+                    "source TEXT NOT NULL, reason TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_completion_contracts_run ON run_completion_contracts(run_id)");
             statement.execute("CREATE TABLE IF NOT EXISTS collaboration_task_digests (" +
                     "task_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, digest_json TEXT NOT NULL, " +
                     "last_activity_id TEXT, updated_at TEXT NOT NULL)");
@@ -3257,8 +3271,8 @@ public class SqliteRuntimeStore {
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? Optional.of(new WorkingPlanRecord(rs.getString("run_id"),
                         rs.getInt("revision"), rs.getString("objective"), rs.getString("items_json"),
-                        rs.getString("status"), instant(rs.getString("created_at")),
-                        instant(rs.getString("updated_at")))) : Optional.empty();
+                        rs.getString("status"), rs.getString("completion_json"),
+                        instant(rs.getString("created_at")), instant(rs.getString("updated_at")))) : Optional.empty();
             }
         } catch (SQLException e) {
             throw failure("read latest working plan", e);
@@ -3267,20 +3281,28 @@ public class SqliteRuntimeStore {
 
     /** Upserts the latest working plan of a Run; every save bumps the revision. */
     public WorkingPlanRecord saveWorkingPlan(String runId, String objective, String itemsJson, String status) {
+        return saveWorkingPlan(runId, objective, itemsJson, status, null);
+    }
+
+    /** Upserts the latest working plan of a Run; every save bumps the revision. */
+    public WorkingPlanRecord saveWorkingPlan(String runId, String objective, String itemsJson, String status,
+                                             String completionJson) {
         String now = Instant.now().toString();
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try (PreparedStatement ps = connection.prepareStatement(
-                    "INSERT INTO run_working_plans(run_id,revision,objective,items_json,status,created_at,updated_at) "
-                            + "VALUES(?,1,?,?,?,?,?) "
+                    "INSERT INTO run_working_plans(run_id,revision,objective,items_json,status,completion_json,created_at,updated_at) "
+                            + "VALUES(?,1,?,?,?,?,?,?) "
                             + "ON CONFLICT(run_id) DO UPDATE SET revision=revision+1,objective=excluded.objective,"
-                            + "items_json=excluded.items_json,status=excluded.status,updated_at=excluded.updated_at")) {
+                            + "items_json=excluded.items_json,status=excluded.status,"
+                            + "completion_json=excluded.completion_json,updated_at=excluded.updated_at")) {
                 ps.setString(1, runId);
                 ps.setString(2, objective == null ? "" : objective);
                 ps.setString(3, itemsJson == null ? "[]" : itemsJson);
                 ps.setString(4, status == null ? "ACTIVE" : status);
-                ps.setString(5, now);
+                ps.setString(5, completionJson);
                 ps.setString(6, now);
+                ps.setString(7, now);
                 ps.executeUpdate();
             }
             connection.commit();
@@ -3288,6 +3310,66 @@ public class SqliteRuntimeStore {
             throw failure("save working plan", e);
         }
         return latestWorkingPlan(runId).orElseThrow();
+    }
+
+    /** Saves a completion contract; a later save may only strengthen the contract. */
+    public RunCompletionContractRecord saveCompletionContract(RunCompletionContractRecord contract) {
+        String now = Instant.now().toString();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO run_completion_contracts(run_id,mode,requires_workspace_change,requires_tests," +
+                            "required_test_families_json,write_scope_json,done_criteria_json,source,reason,created_at,updated_at) "
+                            + "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                            + "ON CONFLICT(run_id) DO UPDATE SET mode=excluded.mode," +
+                            "requires_workspace_change=excluded.requires_workspace_change," +
+                            "requires_tests=excluded.requires_tests," +
+                            "required_test_families_json=excluded.required_test_families_json," +
+                            "write_scope_json=excluded.write_scope_json," +
+                            "done_criteria_json=excluded.done_criteria_json," +
+                            "source=excluded.source,reason=excluded.reason,updated_at=excluded.updated_at")) {
+                ps.setString(1, contract.runId());
+                ps.setString(2, contract.mode().name());
+                ps.setInt(3, contract.requiresWorkspaceChange() ? 1 : 0);
+                ps.setInt(4, contract.requiresTests() ? 1 : 0);
+                ps.setString(5, listJson(contract.requiredTestFamilies()));
+                ps.setString(6, listJson(contract.writeScope()));
+                ps.setString(7, listJson(contract.doneCriteria()));
+                ps.setString(8, contract.source() == null ? "" : contract.source());
+                ps.setString(9, contract.reason() == null ? "" : contract.reason());
+                ps.setString(10, now);
+                ps.setString(11, now);
+                ps.executeUpdate();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            throw failure("save completion contract", e);
+        }
+        return completionContract(contract.runId()).orElseThrow();
+    }
+
+    public Optional<RunCompletionContractRecord> completionContract(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_completion_contracts WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapCompletionContract(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read completion contract", e);
+        }
+    }
+
+    private RunCompletionContractRecord mapCompletionContract(ResultSet rs) throws SQLException {
+        return new RunCompletionContractRecord(rs.getString("run_id"),
+                CompletionMode.valueOf(rs.getString("mode")),
+                rs.getInt("requires_workspace_change") == 1,
+                rs.getInt("requires_tests") == 1,
+                jsonList(rs.getString("required_test_families_json")),
+                jsonList(rs.getString("write_scope_json")),
+                jsonList(rs.getString("done_criteria_json")),
+                rs.getString("source"), rs.getString("reason"),
+                instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
     }
 
     public Optional<ReflectionRecord> latestReflection(String runId) {
@@ -5050,6 +5132,28 @@ public class SqliteRuntimeStore {
 
     private static void addDistinct(List<String> values, String value) {
         if (value != null && !value.isBlank() && !values.contains(value)) values.add(value);
+    }
+
+    private String listJson(List<String> values) {
+        try {
+            return mapper.writeValueAsString(values == null ? List.of() : values);
+        } catch (Exception e) {
+            return "[]";
+        }
+    }
+
+    private List<String> jsonList(String value) {
+        try {
+            JsonNode node = mapper.readTree(value == null || value.isBlank() ? "[]" : value);
+            if (node == null || !node.isArray()) return List.of();
+            List<String> result = new ArrayList<>();
+            node.forEach(item -> {
+                if (item != null && item.isTextual() && !item.asText().isBlank()) result.add(item.asText().trim());
+            });
+            return List.copyOf(result);
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private static String boundedText(String value, int limit) {
