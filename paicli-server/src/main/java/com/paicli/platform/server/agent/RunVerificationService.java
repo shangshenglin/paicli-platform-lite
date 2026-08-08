@@ -80,12 +80,12 @@ public class RunVerificationService {
                 || (last.error() != null && !last.error().isBlank());
     }
 
+    /**
+     * Precise test classification; `mvn compile`, `./check-status.sh` and other
+     * build/check commands are no longer treated as tests.
+     */
     private static boolean isTestCommand(String arguments) {
-        if (arguments == null) return false;
-        String lower = arguments.toLowerCase();
-        return lower.contains("test") || lower.contains("mvn") || lower.contains("pytest")
-                || lower.contains("node --test") || lower.contains("npm test") || lower.contains("go test")
-                || lower.contains("jest") || lower.contains("vitest") || lower.contains("check");
+        return TestCommandClassifier.isTestCommand(arguments);
     }
 
     public enum Status { PASS, REPAIRABLE, NEEDS_USER, HARD_FAIL }
