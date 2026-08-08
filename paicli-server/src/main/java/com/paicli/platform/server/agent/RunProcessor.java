@@ -477,7 +477,8 @@ public class RunProcessor {
                     materialized.artifact() == null ? "" : materialized.artifact().id());
             completedEvent.put("content", materialized.modelContent());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
-                    materialized.modelContent(), null, json(result.metadata()), json(completedEvent), run.currentStep());
+                    materialized.modelContent(), null, json(evidenceMetadata(result)),
+                    json(completedEvent), run.currentStep());
             if (!committed) return;
             if (isActiveAgentResult(call, materialized.modelContent())
                     || "create_collaboration_subtask".equals(call.toolName())) {
@@ -498,7 +499,8 @@ public class RunProcessor {
             failedEvent.put("durationMs", result.durationMs());
             failedEvent.put("error", result.error());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, false,
-                    observation, result.error(), json(result.metadata()), json(failedEvent), run.currentStep());
+                    observation, result.error(), json(evidenceMetadata(result)),
+                    json(failedEvent), run.currentStep());
             if (!committed) return;
             auditService.record("tool.failed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
@@ -506,6 +508,12 @@ public class RunProcessor {
         }
     }
 
+    /** Persisted structured metadata for evidence: tool metadata plus real duration. */
+    private static Map<String, Object> evidenceMetadata(ToolResult result) {
+        Map<String, Object> value = new LinkedHashMap<>(result.metadata());
+        value.put("durationMs", result.durationMs());
+        return value;
+    }
     /** PR4: executes the leading read-only prefix in parallel, committing outcomes in model order. */
     private void executeReadOnlyBatch(RunRecord run, List<ToolCallRecord> calls) throws Exception {
         if (!store.markRunStatus(run.id(), RunStatus.WAITING_TOOL)) return;
@@ -552,7 +560,7 @@ public class RunProcessor {
                     materialized.artifact() == null ? "" : materialized.artifact().id());
             completedEvent.put("content", materialized.modelContent());
             store.commitToolMessage(run.sessionId(), run.id(), call, true,
-                    materialized.modelContent(), null, json(result.metadata()), json(completedEvent));
+                    materialized.modelContent(), null, json(evidenceMetadata(result)), json(completedEvent));
             auditService.record("tool.completed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "result", result.content()));
             return isActiveAgentResult(call, materialized.modelContent())
@@ -569,7 +577,7 @@ public class RunProcessor {
         failedEvent.put("durationMs", result.durationMs());
         failedEvent.put("error", result.error());
         store.commitToolMessage(run.sessionId(), run.id(), call, false,
-                observation, result.error(), json(result.metadata()), json(failedEvent));
+                observation, result.error(), json(evidenceMetadata(result)), json(failedEvent));
         auditService.record("tool.failed", run.id(), call.id(), Map.of(
                 "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
         recordToolFailureReflection(run, call, result);
