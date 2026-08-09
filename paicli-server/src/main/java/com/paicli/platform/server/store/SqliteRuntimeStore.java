@@ -5218,6 +5218,7 @@ public class SqliteRuntimeStore {
             item.put("tool_call_id", mutation.toolCallId());
             item.put("workspace_changed", mutation.workspaceChanged());
             item.put("ordinal", mutation.ordinal());
+            item.put("changed_paths", mutation.changedPaths());
             if (mutation.command() != null && !mutation.command().isBlank()) item.put("command", mutation.command());
             return item;
         }).toList());

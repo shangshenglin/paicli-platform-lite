@@ -887,10 +887,10 @@ npm run dev
 
 ## Completion Contract 与真实证据
 
-只读批处理不包含会等待外部子 Run 的 `get_agent_result`；该调用必须先单独持久化并停放父 Run，避免后续只读调用把父 Run 的唤醒状态覆盖。测试/构建命令产生的 `target/`、缓存和报告 fingerprint 不会移动最后一次源码变更边界；只有分类为明确直接写入的 `execute_command` 才能以 workspace mutation 作为工作区变更证据，未知命令默认不可信。含 `||`、`;`、管道，或测试 invocation 后还有命令的复合命令不生成 TestEvidence，也不能降级为 mutation evidence。
+只读批处理不包含会等待外部子 Run 的 `get_agent_result`；该调用必须先单独持久化并停放父 Run，避免后续只读调用把父 Run 的唤醒状态覆盖。测试/构建命令产生的 `target/`、缓存和报告 fingerprint 不会移动最后一次源码变更边界；`execute_command` 必须同时具备高置信度直接写入分类、非生成物 `changedPaths` 和 workspace fingerprint 变化，才能形成 mutation evidence。未知命令、`rm/cp/mv/touch` 等泛文件操作及含 `||`、`;`、管道的复合命令不能降级满足 mutation 合同。
 
 需要修改工作区或运行测试的 Run 会在启动时建立持久化 Completion Contract。最终完成必须由真实 ToolCall、Workspace、Artifact 和 TestEvidence 满足该合同；预算耗尽但合同未满足时，Run 会进入 `FAILED`，不会以 `COMPLETED` 表示部分结果。
 
-`RunEvidenceCollector` 是 AgentResult、Run 验证和协作交付清单的统一证据来源：`write_file` 使用写入前后 SHA-256，Sandbox `execute_command` 记录 workspace fingerprint；`BuildCommandClassifier` 采用 `GENERATED_ONLY / POTENTIAL_PRODUCT_MUTATION / UNTRUSTED_OR_UNKNOWN` 三态，只有高置信度直接写入命令可把 fingerprint 变化提升为业务 mutation。Maven、Gradle、npm、dotnet、webpack、tsc 等生成型命令及未知命令均不能单独满足 `MUTATION_REQUIRED`。测试命令按真实 executable invocation、任务与 no-run/exclude 参数分类；`tool_result` 仅用于工具输出外置，不计入业务交付 Artifact。Deferred `get_agent_result` 会在 SQLite 事务中同时停放 ToolCall 和父 Run，避免 Lost Wakeup。
+`RunEvidenceCollector` 是 AgentResult、Run 验证和协作交付清单的统一证据来源：`write_file` 使用写入前后 SHA-256，Sandbox `execute_command` 记录 workspace fingerprint、`changedPaths` 和截断标记；`BuildCommandClassifier` 采用 `GENERATED_ONLY / POTENTIAL_PRODUCT_MUTATION / UNTRUSTED_OR_UNKNOWN` 三态，只有可归属的非生成物路径可把高置信度直接写入命令提升为业务 mutation。Maven、Gradle、npm、dotnet、webpack、tsc 等生成型命令及未知/泛文件命令均不能单独满足 `MUTATION_REQUIRED`。测试命令按真实 executable invocation、任务与 no-run/exclude 参数分类，并统一拒绝 help/version 元命令；`tool_result` 仅用于工具输出外置，不计入业务交付 Artifact。Deferred `get_agent_result` 会在 SQLite 事务中同时停放 ToolCall 和父 Run，避免 Lost Wakeup。
 
-AgentResult v2 同时输出 `workspace_mutations`：当高置信度直接写入命令明确改变工作区但无法可靠知道具体文件时，父 AgentResultValidator 使用该结构化证据完成合同校验，不伪造 `files_changed` 路径。每条 TestEvidence 带 `ordinal` 和 `after_last_mutation`；父子校验均按 family 只接受最后 mutation 之后的最新结果，后续失败会覆盖早先通过。安装 Jest、Gradle dry-run、换行、后台 `&`、skip/no-run 或 exclude 参数不会生成 TestEvidence；人工 `ACCEPT` 的快照聚合根任务与全部阶段的 DeliveryManifest。
+AgentResult v2 同时输出 `workspace_mutations.changed_paths`：`writeScope` 非空时，Child Verifier 与 Parent AgentResultValidator 都要求存在可归属路径，且全部路径落入 scope（支持目录及 `/**` 子路径）；无路径、截断路径或 scope 外路径均不能完成 scoped contract。每条 TestEvidence 带 `ordinal` 和 `after_last_mutation`；父子校验均按 family 只接受最后 mutation 之后的最新结果，后续失败会覆盖早先通过。安装 Jest、Gradle dry-run、Go/Cargo/.NET help、pytest help/version、换行、后台 `&`、skip/no-run 或 exclude 参数不会生成 TestEvidence；人工 `ACCEPT` 的快照聚合根任务与全部阶段的 DeliveryManifest。

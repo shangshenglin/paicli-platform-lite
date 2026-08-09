@@ -54,13 +54,16 @@ public final class RunEvidenceDecoder {
                     }
                     // A whole-workspace fingerprint cannot distinguish source edits from target/,
                     // caches, reports, or effects hidden inside an untrusted shell expression.
-                    // Promote it only for a high-confidence direct product mutation command.
+                    // A command mutation is usable only when the sandbox also attributes at least
+                    // one non-generated changed path to a high-confidence direct write command.
+                    List<String> changedPaths = productChangedPaths(call);
                     if (workspaceChanged(call)
                             && BuildCommandClassifier.classify(command.command())
-                            == BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION) {
+                            == BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION
+                            && !changedPaths.isEmpty()) {
                         lastMutationOrdinal = ordinal;
                         workspaceMutations.add(new WorkspaceMutationEvidence(
-                                "execute_command", call.id(), command.command(), true, ordinal));
+                                "execute_command", call.id(), command.command(), true, changedPaths, ordinal));
                     }
                 }
                 continue;
@@ -120,6 +123,33 @@ public final class RunEvidenceDecoder {
         if (value == null) value = metadata.get("workspace_changed");
         if (value == null && !"write_file".equals(call.toolName())) value = metadata.get("changed");
         return Boolean.TRUE.equals(value);
+    }
+
+    private List<String> productChangedPaths(ToolCall call) {
+        Map<String, Object> metadata = metadata(call);
+        if (Boolean.TRUE.equals(metadata.get("changedPathsTruncated"))
+                || Boolean.TRUE.equals(metadata.get("changed_paths_truncated"))) return List.of();
+        Object raw = metadata.get("changedPaths");
+        if (raw == null) raw = metadata.get("changed_paths");
+        if (!(raw instanceof List<?> values)) return List.of();
+        return values.stream().map(RunEvidenceDecoder::text).filter(java.util.Objects::nonNull)
+                .map(RunEvidenceDecoder::normalizePath)
+                .filter(path -> !path.isBlank() && !generatedPath(path))
+                .distinct().toList();
+    }
+
+    private static boolean generatedPath(String path) {
+        String normalized = path.toLowerCase(java.util.Locale.ROOT);
+        return normalized.equals("target") || normalized.startsWith("target/")
+                || normalized.equals("build") || normalized.startsWith("build/")
+                || normalized.equals("dist") || normalized.startsWith("dist/")
+                || normalized.equals("out") || normalized.startsWith("out/")
+                || normalized.equals("bin") || normalized.startsWith("bin/")
+                || normalized.equals("obj") || normalized.startsWith("obj/")
+                || normalized.equals("node_modules") || normalized.startsWith("node_modules/")
+                || normalized.equals("coverage") || normalized.startsWith("coverage/")
+                || normalized.equals(".gradle") || normalized.startsWith(".gradle/")
+                || normalized.equals(".cache") || normalized.startsWith(".cache/");
     }
 
     private List<ArtifactEvidence> artifacts(List<ArtifactRecord> values) {

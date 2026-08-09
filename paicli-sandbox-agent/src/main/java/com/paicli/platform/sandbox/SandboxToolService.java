@@ -13,7 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -27,6 +29,7 @@ public class SandboxToolService {
     private static final int DEFAULT_COMMAND_OUTPUT_BYTES = 256 * 1024;
     private static final int MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
     private static final int MAX_ENVIRONMENT_ENTRIES = 32;
+    private static final int MAX_CHANGED_PATHS = 512;
     private static final Pattern ENVIRONMENT_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
     private static final Set<String> BLOCKED_ENVIRONMENT_PARTS = Set.of(
             "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH");
@@ -137,7 +140,7 @@ public class SandboxToolService {
             throw new IllegalArgumentException("maxOutputBytes must be between 1024 and "
                     + MAX_COMMAND_OUTPUT_BYTES);
         }
-        String beforeWorkspaceSha256 = workspaceFingerprint();
+        WorkspaceSnapshot beforeWorkspace = workspaceSnapshot();
         ProcessBuilder builder = new ProcessBuilder(shell.command(command)).directory(cwd.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
@@ -163,14 +166,14 @@ public class SandboxToolService {
             return ToolResult.failure(request.toolCallId(),
                     "Command timed out after " + timeoutSeconds + "s", elapsed(start),
                     commandMetadata(shell, cwd, null, true, stdout, stderr,
-                            beforeWorkspaceSha256, workspaceFingerprint()));
+                            beforeWorkspace, workspaceSnapshot()));
         }
         join(stdoutDrainer);
         join(stderrDrainer);
         String content = commandOutput(process.exitValue(), shell, cwd, stdout, stderr);
         return ToolResult.success(request.toolCallId(), content, elapsed(start),
                 commandMetadata(shell, cwd, process.exitValue(), false, stdout, stderr,
-                        beforeWorkspaceSha256, workspaceFingerprint()));
+                        beforeWorkspace, workspaceSnapshot()));
     }
 
     private static Thread drainer(java.io.InputStream input, OutputStream output, String name) {
@@ -276,8 +279,9 @@ public class SandboxToolService {
 
     private Map<String, Object> commandMetadata(CommandShell shell, Path cwd, Integer exitCode,
                                                 boolean timedOut, BoundedOutputBuffer stdout,
-                                                BoundedOutputBuffer stderr, String beforeWorkspaceSha256,
-                                                String afterWorkspaceSha256) {
+                                                BoundedOutputBuffer stderr, WorkspaceSnapshot beforeWorkspace,
+                                                WorkspaceSnapshot afterWorkspace) {
+        WorkspaceDelta delta = beforeWorkspace.delta(afterWorkspace);
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("shell", shell.value());
         value.put("cwd", relativeCwd(cwd));
@@ -286,34 +290,59 @@ public class SandboxToolService {
         value.put("stdoutBytes", stdout.receivedBytes());
         value.put("stderrBytes", stderr.receivedBytes());
         value.put("outputTruncated", stdout.truncated() || stderr.truncated());
-        value.put("workspaceChanged", !beforeWorkspaceSha256.isBlank()
-                && !afterWorkspaceSha256.isBlank()
-                && !java.util.Objects.equals(beforeWorkspaceSha256, afterWorkspaceSha256));
-        value.put("beforeWorkspaceSha256", beforeWorkspaceSha256);
-        value.put("afterWorkspaceSha256", afterWorkspaceSha256);
+        value.put("workspaceChanged", !beforeWorkspace.fingerprint().isBlank()
+                && !afterWorkspace.fingerprint().isBlank()
+                && !java.util.Objects.equals(beforeWorkspace.fingerprint(), afterWorkspace.fingerprint()));
+        value.put("beforeWorkspaceSha256", beforeWorkspace.fingerprint());
+        value.put("afterWorkspaceSha256", afterWorkspace.fingerprint());
+        value.put("changedPaths", delta.paths());
+        value.put("changedPathsTruncated", delta.truncated());
         return Map.copyOf(value);
     }
 
-    /** Content fingerprint used only to prove that execute_command changed the workspace. */
-    private String workspaceFingerprint() {
+    /** Content hashes give the server path attribution without trusting command text. */
+    private WorkspaceSnapshot workspaceSnapshot() {
         try {
             var digest = java.security.MessageDigest.getInstance("SHA-256");
+            Map<String, String> files = new LinkedHashMap<>();
             try (var paths = Files.walk(workspace)) {
                 for (Path path : paths.filter(Files::isRegularFile)
                         .sorted(Comparator.comparing(Path::toString)).toList()) {
-                    digest.update(workspace.relativize(path).toString().getBytes(StandardCharsets.UTF_8));
+                    String relative = workspace.relativize(path).toString().replace('\\', '/');
+                    digest.update(relative.getBytes(StandardCharsets.UTF_8));
+                    var fileDigest = java.security.MessageDigest.getInstance("SHA-256");
                     try (var input = Files.newInputStream(path)) {
                         byte[] buffer = new byte[8192];
                         int read;
-                        while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+                        while ((read = input.read(buffer)) >= 0) {
+                            digest.update(buffer, 0, read);
+                            fileDigest.update(buffer, 0, read);
+                        }
                     }
+                    files.put(relative, java.util.HexFormat.of().formatHex(fileDigest.digest()));
                 }
             }
-            return java.util.HexFormat.of().formatHex(digest.digest());
+            return new WorkspaceSnapshot(java.util.HexFormat.of().formatHex(digest.digest()), Map.copyOf(files));
         } catch (Exception e) {
-            return "";
+            return new WorkspaceSnapshot("", Map.of());
         }
     }
+
+    private record WorkspaceSnapshot(String fingerprint, Map<String, String> files) {
+        private WorkspaceDelta delta(WorkspaceSnapshot after) {
+            LinkedHashSet<String> allPaths = new LinkedHashSet<>();
+            allPaths.addAll(files.keySet());
+            allPaths.addAll(after.files.keySet());
+            List<String> changed = allPaths.stream()
+                    .filter(path -> !java.util.Objects.equals(files.get(path), after.files.get(path)))
+                    .sorted().toList();
+            return new WorkspaceDelta(changed.size() > MAX_CHANGED_PATHS
+                    ? List.copyOf(changed.subList(0, MAX_CHANGED_PATHS)) : changed,
+                    changed.size() > MAX_CHANGED_PATHS);
+        }
+    }
+
+    private record WorkspaceDelta(List<String> paths, boolean truncated) { }
 
     private String relativeCwd(Path cwd) {
         String relative = workspace.relativize(cwd).toString();

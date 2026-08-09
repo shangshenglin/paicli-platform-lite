@@ -61,6 +61,7 @@ public class DeliveryManifestService {
                     value.put("toolCallId", mutation.toolCallId());
                     value.put("workspaceChanged", mutation.workspaceChanged());
                     value.put("ordinal", mutation.ordinal());
+                    value.put("changedPaths", mutation.changedPaths());
                     if (mutation.command() != null && !mutation.command().isBlank()) {
                         value.put("command", mutation.command());
                     }

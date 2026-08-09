@@ -76,9 +76,9 @@ paicli:
 Windows Docker Desktop/WSL2 端到端验收已于 2026-07-03 通过，覆盖审批恢复、经 `docker exec` 的认证执行、工作区持久化、SSE 重放、容器自动清理、无宿主端口的内部网络、只读根文件系统、`cap-drop ALL` 以及 CPU、内存和 PID 限额。
 ### Completion Evidence 约束
 
-Sandbox 返回的 `execute_command` workspace fingerprint 只说明命令前后工作区是否变化；Server 以三态分类器区分生成型命令、明确直接产品写入和未知/不可信命令。只有明确直接写入加 fingerprint 变化会进入 workspace mutation evidence；测试/构建生成物、未知脚本以及包含 `||`、`;`、管道等不安全操作符的复合命令都不能单独满足 mutation 合同。
+Sandbox 返回的 `execute_command` metadata 同时包含 workspace fingerprint、`changedPaths` 和 `changedPathsTruncated`。Server 以三态分类器区分生成型命令、明确直接产品写入和未知/不可信命令；只有明确直接写入、未截断的非生成物 `changedPaths` 与 fingerprint 变化同时存在才会进入 workspace mutation evidence。测试/构建生成物、未知脚本、`rm/cp/mv/touch` 等泛文件操作以及包含 `||`、`;`、管道等不安全操作符的复合命令都不能单独满足 mutation 合同。
 
 - `write_file` 必须在写入前计算 `beforeSha256`，写入后计算 `afterSha256`；只有两者不同才报告 `changed=true`。
-- `execute_command` 的结果除退出码、超时、Shell 和 cwd 外，还记录执行前后的 workspace fingerprint 与 `workspaceChanged`，供 Server 判断命令是否产生真实副作用。
+- `execute_command` 的结果除退出码、超时、Shell 和 cwd 外，还记录执行前后的 workspace fingerprint、`workspaceChanged`、文件级 `changedPaths` 和截断标记，供 Server 将副作用归属到真实路径。
 - Server 不从 stdout 关键词推断完成或测试；只有 `TestCommandClassifier` 识别的高置信度测试 invocation 才生成 TestEvidence。外置工具输出的 `tool_result` Artifact 不属于业务交付物。
-- 当高置信度直接写入命令的 workspace fingerprint 明确变化但无法可靠列出具体文件时，Server/AgentResult 使用 `workspace_mutations` 传递变更证据，不伪造 `files_changed`；未知命令默认不可信。换行、单独 `&`、skip/no-run、Gradle dry-run 与 Node 依赖安装不计为测试 invocation。
+- 当高置信度直接写入命令的 workspace fingerprint 明确变化且 `changedPaths` 未截断时，Server/AgentResult 使用带 `changed_paths` 的 `workspace_mutations` 传递变更证据，不伪造 `files_changed`；未知命令和无路径/截断路径默认不可信。非空 Completion Contract writeScope 要求所有归属路径均落入 scope。换行、单独 `&`、skip/no-run、Gradle dry-run、CLI help/version 与 Node 依赖安装不计为测试 invocation。

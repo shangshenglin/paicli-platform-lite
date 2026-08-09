@@ -4,6 +4,13 @@
 
 ## 2026-08-09
 
+### Completion Evidence merge-readiness：writeScope 执行与命令路径归属
+
+- 变更：Docker Sandbox 的 `execute_command` metadata 新增 `changedPaths/changedPathsTruncated`，以命令前后 workspace snapshot 的内容哈希归属新增、修改和删除路径。`RunEvidenceDecoder` 只在高置信度直接写入命令、未截断的非生成物 changed paths 和 workspace fingerprint 同时成立时创建 command mutation；`rm/cp/mv/touch` 等泛文件操作不再单独形成 mutation evidence。`RunVerificationService` 与 Parent `AgentResultValidator` 执行 `CompletionContract.writeScope`：scope 非空时必须存在可归属路径，且全部路径位于文件或目录（含 `/**`）scope 内；无路径、截断或 scope 外路径均拒绝。AgentResult、SQLite terminal envelope 和 DeliveryManifest 同步输出 changed paths。
+- 变更（测试分类）：增加通用 CLI 元命令拒绝（`help`、`--help/-h`、`--version/-V`），Go/Cargo/.NET 仅识别第一个子命令为 `test`，避免 `go help test`、`cargo help test`、`dotnet help test`、`pytest --version` 等形成 false PASS。
+- 思路：whole-workspace fingerprint 只能证明发生副作用，不能证明任务要求的产品路径已修改；`writeScope` 作为持久化 Completion Contract 必须成为可执行约束。数据库 Schema、REST API、配置、启动方式和产品站能力未变，OpenAPI 与产品站文档不适用；Sandbox metadata 语义改变，已同步 README、架构、阶段和 Docker Sandbox 文档。
+- 验证：定向 Maven 回归 92 项通过，覆盖 scope 内/外与无路径 command mutation、非生成物 path attribution、`rm target` 拒绝、CLI help/version 和真实子命令判定。全量 `clean test` 的 57 份 Surefire 报告共记录 305 项通过（外层 120 秒命令时限在报告完成后返回），随后全量 `test` 以退出码 0 完成；全量 `clean package` 成功（common 3 + server 298 + sandbox-agent 4 = 305），可执行 JAR 已打包。提交前已执行 `git diff --check` 与文档覆盖复核。
+
 ### Completion Evidence 最终复核：三态命令证据与测试最新状态对齐
 
 - 变更：`BuildCommandClassifier` 从 boolean 构建白名单升级为 `GENERATED_ONLY / POTENTIAL_PRODUCT_MUTATION / UNTRUSTED_OR_UNKNOWN` 三态；`RunEvidenceDecoder` 只允许高置信度直接写入命令的 workspace fingerprint 形成 `workspace_mutations`，Maven/Gradle/npm/dotnet/webpack/tsc 生成物、未知脚本及 `||`/`;`/管道等不安全复合命令均不能降级满足 `MUTATION_REQUIRED`。`TestCommandClassifier` 仅接受真实 Node executable invocation，拒绝安装 Jest 与 Gradle `--dry-run/-m`；`AgentResultValidator` 按 family 选择最后 mutation 后 ordinal 最大的测试结果，后续失败会覆盖早先通过。

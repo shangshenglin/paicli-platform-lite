@@ -39,6 +39,7 @@ public final class TestCommandClassifier {
         String executable = basename(tokens.get(0));
         String executableLower = executable.toLowerCase(Locale.ROOT);
         List<String> args = tokens.subList(1, tokens.size());
+        if (metaInvocation(args)) return Optional.empty();
 
         if (isMaven(executableLower)) {
             if (args.stream().anyMatch(TestCommandClassifier::skipsTests)) return Optional.empty();
@@ -75,13 +76,13 @@ public final class TestCommandClassifier {
             return args.stream().anyMatch(TestCommandClassifier::pytestNoRunArgument)
                     ? Optional.empty() : Optional.of(TestFamily.PYTEST);
         }
-        if (executableLower.equals("go") && hasArgument(args, "test")) return Optional.of(TestFamily.GO_TEST);
-        if (executableLower.equals("node") && hasArgument(args, "--test")) return Optional.of(TestFamily.NODE_TEST);
-        if (executableLower.equals("cargo") && hasArgument(args, "test")) {
+        if (executableLower.equals("go") && subcommand(args, "test")) return Optional.of(TestFamily.GO_TEST);
+        if (executableLower.equals("node") && subcommand(args, "--test")) return Optional.of(TestFamily.NODE_TEST);
+        if (executableLower.equals("cargo") && subcommand(args, "test")) {
             return args.stream().anyMatch(arg -> arg.equalsIgnoreCase("--no-run"))
                     ? Optional.empty() : Optional.of(TestFamily.CARGO);
         }
-        if (executableLower.equals("dotnet") && hasArgument(args, "test")) {
+        if (executableLower.equals("dotnet") && subcommand(args, "test")) {
             return args.stream().anyMatch(TestCommandClassifier::dotnetNoRunArgument)
                     ? Optional.empty() : Optional.of(TestFamily.DOTNET);
         }
@@ -204,8 +205,18 @@ public final class TestCommandClassifier {
         return jestNoRunArgument(argument) || vitestNoRunArgument(argument);
     }
 
-    private static boolean hasArgument(List<String> args, String expected) {
-        return args.stream().anyMatch(arg -> arg.equalsIgnoreCase(expected));
+    private static boolean metaInvocation(List<String> args) {
+        if (args.isEmpty()) return false;
+        String first = args.get(0).toLowerCase(Locale.ROOT);
+        if (first.equals("help") || first.equals("--help") || first.equals("-h")
+                || first.equals("--version") || first.equals("-v")) return true;
+        return args.stream().anyMatch(argument -> argument.equalsIgnoreCase("--help")
+                || argument.equalsIgnoreCase("-h") || argument.equalsIgnoreCase("--version")
+                || argument.equalsIgnoreCase("-v"));
+    }
+
+    private static boolean subcommand(List<String> args, String expected) {
+        return !args.isEmpty() && args.get(0).equalsIgnoreCase(expected);
     }
 
     private static boolean testScript(String value) {

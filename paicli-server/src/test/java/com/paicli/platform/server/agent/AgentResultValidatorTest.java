@@ -172,4 +172,21 @@ class AgentResultValidatorTest {
         assertThat(validation.issues())
                 .contains("contract requires tests but no passing test evidence for required families");
     }
+
+    @Test
+    void scopedContractRejectsOutOfScopeOrUnattributedMutationEvidence() {
+        RunCompletionContractRecord contract = new RunCompletionContractRecord("child-1",
+                CompletionMode.MUTATION_REQUIRED, true, false, List.of(), List.of("src/"), List.of(),
+                "test", "test", Instant.now(), Instant.now());
+        Map<String, Object> outside = Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of(Map.of("path", "README.md")), "tests", List.of());
+        assertThat(validator.validate(child(), contract, outside).valid()).isFalse();
+
+        Map<String, Object> unattributed = Map.of(
+                "status", "COMPLETED", "summary", "done", "files_changed", List.of(),
+                "workspace_mutations", List.of(Map.of("source", "execute_command",
+                        "changed_paths", List.of())), "tests", List.of());
+        assertThat(validator.validate(child(), contract, unattributed).valid()).isFalse();
+    }
 }

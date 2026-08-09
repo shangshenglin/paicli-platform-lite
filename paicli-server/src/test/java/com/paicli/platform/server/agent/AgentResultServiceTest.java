@@ -102,8 +102,8 @@ class AgentResultServiceTest {
                 "{\"command\":\"sed -i 's/old/new/' config.ini\"}", "child-command");
         store.markToolRunning(command.id());
         store.commitToolOutcome(delegation.childSessionId(), childRunId, command, true, "ok", null,
-                "{\"shell\":\"bash\",\"exitCode\":0,\"timedOut\":false,\"workspaceChanged\":true}",
-                "{\"shell\":\"bash\",\"exitCode\":0,\"workspaceChanged\":true}", 0);
+                "{\"shell\":\"bash\",\"exitCode\":0,\"timedOut\":false,\"workspaceChanged\":true,\"changedPaths\":[\"config.ini\"]}",
+                "{\"shell\":\"bash\",\"exitCode\":0,\"workspaceChanged\":true,\"changedPaths\":[\"config.ini\"]}", 0);
         store.markRunStatus(childRunId, com.paicli.platform.common.RunStatus.WAITING_MODEL);
         store.appendMessage(delegation.childSessionId(), childRunId, "assistant", "脚本已修改配置并完成");
         store.completeRun(childRunId);
@@ -119,6 +119,7 @@ class AgentResultServiceTest {
             Map<?, ?> mutation = (Map<?, ?>) item;
             assertThat(mutation.get("source")).isEqualTo("execute_command");
             assertThat(mutation.get("command")).isEqualTo("sed -i 's/old/new/' config.ini");
+            assertThat(mutation.get("changed_paths")).isEqualTo(List.of("config.ini"));
         });
         assertThat(validation.valid()).isTrue();
     }

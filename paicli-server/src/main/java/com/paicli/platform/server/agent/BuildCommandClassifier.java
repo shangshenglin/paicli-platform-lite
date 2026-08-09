@@ -19,8 +19,6 @@ public final class BuildCommandClassifier {
 
     private static final Set<String> READ_ONLY_COMMANDS = Set.of(
             "cd", "pwd", "ls", "dir", "echo", "true", "false", "which", "where", "type");
-    private static final Set<String> DIRECT_MUTATION_COMMANDS = Set.of(
-            "cp", "copy", "mv", "move", "rm", "del", "mkdir", "md", "touch", "patch");
 
     private BuildCommandClassifier() { }
 
@@ -69,13 +67,13 @@ public final class BuildCommandClassifier {
                     ? Classification.POTENTIAL_PRODUCT_MUTATION : Classification.GENERATED_ONLY;
         }
         if (READ_ONLY_COMMANDS.contains(executable)) return Classification.GENERATED_ONLY;
-        if (DIRECT_MUTATION_COMMANDS.contains(executable)) return Classification.POTENTIAL_PRODUCT_MUTATION;
         if (executable.equals("sed") && arguments.stream().anyMatch(BuildCommandClassifier::inPlaceOption)) {
             return Classification.POTENTIAL_PRODUCT_MUTATION;
         }
         if (executable.equals("perl") && arguments.stream().anyMatch(BuildCommandClassifier::perlInPlaceOption)) {
             return Classification.POTENTIAL_PRODUCT_MUTATION;
         }
+        if (executable.equals("patch")) return Classification.POTENTIAL_PRODUCT_MUTATION;
         if (executable.equals("git")) return gitClassification(arguments);
         return Classification.UNTRUSTED_OR_UNKNOWN;
     }

@@ -70,6 +70,7 @@ public class RunVerificationService {
                 missing.add("a real workspace mutation recorded by this Run");
             } else {
                 passed.add("real workspace change evidence");
+                verifyWriteScope(contract.writeScope(), evidence, passed, failed, missing);
             }
         }
 
@@ -122,6 +123,25 @@ public class RunVerificationService {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    private static void verifyWriteScope(List<String> writeScope, RunEvidence evidence,
+                                         List<String> passed, List<String> failed, List<String> missing) {
+        if (writeScope == null || writeScope.isEmpty()) return;
+        List<String> paths = evidence.attributedMutationPaths();
+        if (paths.isEmpty()) {
+            failed.add("task write scope requires attributable changed file paths");
+            missing.add("a changed file path within write scope " + writeScope);
+            return;
+        }
+        List<String> outside = paths.stream()
+                .filter(path -> !WriteScopeMatcher.inScope(path, writeScope)).toList();
+        if (!outside.isEmpty()) {
+            failed.add("workspace mutation changed paths outside the contract write scope");
+            missing.add("all changed paths within write scope " + writeScope + "; outside=" + outside);
+            return;
+        }
+        passed.add("workspace mutation paths match write scope");
     }
 
     private static String json(Object value) {

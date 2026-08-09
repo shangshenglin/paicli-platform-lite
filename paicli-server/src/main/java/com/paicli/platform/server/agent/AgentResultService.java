@@ -67,7 +67,8 @@ public class AgentResultService {
                 "name", artifact.name(),
                 "relative_path", artifact.relativePath(),
                 "sha256", artifact.sha256())).toList());
-        value.put("completion_contract", Map.of("mode", contract.mode().name()));
+        value.put("completion_contract", Map.of("mode", contract.mode().name(),
+                "write_scope", contract.writeScope()));
         List<String> evidenceRefs = new java.util.ArrayList<>();
         evidenceRefs.add("run_status:" + child.status().name());
         if (!evidence.filesChanged().isEmpty()) {
@@ -94,6 +95,7 @@ public class AgentResultService {
         value.put("tool_call_id", mutation.toolCallId());
         value.put("workspace_changed", mutation.workspaceChanged());
         value.put("ordinal", mutation.ordinal());
+        value.put("changed_paths", mutation.changedPaths());
         if (mutation.command() != null && !mutation.command().isBlank()) {
             value.put("command", mutation.command());
         }

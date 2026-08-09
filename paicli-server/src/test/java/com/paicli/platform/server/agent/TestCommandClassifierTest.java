@@ -103,4 +103,16 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("pnpm dlx jest")).contains(TestFamily.JEST);
         assertThat(TestCommandClassifier.classify("dotnet test")).contains(TestFamily.DOTNET);
     }
+
+    @Test
+    void helpAndVersionModesNeverBecomeTestEvidence() {
+        assertThat(TestCommandClassifier.classify("go help test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("cargo help test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("dotnet help test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("pytest --help")).isEmpty();
+        assertThat(TestCommandClassifier.classify("pytest --version")).isEmpty();
+        assertThat(TestCommandClassifier.classify("go test --help")).isEmpty();
+        assertThat(TestCommandClassifier.classify("cargo test --version")).isEmpty();
+        assertThat(TestCommandClassifier.classify("dotnet test --help")).isEmpty();
+    }
 }

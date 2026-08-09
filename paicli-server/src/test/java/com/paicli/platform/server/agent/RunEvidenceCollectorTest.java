@@ -157,6 +157,33 @@ class RunEvidenceCollectorTest {
         assertThat(evidence.testStatusAfterLastMutation()).containsEntry(TestFamily.MAVEN, TestStatus.PASSED);
     }
 
+    @Test
+    void commandMutationRequiresAttributableNonGeneratedPaths() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, new ObjectMapper());
+
+        var session = store.createSession("evidence5", "project-e");
+        var run = store.createRun(session.id(), "modify config through command");
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"sed -i 's/old/new/' config/app.yml\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true,\"changedPaths\":[\"config/app.yml\"]}", 0);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"sed -i 's/old/new/' target/report.txt\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true,\"changedPaths\":[\"target/report.txt\"]}", 1);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"rm -rf target\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true,\"changedPaths\":[\"target/A.class\"]}", 2);
+
+        RunEvidence evidence = collector.collect(run.id());
+
+        assertThat(evidence.workspaceMutations()).singleElement().satisfies(mutation ->
+                assertThat(mutation.changedPaths()).containsExactly("config/app.yml"));
+        assertThat(evidence.lastMutationOrdinal()).isZero();
+    }
+
     private static void execute(SqliteRuntimeStore store, String sessionId, String runId,
                                 String toolName, String arguments, String metadata, int step) {
         store.markRunStatus(runId, com.paicli.platform.common.RunStatus.WAITING_TOOL);

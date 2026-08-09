@@ -32,6 +32,10 @@ class BuildCommandClassifierTest {
                 .isEqualTo(BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION);
         assertThat(BuildCommandClassifier.classify("python modify_config.py"))
                 .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
+        assertThat(BuildCommandClassifier.classify("rm -rf target"))
+                .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
+        assertThat(BuildCommandClassifier.classify("touch foo.txt"))
+                .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
     }
 
     @Test

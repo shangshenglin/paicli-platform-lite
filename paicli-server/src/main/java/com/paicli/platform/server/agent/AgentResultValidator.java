@@ -77,6 +77,10 @@ public class AgentResultValidator {
         if (contract.requiresWorkspaceChange() && !filesChanged && !workspaceMutations) {
             issues.add("contract requires workspace change but files_changed and workspace_mutations are empty");
         }
+        if (contract.requiresWorkspaceChange() && !contract.writeScope().isEmpty()
+                && !writeScopeSatisfied(value, contract.writeScope())) {
+            issues.add("contract write scope requires attributable changed paths within scope");
+        }
         if (contract.requiresTests() && !hasRequiredTestPass(value, contract.requiredTestFamilies())) {
             issues.add("contract requires tests but no passing test evidence for required families");
         }
@@ -96,6 +100,22 @@ public class AgentResultValidator {
 
     private static boolean hasPassedTestEvidence(Map<String, Object> value) {
         return latestTestsAfterMutation(value).values().stream().anyMatch(AgentResultValidator::passed);
+    }
+
+    private static boolean writeScopeSatisfied(Map<String, Object> value, List<String> writeScope) {
+        List<String> paths = new ArrayList<>();
+        for (Object file : asList(value.get("files_changed"))) {
+            if (file instanceof Map<?, ?> map && map.get("path") != null) {
+                paths.add(String.valueOf(map.get("path")));
+            }
+        }
+        for (Object mutation : asList(value.get("workspace_mutations"))) {
+            if (!(mutation instanceof Map<?, ?> map)) continue;
+            for (Object path : asList(map.get("changed_paths"))) {
+                if (path != null) paths.add(String.valueOf(path));
+            }
+        }
+        return !paths.isEmpty() && paths.stream().allMatch(path -> WriteScopeMatcher.inScope(path, writeScope));
     }
 
     /** Mirror child verification: only the latest post-mutation result for each family is authoritative. */

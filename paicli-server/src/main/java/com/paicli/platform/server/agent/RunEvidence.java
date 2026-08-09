@@ -36,9 +36,19 @@ public record RunEvidence(
         return filesChanged.stream().map(FileEvidence::path).distinct().toList();
     }
 
+    /** Paths attributable to product mutations, including command metadata when available. */
+    public List<String> attributedMutationPaths() {
+        return java.util.stream.Stream.concat(
+                        filesChanged.stream().map(FileEvidence::path),
+                        workspaceMutations.stream().flatMap(mutation -> mutation.changedPaths().stream()))
+                .filter(path -> path != null && !path.isBlank())
+                .distinct()
+                .toList();
+    }
+
     /** True when a real write or an explicit non-test command mutation was recorded. */
     public boolean hasWorkspaceMutationEvidence() {
-        return !filesChanged.isEmpty() || !workspaceMutations.isEmpty() || lastMutationOrdinal >= 0;
+        return !filesChanged.isEmpty() || !workspaceMutations.isEmpty();
     }
 
     /** Artifacts that represent business output, excluding tool-output externalization. */

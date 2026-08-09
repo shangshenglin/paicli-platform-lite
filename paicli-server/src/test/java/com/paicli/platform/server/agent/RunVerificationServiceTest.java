@@ -25,6 +25,11 @@ class RunVerificationServiceTest {
                 "test", "test", Instant.now(), Instant.now());
     }
 
+    private static RunCompletionContractRecord scopedContract(List<String> scope) {
+        return new RunCompletionContractRecord("run-1", CompletionMode.MUTATION_REQUIRED, true, false,
+                List.of(), scope, List.of(), "test", "test", Instant.now(), Instant.now());
+    }
+
     private static RunEvidence evidence(int lastMutationOrdinal, TestEvidence... tests) {
         return new RunEvidence(List.of(), List.of(), List.of(tests), List.of(), lastMutationOrdinal);
     }
@@ -63,8 +68,31 @@ class RunVerificationServiceTest {
     @Test
     void mutationRequiredPassesWithExplicitCommandMutation() {
         var result = service.verify(run(), "done", contract(CompletionMode.MUTATION_REQUIRED, true, false, List.of()),
-                new RunEvidence(List.of(), List.of(), List.of(), List.of(), 0));
+                new RunEvidence(List.of(), List.of(), List.of(), List.of(),
+                        List.of(new WorkspaceMutationEvidence("execute_command", "tool-1",
+                                "sed -i", true, List.of("config/app.yml"), 0)), 0));
         assertThat(result.status()).isEqualTo(RunVerificationService.Status.PASS);
+    }
+
+    @Test
+    void scopedMutationRequiresAttributablePathsInsideTheWriteScope() {
+        var inScope = service.verify(run(), "done", scopedContract(List.of("src/backend/")),
+                evidenceWithFile("src/backend/A.java", 0));
+        assertThat(inScope.status()).isEqualTo(RunVerificationService.Status.PASS);
+
+        var outside = service.verify(run(), "done", scopedContract(List.of("src/backend/")),
+                evidenceWithFile("README.md", 0));
+        assertThat(outside.status()).isEqualTo(RunVerificationService.Status.REPAIRABLE);
+        assertThat(outside.failedCriteria())
+                .contains("workspace mutation changed paths outside the contract write scope");
+
+        var unattributedCommand = service.verify(run(), "done", scopedContract(List.of("config/")),
+                new RunEvidence(List.of(), List.of(), List.of(), List.of(),
+                        List.of(new WorkspaceMutationEvidence("execute_command", "tool-1",
+                                "sed -i", true, List.of(), 0)), 0));
+        assertThat(unattributedCommand.status()).isEqualTo(RunVerificationService.Status.REPAIRABLE);
+        assertThat(unattributedCommand.failedCriteria())
+                .contains("task write scope requires attributable changed file paths");
     }
 
     @Test
