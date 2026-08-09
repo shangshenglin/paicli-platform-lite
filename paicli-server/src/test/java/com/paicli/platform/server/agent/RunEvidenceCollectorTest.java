@@ -100,10 +100,25 @@ class RunEvidenceCollectorTest {
                 "{\"command\":\"mvn compile\"}", "{\"exitCode\":0,\"workspaceChanged\":true}", 0);
         execute(store, session.id(), run.id(), "execute_command",
                 "{\"command\":\"./check-status.sh\"}", "{\"exitCode\":0}", 1);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"mvn compile && echo done\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 2);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"mvn compile || true\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 3);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"mvn test || true\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 4);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"dotnet build\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 5);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"python modify_config.py\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 6);
 
         RunEvidence evidence = collector.collect(run.id());
 
-        assertThat(evidence.commandsExecuted()).hasSize(2);
+        assertThat(evidence.commandsExecuted()).hasSize(7);
         assertThat(evidence.tests()).isEmpty();
         assertThat(evidence.workspaceMutations()).isEmpty();
         assertThat(evidence.lastMutationOrdinal()).isEqualTo(-1);

@@ -84,37 +84,49 @@ public class AgentResultValidator {
     }
 
     private static boolean hasRequiredTestPass(Map<String, Object> value, List<String> requiredFamilies) {
-        List<?> tests = asList(value.get("tests"));
-        Map<String, Boolean> passedByFamily = new LinkedHashMap<>();
-        for (Object test : tests) {
-            if (!(test instanceof Map<?, ?> map)) continue;
-            if (!passedAfterLastMutation(map)) continue;
-            Object family = map.get("family");
-            String familyName = family == null ? "" : String.valueOf(family);
-            passedByFamily.put(familyName, true);
-        }
+        Map<String, Map<?, ?>> latestByFamily = latestTestsAfterMutation(value);
         if (requiredFamilies == null || requiredFamilies.isEmpty()) {
-            return !passedByFamily.isEmpty();
+            return latestByFamily.values().stream().anyMatch(AgentResultValidator::passed);
         }
         for (String family : requiredFamilies) {
-            if (!Boolean.TRUE.equals(passedByFamily.get(family))) return false;
+            if (!passed(latestByFamily.get(family))) return false;
         }
         return true;
     }
 
     private static boolean hasPassedTestEvidence(Map<String, Object> value) {
-        for (Object test : asList(value.get("tests"))) {
-            if (test instanceof Map<?, ?> map && passedAfterLastMutation(map)) {
-                return true;
-            }
-        }
-        return false;
+        return latestTestsAfterMutation(value).values().stream().anyMatch(AgentResultValidator::passed);
     }
 
-    /** A parent must not accept a passing test that predates the child's last mutation. */
-    private static boolean passedAfterLastMutation(Map<?, ?> test) {
-        return "PASSED".equals(String.valueOf(test.get("status")))
-                && Boolean.TRUE.equals(test.get("after_last_mutation"));
+    /** Mirror child verification: only the latest post-mutation result for each family is authoritative. */
+    private static Map<String, Map<?, ?>> latestTestsAfterMutation(Map<String, Object> value) {
+        Map<String, Map<?, ?>> latestByFamily = new LinkedHashMap<>();
+        Map<String, Integer> ordinalByFamily = new LinkedHashMap<>();
+        for (Object test : asList(value.get("tests"))) {
+            if (!(test instanceof Map<?, ?> map)
+                    || !Boolean.TRUE.equals(map.get("after_last_mutation"))) continue;
+            Object family = map.get("family");
+            Integer ordinal = integer(map.get("ordinal"));
+            if (family == null || ordinal == null) continue;
+            String familyName = String.valueOf(family);
+            Integer current = ordinalByFamily.get(familyName);
+            if (current == null || ordinal >= current) {
+                ordinalByFamily.put(familyName, ordinal);
+                latestByFamily.put(familyName, map);
+            }
+        }
+        return latestByFamily;
+    }
+
+    private static boolean passed(Map<?, ?> test) {
+        return test != null && "PASSED".equals(String.valueOf(test.get("status")));
+    }
+
+    private static Integer integer(Object value) {
+        if (value instanceof Number number) return number.intValue();
+        if (value == null) return null;
+        try { return Integer.valueOf(String.valueOf(value)); }
+        catch (NumberFormatException ignored) { return null; }
     }
 
     private static List<CriterionResult> criterionStatuses(List<String> doneCriteria, Map<String, Object> value) {

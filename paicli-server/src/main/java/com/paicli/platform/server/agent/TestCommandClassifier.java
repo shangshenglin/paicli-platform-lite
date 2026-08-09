@@ -51,13 +51,15 @@ public final class TestCommandClassifier {
                     ? Optional.of(TestFamily.GRADLE) : Optional.empty();
         }
         if (isNodePackageManager(executableLower)) {
-            if (args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)) return Optional.empty();
-            if (args.stream().anyMatch(arg -> arg.equalsIgnoreCase("jest"))) {
-                return Optional.of(TestFamily.JEST);
+            if (packageManagerJestInvocation(args)) {
+                return args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)
+                        ? Optional.empty() : Optional.of(TestFamily.JEST);
             }
-            return npmTestInvocation(args) ? Optional.of(TestFamily.NPM) : Optional.empty();
+            if (!npmTestInvocation(args)) return Optional.empty();
+            return args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.NPM);
         }
-        if (executableLower.equals("npx") && args.stream().anyMatch(arg -> arg.equalsIgnoreCase("jest"))) {
+        if (executableLower.equals("npx") && npxJestInvocation(args)) {
             return args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)
                     ? Optional.empty() : Optional.of(TestFamily.JEST);
         }
@@ -124,6 +126,7 @@ public final class TestCommandClassifier {
     private static boolean gradleSkipsTests(List<String> args) {
         for (int index = 0; index < args.size(); index++) {
             String argument = args.get(index).toLowerCase(Locale.ROOT);
+            if (argument.equals("--dry-run") || argument.equals("-m")) return true;
             if ((argument.equals("-x") || argument.equals("--exclude-task")) && index + 1 < args.size()
                     && testTask(args.get(index + 1))) return true;
             if (argument.startsWith("-x=") || argument.startsWith("--exclude-task=")) {
@@ -144,14 +147,33 @@ public final class TestCommandClassifier {
     }
 
     private static boolean npmTestInvocation(List<String> args) {
-        for (int i = 0; i < args.size(); i++) {
-            String argument = args.get(i).toLowerCase(Locale.ROOT);
-            if (argument.equals("test") || argument.startsWith("test:")) return true;
-            if (argument.equals("run") && i + 1 < args.size()
-                    && (args.get(i + 1).equalsIgnoreCase("test")
-                    || args.get(i + 1).toLowerCase(Locale.ROOT).startsWith("test:"))) return true;
+        if (args.isEmpty()) return false;
+        String operation = args.get(0).toLowerCase(Locale.ROOT);
+        if (testScriptName(operation)) return true;
+        return operation.equals("run") && args.size() > 1 && testScriptName(args.get(1));
+    }
+
+    private static boolean packageManagerJestInvocation(List<String> args) {
+        if (args.size() < 2) return false;
+        String operation = args.get(0).toLowerCase(Locale.ROOT);
+        if (!operation.equals("exec") && !operation.equals("dlx")) return false;
+        int executableIndex = args.get(1).equals("--") ? 2 : 1;
+        return executableIndex < args.size() && args.get(executableIndex).equalsIgnoreCase("jest");
+    }
+
+    private static boolean npxJestInvocation(List<String> args) {
+        if (args.isEmpty()) return false;
+        int index = 0;
+        while (index < args.size()
+                && (args.get(index).equalsIgnoreCase("--yes") || args.get(index).equalsIgnoreCase("-y"))) {
+            index++;
         }
-        return false;
+        return index < args.size() && args.get(index).equalsIgnoreCase("jest");
+    }
+
+    private static boolean testScriptName(String value) {
+        String script = value.toLowerCase(Locale.ROOT);
+        return script.equals("test") || script.startsWith("test:");
     }
 
     private static boolean skipsTests(String argument) {

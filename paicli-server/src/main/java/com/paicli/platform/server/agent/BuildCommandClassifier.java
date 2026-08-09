@@ -3,31 +3,101 @@ package com.paicli.platform.server.agent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
- * Conservative classifier for commands whose normal workspace effects are
- * generated build output, not evidence of a product/source mutation.
+ * Conservative command classifier used when the sandbox can prove only that
+ * the workspace fingerprint changed, but cannot attribute changed paths.
+ * Unknown commands are deliberately not promoted to product mutation evidence.
  */
 public final class BuildCommandClassifier {
+    public enum Classification {
+        GENERATED_ONLY,
+        POTENTIAL_PRODUCT_MUTATION,
+        UNTRUSTED_OR_UNKNOWN
+    }
+
+    private static final Set<String> READ_ONLY_COMMANDS = Set.of(
+            "cd", "pwd", "ls", "dir", "echo", "true", "false", "which", "where", "type");
+    private static final Set<String> DIRECT_MUTATION_COMMANDS = Set.of(
+            "cp", "copy", "mv", "move", "rm", "del", "mkdir", "md", "touch", "patch");
+
     private BuildCommandClassifier() { }
 
-    public static boolean producesGeneratedOutput(String command) {
-        if (command == null || command.isBlank() || hasUnsafeOperator(command)) return false;
+    public static Classification classify(String command) {
+        if (command == null || command.isBlank() || hasUnsafeOperator(command)) {
+            return Classification.UNTRUSTED_OR_UNKNOWN;
+        }
         List<String> segments = segments(command);
-        if (segments.isEmpty()) return false;
-        List<String> tokens = new ArrayList<>(tokens(segments.get(segments.size() - 1)));
+        if (segments.isEmpty()) return Classification.UNTRUSTED_OR_UNKNOWN;
+
+        boolean productMutation = false;
+        for (String segment : segments) {
+            Classification classification = classifySegment(tokens(segment));
+            if (classification == Classification.UNTRUSTED_OR_UNKNOWN) return classification;
+            if (classification == Classification.POTENTIAL_PRODUCT_MUTATION) productMutation = true;
+        }
+        return productMutation ? Classification.POTENTIAL_PRODUCT_MUTATION : Classification.GENERATED_ONLY;
+    }
+
+    private static Classification classifySegment(List<String> rawTokens) {
+        List<String> tokens = new ArrayList<>(rawTokens);
         while (!tokens.isEmpty() && tokens.get(0).matches("[A-Za-z_][A-Za-z0-9_]*=.*")) tokens.remove(0);
-        if (tokens.isEmpty()) return false;
+        if (tokens.isEmpty()) return Classification.UNTRUSTED_OR_UNKNOWN;
+
         String executable = basename(tokens.get(0)).toLowerCase(Locale.ROOT);
         List<String> arguments = tokens.subList(1, tokens.size()).stream()
                 .map(value -> value.toLowerCase(Locale.ROOT)).toList();
-        if (isMaven(executable)) return arguments.stream().anyMatch(BuildCommandClassifier::mavenBuildGoal);
-        if (isGradle(executable)) return arguments.stream().anyMatch(BuildCommandClassifier::gradleBuildTask);
-        if (isNodePackageManager(executable)) return nodeBuildInvocation(arguments);
-        if (executable.equals("cargo")) return arguments.stream().anyMatch(argument -> argument.equals("build"));
-        if (executable.equals("go")) return arguments.stream().anyMatch(argument -> argument.equals("build"));
-        if (executable.equals("make")) return true;
-        return false;
+
+        if (isMaven(executable) || isGradle(executable) || isNodePackageManager(executable)) {
+            return Classification.GENERATED_ONLY;
+        }
+        if (Set.of("make", "ninja", "cmake", "webpack", "tsc").contains(executable)) {
+            return Classification.GENERATED_ONLY;
+        }
+        if (executable.equals("cargo")) {
+            return arguments.contains("fmt") && !arguments.contains("--check")
+                    ? Classification.POTENTIAL_PRODUCT_MUTATION : Classification.GENERATED_ONLY;
+        }
+        if (executable.equals("go")) return Classification.GENERATED_ONLY;
+        if (executable.equals("gofmt")) {
+            return arguments.contains("-w")
+                    ? Classification.POTENTIAL_PRODUCT_MUTATION : Classification.GENERATED_ONLY;
+        }
+        if (executable.equals("dotnet")) {
+            return arguments.contains("format") && !arguments.contains("--verify-no-changes")
+                    ? Classification.POTENTIAL_PRODUCT_MUTATION : Classification.GENERATED_ONLY;
+        }
+        if (READ_ONLY_COMMANDS.contains(executable)) return Classification.GENERATED_ONLY;
+        if (DIRECT_MUTATION_COMMANDS.contains(executable)) return Classification.POTENTIAL_PRODUCT_MUTATION;
+        if (executable.equals("sed") && arguments.stream().anyMatch(BuildCommandClassifier::inPlaceOption)) {
+            return Classification.POTENTIAL_PRODUCT_MUTATION;
+        }
+        if (executable.equals("perl") && arguments.stream().anyMatch(BuildCommandClassifier::perlInPlaceOption)) {
+            return Classification.POTENTIAL_PRODUCT_MUTATION;
+        }
+        if (executable.equals("git")) return gitClassification(arguments);
+        return Classification.UNTRUSTED_OR_UNKNOWN;
+    }
+
+    private static Classification gitClassification(List<String> arguments) {
+        if (arguments.isEmpty()) return Classification.GENERATED_ONLY;
+        String operation = arguments.get(0);
+        if (Set.of("status", "diff", "log", "show", "branch", "rev-parse", "ls-files").contains(operation)) {
+            return Classification.GENERATED_ONLY;
+        }
+        if (Set.of("apply", "mv", "rm").contains(operation) && !arguments.contains("--check")) {
+            return Classification.POTENTIAL_PRODUCT_MUTATION;
+        }
+        return Classification.UNTRUSTED_OR_UNKNOWN;
+    }
+
+    private static boolean inPlaceOption(String argument) {
+        return argument.equals("-i") || (argument.startsWith("-i") && argument.length() > 2);
+    }
+
+    private static boolean perlInPlaceOption(String argument) {
+        return argument.startsWith("-") && argument.substring(1).contains("i");
     }
 
     private static boolean isMaven(String executable) {
@@ -41,30 +111,6 @@ public final class BuildCommandClassifier {
 
     private static boolean isNodePackageManager(String executable) {
         return executable.equals("npm") || executable.equals("pnpm") || executable.equals("yarn");
-    }
-
-    private static boolean mavenBuildGoal(String argument) {
-        return argument.equals("clean") || argument.equals("compile") || argument.equals("test-compile")
-                || argument.equals("package") || argument.equals("install") || argument.equals("deploy")
-                || argument.equals("site") || argument.equals("javadoc:javadoc");
-    }
-
-    private static boolean gradleBuildTask(String argument) {
-        return argument.equals("clean") || argument.equals("build") || argument.equals("assemble")
-                || argument.equals("classes") || argument.equals("testclasses") || argument.equals("jar")
-                || argument.equals("war") || argument.equals("bootjar");
-    }
-
-    private static boolean nodeBuildInvocation(List<String> arguments) {
-        for (int index = 0; index < arguments.size(); index++) {
-            String argument = arguments.get(index);
-            if (argument.equals("build") || argument.equals("compile")) return true;
-            if (argument.equals("run") && index + 1 < arguments.size()) {
-                String task = arguments.get(index + 1);
-                if (task.equals("build") || task.equals("compile")) return true;
-            }
-        }
-        return false;
     }
 
     private static String basename(String value) {

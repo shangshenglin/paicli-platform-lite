@@ -8,17 +8,41 @@ class BuildCommandClassifierTest {
 
     @Test
     void recognizesKnownGeneratedOutputCommands() {
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("mvn compile")).isTrue();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("./mvnw package")).isTrue();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("./gradlew assemble")).isTrue();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("npm run build")).isTrue();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("cargo build")).isTrue();
+        assertThat(BuildCommandClassifier.classify("mvn process-resources"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("./gradlew :server:assemble"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("npm run bundle"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("dotnet build"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("webpack"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("tsc"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
     }
 
     @Test
-    void leavesUnknownCommandsAvailableAsExplicitMutationEvidence() {
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("python modify_config.py")).isFalse();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("git status")).isFalse();
-        assertThat(BuildCommandClassifier.producesGeneratedOutput("mvn compile; echo done")).isFalse();
+    void recognizesOnlyExplicitDirectProductMutationCommands() {
+        assertThat(BuildCommandClassifier.classify("sed -i 's/old/new/' config.ini"))
+                .isEqualTo(BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION);
+        assertThat(BuildCommandClassifier.classify("git apply fix.patch"))
+                .isEqualTo(BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION);
+        assertThat(BuildCommandClassifier.classify("gofmt -w main.go"))
+                .isEqualTo(BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION);
+        assertThat(BuildCommandClassifier.classify("python modify_config.py"))
+                .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
+    }
+
+    @Test
+    void compoundOrUnknownCommandsCannotBePromotedByWorkspaceFingerprint() {
+        assertThat(BuildCommandClassifier.classify("mvn compile && echo done"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
+        assertThat(BuildCommandClassifier.classify("mvn compile || true"))
+                .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
+        assertThat(BuildCommandClassifier.classify("mvn test || true"))
+                .isEqualTo(BuildCommandClassifier.Classification.UNTRUSTED_OR_UNKNOWN);
+        assertThat(BuildCommandClassifier.classify("git status"))
+                .isEqualTo(BuildCommandClassifier.Classification.GENERATED_ONLY);
     }
 }

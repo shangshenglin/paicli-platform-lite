@@ -77,6 +77,11 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("jest --listTests")).isEmpty();
         assertThat(TestCommandClassifier.classify("npx jest --listTests")).isEmpty();
         assertThat(TestCommandClassifier.classify("npm test -- --listTests")).isEmpty();
+        assertThat(TestCommandClassifier.classify("npm install jest")).isEmpty();
+        assertThat(TestCommandClassifier.classify("pnpm add jest")).isEmpty();
+        assertThat(TestCommandClassifier.classify("yarn add jest")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew test --dry-run")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew test -m")).isEmpty();
         assertThat(TestCommandClassifier.classify("vitest --list")).isEmpty();
         assertThat(TestCommandClassifier.classify("dotnet test --list-tests")).isEmpty();
         assertThat(TestCommandClassifier.classify("cd server && mvn test")).contains(TestFamily.MAVEN);
@@ -93,6 +98,9 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("gradle checkstyleMain")).isEmpty();
         assertThat(TestCommandClassifier.classify("pnpm test")).contains(TestFamily.NPM);
         assertThat(TestCommandClassifier.classify("yarn test")).contains(TestFamily.NPM);
+        assertThat(TestCommandClassifier.classify("npm exec jest")).contains(TestFamily.JEST);
+        assertThat(TestCommandClassifier.classify("pnpm exec jest")).contains(TestFamily.JEST);
+        assertThat(TestCommandClassifier.classify("pnpm dlx jest")).contains(TestFamily.JEST);
         assertThat(TestCommandClassifier.classify("dotnet test")).contains(TestFamily.DOTNET);
     }
 }

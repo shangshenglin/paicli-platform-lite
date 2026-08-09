@@ -52,10 +52,12 @@ public final class RunEvidenceDecoder {
                         tests.add(new TestEvidence(call.id(), family, command.command(),
                                 testStatus(command), command.exitCode(), ordinal));
                     }
-                    // A workspace fingerprint sees target/, caches and reports. Known build commands
-                    // must never turn that generated output into product mutation evidence.
-                    if (family == null && workspaceChanged(call)
-                            && !BuildCommandClassifier.producesGeneratedOutput(command.command())) {
+                    // A whole-workspace fingerprint cannot distinguish source edits from target/,
+                    // caches, reports, or effects hidden inside an untrusted shell expression.
+                    // Promote it only for a high-confidence direct product mutation command.
+                    if (workspaceChanged(call)
+                            && BuildCommandClassifier.classify(command.command())
+                            == BuildCommandClassifier.Classification.POTENTIAL_PRODUCT_MUTATION) {
                         lastMutationOrdinal = ordinal;
                         workspaceMutations.add(new WorkspaceMutationEvidence(
                                 "execute_command", call.id(), command.command(), true, ordinal));

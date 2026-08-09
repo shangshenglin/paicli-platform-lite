@@ -150,4 +150,26 @@ class AgentResultValidatorTest {
         assertThat(validation.valid()).isFalse();
         assertThat(validation.issues()).contains("contract requires tests but no passing test evidence for required families");
     }
+
+    @Test
+    void contractRequiringTestsUsesLatestResultForEachFamily() {
+        RunCompletionContractRecord contract = new RunCompletionContractRecord("child-1",
+                CompletionMode.TEST_REQUIRED, false, true, List.of("MAVEN"), List.of(), List.of(),
+                "test", "test", Instant.now(), Instant.now());
+        Map<String, Object> result = Map.of(
+                "status", "COMPLETED",
+                "summary", "verification completed",
+                "files_changed", List.of(),
+                "tests", List.of(
+                        Map.of("family", "MAVEN", "status", "PASSED",
+                                "ordinal", 1, "after_last_mutation", true),
+                        Map.of("family", "MAVEN", "status", "FAILED",
+                                "ordinal", 2, "after_last_mutation", true)));
+
+        var validation = validator.validate(child(), contract, result);
+
+        assertThat(validation.valid()).isFalse();
+        assertThat(validation.issues())
+                .contains("contract requires tests but no passing test evidence for required families");
+    }
 }

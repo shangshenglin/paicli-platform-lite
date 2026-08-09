@@ -4,6 +4,12 @@
 
 ## 2026-08-09
 
+### Completion Evidence 最终复核：三态命令证据与测试最新状态对齐
+
+- 变更：`BuildCommandClassifier` 从 boolean 构建白名单升级为 `GENERATED_ONLY / POTENTIAL_PRODUCT_MUTATION / UNTRUSTED_OR_UNKNOWN` 三态；`RunEvidenceDecoder` 只允许高置信度直接写入命令的 workspace fingerprint 形成 `workspace_mutations`，Maven/Gradle/npm/dotnet/webpack/tsc 生成物、未知脚本及 `||`/`;`/管道等不安全复合命令均不能降级满足 `MUTATION_REQUIRED`。`TestCommandClassifier` 仅接受真实 Node executable invocation，拒绝安装 Jest 与 Gradle `--dry-run/-m`；`AgentResultValidator` 按 family 选择最后 mutation 后 ordinal 最大的测试结果，后续失败会覆盖早先通过。
+- 思路：整体 workspace fingerprint 只能证明“某处变化”，不能证明产品源文件变化，因此未知命令必须默认不可信；Parent 必须复刻 Child 的 latest-per-family 时序语义，避免历史 PASS 穿透后续 FAIL。未改变数据库 Schema、REST API、配置、启动方式或产品站能力，OpenAPI 与产品站文档不适用；Sandbox 元数据格式未变，但 Server 对 fingerprint 的解释收紧，因此同步 `docs/docker-sandbox.md`。
+- 验证：新增/扩展三态分类、复合 build/test 不降级、未知脚本不形成 mutation、Node 安装与 Gradle dry-run 不形成 TestEvidence、Parent `PASS → FAIL` 回归；定向 Maven 测试 26 项通过。最终工作树的 `clean test` 与 `clean package` 均通过（common 3 + server 294 + sandbox-agent 4 = 301），`git diff --check` 与文档覆盖复核通过。
+
 ### Completion Evidence 二次复核：命令 mutation 证据统一与测试分类再收紧
 
 - 变更：新增 `WorkspaceMutationEvidence` 和 `RunEvidence.workspaceMutations`；`AgentResultService`、SQLite 终态 delegation envelope、`AgentResultValidator` 与 `RunVerificationService` 统一消费/传递 `workspace_mutations`，命令修改未知具体文件时不伪造 `files_changed`。`TestCommandClassifier` 拒绝换行、单独后台 `&`、`-DskipTests=true`、pytest `--collect-only` 和 cargo `--no-run`。

@@ -76,9 +76,9 @@ paicli:
 Windows Docker Desktop/WSL2 端到端验收已于 2026-07-03 通过，覆盖审批恢复、经 `docker exec` 的认证执行、工作区持久化、SSE 重放、容器自动清理、无宿主端口的内部网络、只读根文件系统、`cap-drop ALL` 以及 CPU、内存和 PID 限额。
 ### Completion Evidence 约束
 
-Sandbox 返回的 `execute_command` workspace fingerprint 只说明命令前后工作区是否变化；Server 会跳过已识别测试/构建命令的生成物变化，避免 `target/`、缓存或报告把测试命令标记为源码 mutation。非测试命令的明确变化仍会进入 Run 的 workspace mutation evidence；复合测试命令若包含 `||`、`;`、管道，或测试 invocation 后还有尾部命令，则不会生成 TestEvidence。
+Sandbox 返回的 `execute_command` workspace fingerprint 只说明命令前后工作区是否变化；Server 以三态分类器区分生成型命令、明确直接产品写入和未知/不可信命令。只有明确直接写入加 fingerprint 变化会进入 workspace mutation evidence；测试/构建生成物、未知脚本以及包含 `||`、`;`、管道等不安全操作符的复合命令都不能单独满足 mutation 合同。
 
 - `write_file` 必须在写入前计算 `beforeSha256`，写入后计算 `afterSha256`；只有两者不同才报告 `changed=true`。
 - `execute_command` 的结果除退出码、超时、Shell 和 cwd 外，还记录执行前后的 workspace fingerprint 与 `workspaceChanged`，供 Server 判断命令是否产生真实副作用。
 - Server 不从 stdout 关键词推断完成或测试；只有 `TestCommandClassifier` 识别的高置信度测试 invocation 才生成 TestEvidence。外置工具输出的 `tool_result` Artifact 不属于业务交付物。
-- 当 `execute_command` 的 workspace fingerprint 明确变化但无法可靠列出具体文件时，Server/AgentResult 使用 `workspace_mutations` 传递变更证据，不伪造 `files_changed`；换行、单独 `&`、skip/no-run 参数的命令不计为测试 invocation。
+- 当高置信度直接写入命令的 workspace fingerprint 明确变化但无法可靠列出具体文件时，Server/AgentResult 使用 `workspace_mutations` 传递变更证据，不伪造 `files_changed`；未知命令默认不可信。换行、单独 `&`、skip/no-run、Gradle dry-run 与 Node 依赖安装不计为测试 invocation。

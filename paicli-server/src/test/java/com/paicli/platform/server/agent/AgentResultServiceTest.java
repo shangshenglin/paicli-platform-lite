@@ -99,7 +99,7 @@ class AgentResultServiceTest {
 
         store.markRunStatus(childRunId, com.paicli.platform.common.RunStatus.WAITING_TOOL);
         var command = store.createToolCall(childRunId, "provider-command", "execute_command",
-                "{\"command\":\"python modify_config.py\"}", "child-command");
+                "{\"command\":\"sed -i 's/old/new/' config.ini\"}", "child-command");
         store.markToolRunning(command.id());
         store.commitToolOutcome(delegation.childSessionId(), childRunId, command, true, "ok", null,
                 "{\"shell\":\"bash\",\"exitCode\":0,\"timedOut\":false,\"workspaceChanged\":true}",
@@ -118,7 +118,7 @@ class AgentResultServiceTest {
         assertThat(((List<?>) result.get("workspace_mutations"))).singleElement().satisfies(item -> {
             Map<?, ?> mutation = (Map<?, ?>) item;
             assertThat(mutation.get("source")).isEqualTo("execute_command");
-            assertThat(mutation.get("command")).isEqualTo("python modify_config.py");
+            assertThat(mutation.get("command")).isEqualTo("sed -i 's/old/new/' config.ini");
         });
         assertThat(validation.valid()).isTrue();
     }
