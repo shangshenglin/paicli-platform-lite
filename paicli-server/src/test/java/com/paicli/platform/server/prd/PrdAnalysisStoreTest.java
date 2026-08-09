@@ -45,6 +45,26 @@ class PrdAnalysisStoreTest {
     }
 
     @Test
+    void deletesTaskAndCascadesTaskOwnedPrdRows() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PrdAnalysisStore store = store();
+        var task = store.createTask("project-a", "Delete me", "USER", 2, "session-1");
+        var source = store.insertSource(task.id(), "attachment-1", "PRD", "prd.md", "hash-1", "COMPLETED", null);
+        store.insertChunks(source.id(), List.of(
+                new PrdAnalysisStore.ChunkDraft(0, null, 0, 10, "Order text", "chunk-hash")));
+        var binding = store.createRunBinding(task.id(), "MAP", null, run(runtime, "project-a"), 0);
+        store.insertQuestion(task.id(), "RULE_AMBIGUITY", "BLOCKING", "Which time basis?", "ctx");
+
+        assertThat(store.deleteTask(task.id())).isTrue();
+        assertThat(store.task(task.id())).isEmpty();
+        assertThat(store.sources(task.id())).isEmpty();
+        assertThat(store.source(source.id())).isEmpty();
+        assertThat(store.chunks(source.id(), 0, 10)).isEmpty();
+        assertThat(store.findBinding(binding.id())).isEmpty();
+        assertThat(store.deleteTask(task.id())).isFalse();
+    }
+
+    @Test
     void transitionStageIsOptimisticAndPreservesStageOnFailure() throws Exception {
         runtime();
         PrdAnalysisStore store = store();

@@ -811,6 +811,7 @@ POST/GET                    /v1/prd-analysis/tasks
 GET                         /v1/prd-analysis/tasks/{taskId}
 POST                        /v1/prd-analysis/tasks/{taskId}/start
 POST                        /v1/prd-analysis/tasks/{taskId}/cancel
+DELETE                      /v1/prd-analysis/tasks/{taskId}
 POST                        /v1/prd-analysis/tasks/{taskId}/retry
 GET                         /v1/prd-analysis/tasks/{taskId}/nodes
 GET                         /v1/prd-analysis/tasks/{taskId}/findings
@@ -822,7 +823,7 @@ GET                         /v1/prd-analysis/tasks/{taskId}/artifacts
 POST                        /v1/prd-analysis/tasks/{taskId}/plans
 ```
 
-创建任务时 PRD / 接口契约 / 补充文档必须已作为文档附件暂存在同一 Session；任务创建后为 DRAFT，调用 `start` 只会持久化进入 `INGESTING` 并立即返回，`PrdAnalysisWorkerCoordinator` 再异步执行提取与后续阶段。工具 `prd_list_source_chunks` 始终分页；内部搜索、校验和统计会遍历完整 source snapshot。Blocking 问题只有经 Reconciler 标记为 `RESOLVED` 才能通过校验并生成 Plan。完成的分析任务可调用 `plans` 复用 PlanService 生成实施计划。
+创建任务时 PRD / 接口契约 / 补充文档必须已作为文档附件暂存在同一 Session；任务创建后为 DRAFT，调用 `start` 只会持久化进入 `INGESTING` 并立即返回，`PrdAnalysisWorkerCoordinator` 再异步执行提取与后续阶段。`DELETE /tasks/{taskId}` 仅允许没有活跃 Run 的任务，级联删除 PRD 业务数据和已打包 Artifact；活跃任务必须先取消。工具 `prd_list_source_chunks` 始终分页；内部搜索、校验和统计会遍历完整 source snapshot。Blocking 问题只有经 Reconciler 标记为 `RESOLVED` 才能通过校验并生成 Plan。完成的分析任务可调用 `plans` 复用 PlanService 生成实施计划。
 
 
 推荐从 [.env.example](.env.example) 复制所需变量到不提交 Git 的 `.env`。主要配置族：

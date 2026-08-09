@@ -1,6 +1,12 @@
 # PaiCLI Platform Lite ChangeLog
 
-本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
+## 2026-08-10
+
+### PRD Analysis Agent：任务删除
+
+- 变更：新增 `DELETE /v1/prd-analysis/tasks/{taskId}`；后端会拒绝仍有活跃 Run 的任务，先删除该任务已打包的 Artifact，再通过 SQLite 外键级联清理 task/source/chunk/node/dependency/finding/evidence/question/check/run binding。Console 列表与详情为 DRAFT、FAILED、CANCELED、COMPLETED 任务提供带不可恢复提示的删除按钮。
+- 思路：运行中的任务仍应由取消流程安全收束，不能在 Worker 或 Model Run 执行时物理删除；终态与未启动任务可直接清理，避免 PRD 列表被历史 smoke 任务长期占据。
+- 验证：新增 Store 级联删除回归；`node --check paicli-server/src/main/resources/static/app.js` 与 `mvn test -pl paicli-server -am -Dtest=PrdAnalysisStoreTest`（11 项）通过。完整 `mvn package` 通过，Surefire 报告汇总 330 项、0 failure、0 error、0 skipped，`git diff --check` 通过；`clean package` 因本地正在运行的 Server 锁住 jar 而无法清理，未强制停止用户进程。README/OpenAPI、架构和阶段说明已同步；配置、Sandbox、产品站不适用。
 
 ## 2026-08-09
 

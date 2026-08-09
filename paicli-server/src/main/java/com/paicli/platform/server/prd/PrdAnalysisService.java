@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.InputAttachmentRecord;
 import com.paicli.platform.server.domain.SessionRecord;
+import com.paicli.platform.server.artifact.ArtifactStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.stereotype.Service;
 
@@ -25,16 +26,18 @@ public class PrdAnalysisService {
     private final PrdAnalysisSkillCatalog skills;
     private final PrdAnalysisMetrics metrics;
     private final ObjectMapper mapper;
+    private final ArtifactStore artifacts;
 
     public PrdAnalysisService(PrdAnalysisStore store, SqliteRuntimeStore runtime,
                               PrdAnalysisCoordinator coordinator, PrdAnalysisSkillCatalog skills,
-                              PrdAnalysisMetrics metrics, ObjectMapper mapper) {
+                              PrdAnalysisMetrics metrics, ObjectMapper mapper, ArtifactStore artifacts) {
         this.store = store;
         this.runtime = runtime;
         this.coordinator = coordinator;
         this.skills = skills;
         this.metrics = metrics;
         this.mapper = mapper;
+        this.artifacts = artifacts;
     }
 
     public Map<String, Object> createTask(String sessionId, String projectKey, String title,
@@ -104,6 +107,22 @@ public class PrdAnalysisService {
         }
         store.updateTaskStatus(taskId, "CANCELED", "canceled by user");
         return detail(taskId);
+    }
+
+    /** Permanently deletes an inactive PRD task, its PRD rows, and packaged artifacts. */
+    public void delete(String taskId) {
+        PrdAnalysisStore.PrdTask task = store.task(taskId)
+                .orElseThrow(() -> new IllegalArgumentException("PRD task not found: " + taskId));
+        for (PrdAnalysisStore.PrdRunBinding binding : store.runBindings(task.id())) {
+            if (runtime.findRun(binding.runId()).map(run -> !run.status().terminal()).orElse(false)) {
+                throw new IllegalStateException("cannot delete PRD task while a Run is active; cancel it first");
+            }
+        }
+        List<String> artifactIds = store.artifactsForTask(task.id()).stream().map(ArtifactRecord::id).toList();
+        if (!artifactIds.isEmpty()) artifacts.deleteBatch(artifactIds);
+        if (!store.deleteTask(task.id())) {
+            throw new IllegalArgumentException("PRD task not found: " + taskId);
+        }
     }
 
     public Map<String, Object> retry(String taskId) {

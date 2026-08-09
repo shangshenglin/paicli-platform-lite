@@ -120,6 +120,16 @@ public class PrdAnalysisStore {
         } catch (SQLException e) { throw failure("find prd task for run", e); }
     }
 
+    /** Deletes one task and all task-owned PRD rows through the schema's cascade constraints. */
+    public boolean deleteTask(String taskId) {
+        if (blank(taskId)) return false;
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM prd_analysis_tasks WHERE id=?")) {
+            ps.setString(1, taskId.trim());
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) { throw failure("delete prd analysis task", e); }
+    }
+
     public Optional<PrdTask> taskForSession(String sessionId) {
         if (blank(sessionId)) return Optional.empty();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(

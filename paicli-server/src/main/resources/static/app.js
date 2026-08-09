@@ -5643,6 +5643,9 @@ function renderPrdTaskList(tasks) {
       + ' · 阻塞问题 ' + task.blockingQuestions + ' · 更新 ' + (task.updatedAt || '').slice(0, 19).replace('T', ' '));
     if (task.status === 'DRAFT') actionButton(item, '开始', () => startPrd(task.id), true);
     actionButton(item, '详情', () => openPrdDetail(task.id));
+    if (!['INGESTING', 'MAPPING', 'ANALYZING', 'RECONCILING', 'VERIFYING', 'PACKAGING', 'WAITING_USER'].includes(task.status)) {
+      actionButton(item, '删除', () => deletePrd(task.id, task.title));
+    }
     list.append(item);
   }
 }
@@ -5665,6 +5668,18 @@ async function cancelPrd(taskId) {
 async function retryPrd(taskId) {
   try {
     await api('/v1/prd-analysis/tasks/' + encodeURIComponent(taskId) + '/retry', { method: 'POST' });
+    await refreshPrdTasks();
+  } catch (error) { showNotice(error.message, true); }
+}
+
+async function deletePrd(taskId, title) {
+  if (!confirm('确认永久删除 PRD 分析“' + title + '”及其产物吗？此操作不可恢复。')) return;
+  try {
+    await api('/v1/prd-analysis/tasks/' + encodeURIComponent(taskId), { method: 'DELETE' });
+    if (prdState.taskId === taskId) {
+      prdState.taskId = null;
+      $('prdDetail').textContent = '';
+    }
     await refreshPrdTasks();
   } catch (error) { showNotice(error.message, true); }
 }
@@ -5773,6 +5788,11 @@ function renderPrdDetail(detail) {
   const refresh = element('button', 'secondary', '刷新');
   refresh.onclick = () => openPrdDetail(task.id);
   header.querySelector('.managed-actions').append(refresh);
+  if (!['INGESTING', 'MAPPING', 'ANALYZING', 'RECONCILING', 'VERIFYING', 'PACKAGING', 'WAITING_USER'].includes(task.status)) {
+    const remove = element('button', 'secondary', '删除');
+    remove.onclick = () => deletePrd(task.id, task.title);
+    header.querySelector('.managed-actions').append(remove);
+  }
   box.append(header);
 
   if (task.status === 'WAITING_USER') {
