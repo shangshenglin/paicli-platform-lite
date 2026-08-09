@@ -167,7 +167,8 @@ public class PrdAnalysisCoordinator {
         long failed = store.countNodesByStatus(task.id(), "FAILED");
         if (completed == nodes.size()) {
             store.updateTaskStatus(task.id(), "RECONCILING", null);
-        } else if (running == 0 && scheduled == 0 && readyIds.isEmpty() && failed == 0) {
+        } else if (store.countNodesByStatus(task.id(), "RUNNING") == 0
+                && scheduled == 0 && readyIds.isEmpty() && failed == 0) {
             store.markTaskFailed(task.id(), "dependency graph deadlock: incomplete nodes are neither ready nor running");
         } else if (completed + failed == nodes.size() && failed > 0) {
             store.markTaskFailed(task.id(), "one or more node analyses failed and are not retryable");

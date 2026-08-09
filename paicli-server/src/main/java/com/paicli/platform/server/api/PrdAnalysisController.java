@@ -53,7 +53,8 @@ public class PrdAnalysisController {
     }
 
     @PostMapping("/tasks/{taskId}/start")
-    @Operation(summary = "Start a DRAFT PRD analysis task")
+    @Operation(summary = "Queue a DRAFT PRD analysis task for asynchronous ingestion",
+            description = "Returns after durable queuing in INGESTING; the PRD worker performs extraction and later stages.")
     public Map<String, Object> start(@PathVariable String taskId) {
         return service.start(taskId);
     }

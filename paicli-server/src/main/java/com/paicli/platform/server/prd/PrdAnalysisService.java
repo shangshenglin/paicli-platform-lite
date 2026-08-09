@@ -88,7 +88,6 @@ public class PrdAnalysisService {
         skills.ensureProfiles(task.projectKey());
         store.updateTaskStatus(taskId, "INGESTING", null);
         if (metrics != null) metrics.taskStarted();
-        coordinator.advance(taskId);
         return detail(taskId);
     }
 
@@ -192,7 +191,7 @@ public class PrdAnalysisService {
         value.put("fileName", source.fileName());
         value.put("contentHash", source.contentHash());
         value.put("extractionStatus", source.extractionStatus());
-        value.put("chunkCount", store.chunks(source.id(), 0, 1_000).size());
+        value.put("chunkCount", store.allChunks(source.id()).size());
         value.put("createdAt", source.createdAt());
         return value;
     }

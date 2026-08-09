@@ -65,19 +65,19 @@ public class PrdAnalysisSkillCatalog implements ApplicationRunner {
                 ensureProfile(project, PROFILE_MAPPER, "PRD Mapper",
                         "你是 PaiCLI 的 PRD 分析映射角色。严格遵循 prd-map skill：先把 PRD 切成分析节点并声明依赖，"
                                 + "再一次性调用 prd_submit_map 提交。不要深入提取实体或规则。",
-                        List.of("prd_get_task_context", "prd_list_source_chunks", "prd_submit_map"),
+                        List.of("prd_get_task_context", "prd_list_source_chunks", "read_artifact", "prd_submit_map"),
                         List.of("prd-map"), "low");
                 ensureProfile(project, PROFILE_NODE_ANALYST, "PRD Node Analyst",
                         "你是 PaiCLI 的 PRD 分析节点角色。严格遵循 prd-node-analyze skill：只分析当前绑定节点，"
                                 + "Evidence first，最后一次性调用 prd_submit_node_analysis 提交。不得写 Markdown。",
                         List.of("prd_get_task_context", "prd_read_node", "prd_search_sources",
-                                "prd_get_dependency_summaries", "prd_submit_node_analysis"),
+                                "prd_get_dependency_summaries", "read_artifact", "prd_submit_node_analysis"),
                         List.of("prd-node-analyze"), "high");
                 ensureProfile(project, PROFILE_RECONCILER, "PRD Reconciler",
                         "你是 PaiCLI 的 PRD 分析归并角色。严格遵循 prd-reconcile skill：基于结构化 findings 与校验报告"
                                 + "跨节点去重、消解冲突、应用用户回答，最后一次性调用 prd_submit_reconciliation 提交。",
                         List.of("prd_get_task_context", "prd_get_findings", "prd_get_open_questions",
-                                "prd_get_validation_report", "prd_submit_reconciliation"),
+                                "prd_get_validation_report", "read_artifact", "prd_submit_reconciliation"),
                         List.of("prd-reconcile"), "high");
                 return;
             } catch (RuntimeException e) {
@@ -107,11 +107,37 @@ public class PrdAnalysisSkillCatalog implements ApplicationRunner {
 
     private void ensureProfile(String projectKey, String id, String name, String systemPrompt,
                                List<String> tools, List<String> skills, String reasoningEffort) {
-        if (productivity.findAgentProfile(id).isPresent()) return;
+        ProductivityStore.AgentProfile existing = productivity.findAgentProfile(id).orElse(null);
+        if (existing != null) {
+            upgradeBundledProfileTools(existing, tools);
+            return;
+        }
         productivity.saveAgentProfile(id, projectKey, name, "PRD Analysis 系统角色（自动内置）", systemPrompt,
                 null, write(tools), write(skills), "", "EXPERT", "MANUAL", "PROJECT", "INHERIT",
                 "enabled", reasoningEffort, "bash", true, "system.prd", 0);
         log.info("Seeded PRD agent profile {}", id);
+    }
+
+    private void upgradeBundledProfileTools(ProductivityStore.AgentProfile existing, List<String> requiredTools) {
+        if (!"system.prd".equals(existing.templateKey()) || !requiredTools.contains("read_artifact")) return;
+        List<String> current = readStrings(existing.toolNamesJson());
+        if (current.contains("read_artifact")) return;
+        current.add("read_artifact");
+        productivity.saveAgentProfile(existing.id(), existing.projectKey(), existing.name(), existing.description(),
+                existing.systemPrompt(), existing.modelProfileId(), write(current), existing.skillNamesJson(),
+                existing.outputSchema(), existing.collaborationRole(), existing.handoffPolicy(),
+                existing.workspaceScope(), existing.approvalPolicy(), existing.thinkingMode(), existing.reasoningEffort(),
+                existing.executionShell(), existing.enabled(), existing.templateKey(), existing.templateVersion());
+        log.info("Upgraded PRD agent profile {} with read_artifact", existing.id());
+    }
+
+    private List<String> readStrings(String json) {
+        try {
+            return new java.util.ArrayList<>(mapper.readValue(json == null || json.isBlank() ? "[]" : json,
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() { }));
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to read PRD profile tool list", e);
+        }
     }
 
     private static boolean isBusy(Throwable error) {

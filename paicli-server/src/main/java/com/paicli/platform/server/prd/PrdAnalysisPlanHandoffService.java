@@ -34,8 +34,8 @@ public class PrdAnalysisPlanHandoffService {
         if (!"COMPLETED".equals(task.status())) {
             throw new IllegalStateException("PRD analysis is not completed; cannot create an implementation plan");
         }
-        if (store.countOpenBlocking(taskId) > 0) {
-            throw new IllegalStateException("PRD analysis still has open blocking questions");
+        if (store.countUnresolvedBlocking(taskId) > 0) {
+            throw new IllegalStateException("PRD analysis still has unresolved blocking questions");
         }
         long blockingChecks = store.checks(taskId).stream()
                 .filter(check -> "FAIL".equals(check.status()) && "BLOCKING".equals(check.severity()))

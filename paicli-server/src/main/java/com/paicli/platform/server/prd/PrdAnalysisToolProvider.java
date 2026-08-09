@@ -205,7 +205,7 @@ public class PrdAnalysisToolProvider implements ServerToolProvider {
             value.put("sourceType", source.sourceType());
             value.put("fileName", source.fileName());
             value.put("extractionStatus", source.extractionStatus());
-            value.put("chunkCount", store.chunks(source.id(), 0, 1000).size());
+            value.put("chunkCount", store.allChunks(source.id()).size());
             return value;
         }).toList();
         Map<String, Long> nodeStats = new LinkedHashMap<>();
@@ -309,7 +309,7 @@ public class PrdAnalysisToolProvider implements ServerToolProvider {
         List<Map<String, Object>> items = new ArrayList<>();
         for (PrdAnalysisStore.PrdSource source : store.sources(taskId)) {
             if (!sourceTypes.isEmpty() && !sourceTypes.contains(source.sourceType())) continue;
-            for (PrdAnalysisStore.PrdChunk chunk : store.chunks(source.id(), 0, 1000)) {
+            for (PrdAnalysisStore.PrdChunk chunk : store.allChunks(source.id())) {
                 if (chunk.text().toLowerCase(Locale.ROOT).contains(normalized)) {
                     Map<String, Object> value = new LinkedHashMap<>();
                     value.put("chunkId", chunk.id());

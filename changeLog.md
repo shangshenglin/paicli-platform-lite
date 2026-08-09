@@ -4,6 +4,14 @@
 
 ## 2026-08-09
 
+### PRD Analysis Agent MVP 五项稳定性修复
+
+- 变更：Coordinator 的 Node retry 死锁判定改为读取 SQLite 中持久化的 `RUNNING` 节点数，避免同一次 `advance()` 中创建 attempt=1 后仍按局部计数把任务误判失败；`/start` 现在只将 DRAFT 任务持久化为 `INGESTING` 并立即返回，附件提取完全由 PRD Worker 异步推进。
+- 变更：系统 PRD Mapper、Node Analyst、Reconciler Profile 均包含 `read_artifact`，使大 Tool Result 外置后仍可续读；新增内部 `allChunks` 分页遍历，搜索、合同校验和 chunk 统计不再被工具分页上限 100 静默截断，模型侧 `prd_list_source_chunks` 保持分页。
+- 变更：新增 `countUnresolvedBlocking`，将 `OPEN` 与 `ANSWERED` 的 Blocking 问题都视为未闭环；WAITING_USER 仍只等待 OPEN 问题，而 Validator 与 Plan Handoff 必须等待 Reconciler 置为 `RESOLVED` 才允许完成或生成实施计划。OpenAPI、README、架构与阶段说明同步标明异步启动和上述边界。
+- 思路：本次严格收敛为 MVP 真实流程的五个确定性故障点，不扩展 ToolRouter 硬白名单、动态 Plan 或生产级边界重构；DB 仍是业务状态机正确性来源。
+- 验证：新增/强化 Node retry（attempt=1 成功后进入 RECONCILING）及 Scripted Model Golden Path，后者经 `RunProcessor → ToolCall → ToolRouter → PrdAnalysisToolProvider → Validator → Renderer` 完成并产出 5 个 Artifact；聚焦 PRD 回归通过 17 项。完整 `clean test` 与 `clean package` 均完成，Surefire 报告汇总 328 项、0 failure、0 error、0 skipped，两个可执行 jar 均已生成；`git diff --check` 通过。Sandbox、配置、产品站均未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
+
 ### PRD Analysis Agent 可靠性门禁修复（R0–R3）
 
 - 变更：Console 将 `app.js` 移到 PRD Dialog 之后加载，新增缺失的 `openPrdDetail`，并把 PRD 状态提示改为独立的 `setPrdFormStatus`，不再覆盖其他表单的全局 `setFormError`。

@@ -524,7 +524,7 @@ Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终
 
 第一个真正的业务 Agent 垂直切片：在 Console 增加独立的「PRD 分析」入口，上传 PRD（可选接口/数据契约、补充文档）后由 Java 确定性状态机驱动：`INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED`，服务重启后从 SQLite 当前状态恢复推进。
 
-- **复用而非重建**：Mapper / Node Analyst / Reconciler 都是普通内部 Session + 普通 Run，走现有 RunProcessor / ContextManager / ToolCall / Budget / Artifact / Recovery；未新增第二套 AgentLoop / Subagent Runtime。
+- **复用而非重建**：Mapper / Node Analyst / Reconciler 都是普通内部 Session + 普通 Run，走现有 RunProcessor / ContextManager / ToolCall / Budget / Artifact / Recovery；未新增第二套 AgentLoop / Subagent Runtime。大 Tool Result 被物化为 Artifact 后，三个 PRD Profile 都允许使用 `read_artifact` 继续读取。
 - **结构化工具提交**：`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation` 粗粒度、幂等（run+toolCallId 去重）、事务提交；finding/evidence/question 的 ID 全部由 Server 生成，Markdown 不是事实来源。
 - **后端权限**：11 个 `prd_*` 工具按 `prd_analysis_runs` 绑定校验角色（Mapper/Node/Reconciler）与 nodeId，禁止越权读取或提交。
 - **确定性调度**：节点依赖满足才 READY，受 `maxParallelism` 与全局上限约束；全部节点完成后 barrier 只创建一次 Reconciler Run。
@@ -822,7 +822,7 @@ GET                         /v1/prd-analysis/tasks/{taskId}/artifacts
 POST                        /v1/prd-analysis/tasks/{taskId}/plans
 ```
 
-创建任务时 PRD / 接口契约 / 补充文档必须已作为文档附件暂存在同一 Session；任务创建后为 DRAFT，调用 `start` 进入 INGESTING。完成的分析任务可调用 `plans` 复用 PlanService 生成实施计划。
+创建任务时 PRD / 接口契约 / 补充文档必须已作为文档附件暂存在同一 Session；任务创建后为 DRAFT，调用 `start` 只会持久化进入 `INGESTING` 并立即返回，`PrdAnalysisWorkerCoordinator` 再异步执行提取与后续阶段。工具 `prd_list_source_chunks` 始终分页；内部搜索、校验和统计会遍历完整 source snapshot。Blocking 问题只有经 Reconciler 标记为 `RESOLVED` 才能通过校验并生成 Plan。完成的分析任务可调用 `plans` 复用 PlanService 生成实施计划。
 
 
 推荐从 [.env.example](.env.example) 复制所需变量到不提交 Git 的 `.env`。主要配置族：
@@ -860,7 +860,7 @@ POST                        /v1/prd-analysis/tasks/{taskId}/plans
 - SQLite Store、迁移 1–34、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- PRD Analysis：持久化/幂等提交/工具权限/节点 barrier/恢复/确定性校验/人工澄清/5 类产物/Plan Handoff/评测用例（simple-order fixture），并用 Scripted Model 真实贯通 `RunProcessor → ToolCall → PrdAnalysisToolProvider`。
+- PRD Analysis：持久化/幂等提交/工具权限/节点 barrier/恢复/确定性校验/人工澄清/5 类产物/Plan Handoff/评测用例（simple-order fixture），并用 Scripted Model Golden Path 真实贯通 `RunProcessor → ToolCall → PrdAnalysisToolProvider → Validator → Renderer`。
 - Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 7 套件/28 Case Starter Pack 完整性和幂等安装。
 
 此外已完成：

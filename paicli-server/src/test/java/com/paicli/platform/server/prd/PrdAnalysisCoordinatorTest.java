@@ -235,7 +235,7 @@ class PrdAnalysisCoordinatorTest {
     }
 
     @Test
-    void failedNodeIsAutomaticallyRetriedOnceThenFailsTask() throws Exception {
+    void failedNodeIsAutomaticallyRetriedAndSuccessfulRetryContinuesPipeline() throws Exception {
         Harness harness = harness();
         var task = harness.store.createTask("project-a", "T", "USER", 2, "session-1");
         harness.skills.ensureProfiles("project-a");
@@ -260,10 +260,18 @@ class PrdAnalysisCoordinatorTest {
         assertThat(retry.id()).isNotEqualTo(first.id());
         assertThat(retry.attempt()).isEqualTo(1);
         assertThat(harness.store.node(node.id())).get().extracting("status").isEqualTo("RUNNING");
+        assertThat(harness.store.task(task.id())).get().extracting("status", "currentStage")
+                .containsExactly("ANALYZING", "ANALYZING");
 
-        harness.runtime.failRun(retry.runId(), "model failed again");
+        String chunkId = harness.store.allChunks(source.id()).get(0).id();
+        harness.store.submitNodeAnalysis(task.id(), retry.id(), node.id(), "tc-node-retry",
+                mapper.writeValueAsString(Map.of("summary", "Order", "findings", List.of(Map.of(
+                        "type", "ENTITY", "name", "Order", "summary", "Order created.",
+                        "evidence", List.of(Map.of("chunkId", chunkId, "start", 0, "end", 5)))))));
+        harness.runtime.completeRun(retry.runId());
         harness.coordinator.advance(task.id());
-        assertThat(harness.store.task(task.id())).get().extracting("status").isEqualTo("FAILED");
+        assertThat(harness.store.task(task.id())).get().extracting("status", "currentStage")
+                .containsExactly("RECONCILING", "RECONCILING");
     }
 
     private Harness harness() throws Exception {

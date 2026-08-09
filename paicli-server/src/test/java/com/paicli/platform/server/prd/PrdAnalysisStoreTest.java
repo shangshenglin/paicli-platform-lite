@@ -274,6 +274,7 @@ class PrdAnalysisStoreTest {
         assertThat(store.question(question.id())).get()
                 .satisfies(value -> assertThat(value.status()).isEqualTo("ANSWERED"));
         assertThat(store.countOpenBlocking(task.id())).isZero();
+        assertThat(store.countUnresolvedBlocking(task.id())).isEqualTo(1);
     }
 
     private static String run(SqliteRuntimeStore runtime, String projectKey) {

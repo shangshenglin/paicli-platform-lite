@@ -398,6 +398,18 @@ public class PrdAnalysisStore {
         } catch (SQLException e) { throw failure("list prd chunks", e); }
     }
 
+    /** Internal full-snapshot reader. Model-facing tools remain paged through {@link #chunks}. */
+    public List<PrdChunk> allChunks(String sourceId) {
+        List<PrdChunk> values = new ArrayList<>();
+        int offset = 0;
+        while (true) {
+            List<PrdChunk> page = chunks(sourceId, offset, 100);
+            values.addAll(page);
+            if (page.size() < 100) return values;
+            offset += page.size();
+        }
+    }
+
     public Optional<PrdChunk> chunk(String id) {
         if (blank(id)) return Optional.empty();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
@@ -650,6 +662,18 @@ public class PrdAnalysisStore {
                 return rs.next() ? rs.getLong(1) : 0L;
             }
         } catch (SQLException e) { throw failure("count open blocking prd questions", e); }
+    }
+
+    /** Counts both unanswered and user-answered blocking questions until reconciliation resolves them. */
+    public long countUnresolvedBlocking(String taskId) {
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT COUNT(*) FROM prd_analysis_questions WHERE task_id=? AND severity='BLOCKING' "
+                        + "AND status IN ('OPEN','ANSWERED')")) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        } catch (SQLException e) { throw failure("count unresolved blocking prd questions", e); }
     }
 
     public List<PrdQuestion> openBlockingQuestions(String taskId) {

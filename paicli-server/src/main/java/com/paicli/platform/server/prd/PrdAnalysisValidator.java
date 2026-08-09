@@ -169,12 +169,13 @@ public class PrdAnalysisValidator {
             }
         }
 
-        // G. OpenBlockingQuestionCheck
-        long openBlocking = store.countOpenBlocking(taskId);
-        if (openBlocking > 0) {
+        // G. UnresolvedBlockingQuestionCheck
+        long unresolvedBlocking = store.countUnresolvedBlocking(taskId);
+        if (unresolvedBlocking > 0) {
             blockingQuestions = true;
             checks.add(check("OpenBlockingQuestion", "BLOCKING", "FAIL", "TASK", taskId,
-                    openBlocking + " blocking question(s) still open", null, String.valueOf(openBlocking)));
+                    unresolvedBlocking + " blocking question(s) still unresolved", null,
+                    String.valueOf(unresolvedBlocking)));
         }
 
         // H. NodeCompletionCheck
@@ -198,7 +199,7 @@ public class PrdAnalysisValidator {
         StringBuilder out = new StringBuilder();
         for (PrdAnalysisStore.PrdSource source : store.sources(taskId)) {
             if (!"SOURCE_CONTRACT".equals(source.sourceType())) continue;
-            for (PrdAnalysisStore.PrdChunk chunk : store.chunks(source.id(), 0, 1_000)) {
+            for (PrdAnalysisStore.PrdChunk chunk : store.allChunks(source.id())) {
                 out.append(chunk.text()).append("\n");
             }
         }

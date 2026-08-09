@@ -78,9 +78,9 @@ PaiCLI Server
 PRD 分析是第一个真正复用 Harness 的业务 Agent 垂直切片：业务流程单独实现为 Java 确定性状态机，底层执行完全复用普通 Session/Run/ToolCall/Profile/Skill/Artifact/Plan。
 
 ```text
-Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService → PrdAnalysisCoordinator
+Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService（`/start` 仅持久化排队）→ PrdAnalysisWorkerCoordinator → PrdAnalysisCoordinator
     状态机：INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED
-    ├─ INGESTING   PrdSourceIngestionService（DocumentTextExtractor + StructuredDocumentChunker 快照分块）
+    ├─ INGESTING   Worker 异步调用 PrdSourceIngestionService（DocumentTextExtractor + StructuredDocumentChunker 快照分块）
     ├─ MAPPING     Mapper Run（system.prd.mapper + prd-map skill）→ prd_submit_map
     ├─ ANALYZING   N 个 Node Analyst 业务子 Run（普通 Managed Run，由 prd_analysis_runs 绑定）→ prd_submit_node_analysis
     ├─ RECONCILING Reconciler Run（system.prd.reconciler + prd-reconcile）→ prd_submit_reconciliation
