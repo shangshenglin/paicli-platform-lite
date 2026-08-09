@@ -42,4 +42,15 @@ public class ExecutorConfiguration {
         executor.initialize();
         return executor;
     }
+
+    @Bean("prdAnalysisTaskExecutor")
+    TaskExecutor prdAnalysisTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(64);
+        executor.setThreadNamePrefix("paicli-prd-");
+        executor.initialize();
+        return executor;
+    }
 }
