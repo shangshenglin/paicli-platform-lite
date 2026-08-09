@@ -42,6 +42,7 @@ class CollaborationServiceTest {
     private SandboxDriver sandboxDriver;
     private CollaborationRoutingService routing;
     private ExpertThreadService expertThreadService;
+    private DeliveryManifestService deliveryManifestService;
     private CollaborationService service;
 
     @BeforeEach
@@ -53,8 +54,9 @@ class CollaborationServiceTest {
         sandboxDriver = mock(SandboxDriver.class);
         routing = mock(CollaborationRoutingService.class);
         expertThreadService = mock(ExpertThreadService.class);
+        deliveryManifestService = mock(DeliveryManifestService.class);
         service = new CollaborationService(collaboration, runtime, productivity,
-                routing, new ObjectMapper(), modelClient, sandboxDriver, null, null, expertThreadService,
+                routing, new ObjectMapper(), modelClient, sandboxDriver, null, deliveryManifestService, expertThreadService,
                 new DelegationEnvelopeBuilder());
     }
 
@@ -292,6 +294,7 @@ class CollaborationServiceTest {
 
         verify(collaboration).updateStatus(eq(stage.id()), eq("IN_REVIEW"), eq("SYSTEM"), eq(null), any());
         verify(collaboration).evaluateStageBarrier(stage.parentId(), stage.stage());
+        verify(deliveryManifestService).recordStageDelivery(stage.id(), stage.stage(), completed.id());
         verify(modelClient, org.mockito.Mockito.never()).cancel(any());
     }
 

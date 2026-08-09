@@ -26,6 +26,8 @@ import com.paicli.platform.server.domain.TaskTitle;
 import com.paicli.platform.server.domain.SessionGroupRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.domain.WorkingPlanRecord;
+import com.paicli.platform.server.agent.RunEvidence;
+import com.paicli.platform.server.agent.RunEvidenceDecoder;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Repository;
 
@@ -5201,15 +5203,31 @@ public class SqliteRuntimeStore {
         value.put("status", status.name());
         value.put("failure_class", failureClass);
         value.put("summary", latestAssistantAnswer(connection, delegation.childSessionId()));
-        value.put("artifacts", delegationArtifacts(connection, delegation.childRunId()));
+        RunEvidence evidence = delegationEvidence(connection, delegation.childRunId());
+        value.put("artifacts", evidence.businessArtifacts().stream().map(artifact -> Map.of(
+                "id", artifact.id(), "type", artifact.type(), "name", artifact.name(),
+                "relative_path", artifact.relativePath(), "sha256", artifact.sha256())).toList());
         ModelTokenUsage usage = modelTokenUsageForRun(connection, delegation.childRunId());
         value.put("usage", Map.of("input_tokens", usage.inputTokens(),
                 "output_tokens", usage.outputTokens(), "total_tokens", usage.totalTokens()));
-        ToolEvidence evidence = delegationToolEvidence(connection, delegation.childRunId());
-        value.put("files_changed", evidence.filesChanged());
-        value.put("workspace_mutations", evidence.workspaceMutations());
-        value.put("commands_executed", evidence.commandsExecuted());
-        value.put("tests", evidence.tests());
+        value.put("files_changed", evidence.filesChanged().stream().map(file -> Map.of(
+                "path", file.path(), "tool_call_id", file.toolCallId(), "changed", file.changed())).toList());
+        value.put("workspace_mutations", evidence.workspaceMutations().stream().map(mutation -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("source", mutation.source());
+            item.put("tool_call_id", mutation.toolCallId());
+            item.put("workspace_changed", mutation.workspaceChanged());
+            item.put("ordinal", mutation.ordinal());
+            if (mutation.command() != null && !mutation.command().isBlank()) item.put("command", mutation.command());
+            return item;
+        }).toList());
+        value.put("commands_executed", evidence.commandsExecuted().stream().map(command -> Map.of(
+                "tool_call_id", command.toolCallId(), "command", command.command(),
+                "exit_code", command.exitCode() == null ? "" : command.exitCode(),
+                "timed_out", command.timedOut())).toList());
+        value.put("tests", evidence.tests().stream().map(test -> Map.of(
+                "tool_call_id", test.toolCallId(), "family", test.family().name(),
+                "command", test.command(), "status", test.status().name())).toList());
         value.put("findings", List.of());
         value.put("risks", status == RunStatus.COMPLETED ? List.of()
                 : List.of(error == null || error.isBlank() ? status.name() : error));
@@ -5239,78 +5257,34 @@ public class SqliteRuntimeStore {
         }
     }
 
-    private static List<Map<String, Object>> delegationArtifacts(Connection connection, String runId)
-            throws SQLException {
-        List<Map<String, Object>> values = new ArrayList<>();
+    private RunEvidence delegationEvidence(Connection connection, String runId) throws SQLException {
+        List<RunEvidenceDecoder.ToolCall> calls = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT id,type,name,relative_path,sha256 FROM artifacts WHERE run_id=? ORDER BY created_at")) {
+                "SELECT id,tool_name,arguments,status,result,error,result_metadata_json "
+                        + "FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("id", rs.getString("id"));
-                    item.put("type", rs.getString("type"));
-                    item.put("name", rs.getString("name"));
-                    item.put("relative_path", rs.getString("relative_path"));
-                    item.put("sha256", rs.getString("sha256"));
-                    values.add(item);
+                    calls.add(new RunEvidenceDecoder.ToolCall(rs.getString("id"), rs.getString("tool_name"),
+                            rs.getString("arguments"), ToolCallStatus.valueOf(rs.getString("status")),
+                            rs.getString("result"), rs.getString("error"), rs.getString("result_metadata_json")));
                 }
             }
         }
-        return List.copyOf(values);
-    }
-
-    private ToolEvidence delegationToolEvidence(Connection connection, String runId) throws SQLException {
-        List<String> files = new ArrayList<>();
-        List<String> commands = new ArrayList<>();
-        List<String> tests = new ArrayList<>();
-        List<Map<String, Object>> workspaceMutations = new ArrayList<>();
+        List<ArtifactRecord> artifacts = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT id,tool_name,arguments,result,status,result_metadata_json FROM tool_calls "
-                        + "WHERE run_id=? ORDER BY created_at")) {
+                "SELECT id,run_id,type,name,relative_path,size,sha256,created_at "
+                        + "FROM artifacts WHERE run_id=? ORDER BY created_at")) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    String name = rs.getString("tool_name");
-                    JsonNode args = readJson(rs.getString("arguments"));
-                    JsonNode metadata = readJson(rs.getString("result_metadata_json"));
-                    if ("write_file".equals(name)) {
-                        String path = jsonText(args, "path");
-                        addDistinct(files, path);
-                        if (metadata.path("changed").asBoolean(false)) {
-                            workspaceMutations.add(workspaceMutation(name, rs.getString("id"),
-                                    null, true));
-                        }
-                    }
-                    if ("execute_command".equals(name)) {
-                        String command = jsonText(args, "command");
-                        addDistinct(commands, command);
-                        if (command.toLowerCase().matches(".*\\b(test|mvn|gradle|npm|pytest|junit)\\b.*")) {
-                            String result = rs.getString("result");
-                            tests.add((result == null ? command : command + " => " + boundedText(result, 500)));
-                        }
-                        boolean changed = metadata.path("workspaceChanged").asBoolean(
-                                metadata.path("workspace_changed").asBoolean(false));
-                        if (changed && com.paicli.platform.server.agent.TestCommandClassifier.classify(command).isEmpty()) {
-                            workspaceMutations.add(workspaceMutation(name, rs.getString("id"),
-                                    command, true));
-                        }
-                    }
+                    artifacts.add(new ArtifactRecord(rs.getString("id"), rs.getString("run_id"),
+                            rs.getString("type"), rs.getString("name"), rs.getString("relative_path"),
+                            rs.getLong("size"), rs.getString("sha256"), instant(rs.getString("created_at"))));
                 }
             }
         }
-        return new ToolEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests),
-                List.copyOf(workspaceMutations));
-    }
-
-    private static Map<String, Object> workspaceMutation(String source, String toolCallId,
-                                                         String command, boolean changed) {
-        Map<String, Object> value = new LinkedHashMap<>();
-        value.put("source", source);
-        value.put("tool_call_id", toolCallId);
-        value.put("workspace_changed", changed);
-        if (command != null && !command.isBlank()) value.put("command", command);
-        return value;
+        return new RunEvidenceDecoder(mapper).collect(calls, artifacts);
     }
 
     private JsonNode readJson(String value) {
@@ -5321,14 +5295,6 @@ public class SqliteRuntimeStore {
         }
     }
 
-    private static String jsonText(JsonNode node, String field) {
-        JsonNode value = node.path(field);
-        return value.isTextual() ? value.asText().trim() : "";
-    }
-
-    private static void addDistinct(List<String> values, String value) {
-        if (value != null && !value.isBlank() && !values.contains(value)) values.add(value);
-    }
 
     private String listJson(List<String> values) {
         try {
@@ -5665,8 +5631,6 @@ public class SqliteRuntimeStore {
                 .distinct().limit(100).toList();
     }
 
-    private record ToolEvidence(List<String> filesChanged, List<String> commandsExecuted,
-                                List<String> tests, List<Map<String, Object>> workspaceMutations) { }
 
     public record ModelTokenUsage(int inputTokens, int outputTokens) {
         public int totalTokens() { return inputTokens + outputTokens; }

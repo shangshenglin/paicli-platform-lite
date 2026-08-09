@@ -943,3 +943,10 @@
 - 变更：自动协作会创建当前 Session 可见的根执行计划，并将 Leader Run 绑定为计划进度来源；专家细分任务和结果继续在协作任务看板中实时展示。
 - 思路：把“是否需要组队”的判断放到后端统一入口，避免只有首页按钮能触发；把 Plan 作为 Leader 协作的可恢复进度外壳，实际子任务仍由 Leader 依据上下文动态拆分。
 - 验证：待完成编译和前端语法检查。
+# Completion Evidence 复核收尾：终态委派与协作交付统一解码
+
+- 变更：新增纯 `RunEvidenceDecoder`，将 durable ToolCall metadata → `RunEvidence` 的解析从 `RunEvidenceCollector` 中抽出。运行时 Collector 与 `SqliteRuntimeStore` child terminal delegation envelope 共同使用该 Decoder；终态 `result_json` 因而只记录 `changed=true` 的文件、仅由 `TestCommandClassifier` 产生测试证据，并通过 `businessArtifacts()` 排除 `tool_result`，不再保留第二套关键字/路径启发式。
+- 变更：`CollaborationService` 的阶段交付门禁改为直接消费 `RunEvidence`，并只调用 `DeliveryManifestService.recordStageDelivery(taskId, stage, runId)`；不再按共享 workspace 的修改时间推断文件归属、不过滤缺失的 `tool_result`、也不从命令文本猜测测试。DeliveryManifest 额外记录 `workspaceMutations`，让仅能由 command fingerprint 证明的交付与门禁、清单保持一致。
+- 变更：收紧 `TestCommandClassifier`：`-Dtest`/`-Dit.test` 是 Maven selector 而不是测试 goal；Gradle 仅把显式 `test`/`check` 任务作为测试，`testClasses`、`checkstyleMain` 不再生成 TestEvidence。
+- 验证：新增 SQLite terminal delegation envelope、统一 DeliveryManifest 和实际协作阶段调用路径的回归测试，并扩展分类器用例。定向 reactor 测试 `TestCommandClassifierTest`、`CollaborationServiceTest`、`TaskDigestManifestTest`、`SqliteRuntimeStoreTest` 共 96 项通过；`./mvnw.cmd clean test`、`./mvnw.cmd clean package` 全量均通过（common 3 + server 288 + sandbox-agent 4 = 295）。`git diff --check` 与文档覆盖复核通过。
+- 文档：README、`docs/architecture.md`、`docs/phases.md` 已同步。本次未修改 Sandbox 行为、配置、REST/OpenAPI 或产品站，故 `docs/docker-sandbox.md`、OpenAPI 与 `paicli-site/README.md` 不适用。

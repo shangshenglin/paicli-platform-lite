@@ -1127,6 +1127,32 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void terminalDelegationResultUsesUnifiedEvidenceSemantics() throws Exception {
+        SqliteRuntimeStore store = store();
+        var parentSession = store.createSession("parent", "project-e");
+        var parent = store.createRun(parentSession.id(), "delegate work");
+        var delegationTool = store.createToolCall(parent.id(), "provider-parent", "spawn_agent", "{}",
+                "delegation-evidence-parent");
+        var delegation = store.createOrGetDelegation(parent.id(), delegationTool.id(), "worker", "inspect",
+                null, null, null, null, "{}");
+
+        completeSuccessfulTool(store, delegation.childSessionId(), delegation.childRunId(), "write_file",
+                "{\"path\":\"src/Unchanged.java\"}",
+                "{\"path\":\"src/Unchanged.java\",\"changed\":false}", 0);
+        completeSuccessfulTool(store, delegation.childSessionId(), delegation.childRunId(), "execute_command",
+                "{\"command\":\"mvn compile\"}", "{\"exitCode\":0}", 1);
+        store.createArtifact(delegation.childRunId(), "tool_result", "command-output", "tool.log", 1, "sha");
+
+        assertThat(store.completeRun(delegation.childRunId())).isTrue();
+        String terminalResult = store.findDelegation(parent.id(), delegation.childRunId()).orElseThrow().resultJson();
+
+        assertThat(terminalResult)
+                .contains("\"files_changed\":[]", "\"workspace_mutations\":[]", "\"tests\":[]",
+                        "\"artifacts\":[]")
+                .doesNotContain("Unchanged.java", "tool.log");
+    }
+
+    @Test
     void pagesEventsAndPersistsModelAttemptsBudgetReservationsAndNotificationOutbox() throws Exception {
         SqliteRuntimeStore store = store();
         ProductivityStore productivity = new ProductivityStore(properties());
@@ -1237,6 +1263,16 @@ class SqliteRuntimeStoreTest {
 
     private PlatformProperties properties() {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+    }
+
+    private static void completeSuccessfulTool(SqliteRuntimeStore store, String sessionId, String runId,
+                                               String toolName, String arguments, String metadata, int step) {
+        store.markRunStatus(runId, RunStatus.WAITING_TOOL);
+        var call = store.createToolCall(runId, "provider-evidence-" + step, toolName, arguments,
+                "terminal-evidence-" + step);
+        store.markToolRunning(call.id());
+        assertThat(store.commitToolOutcome(sessionId, runId, call, true, "ok", null,
+                metadata, metadata, step)).isTrue();
     }
 
     @Test

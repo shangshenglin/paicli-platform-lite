@@ -19,6 +19,7 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("./mvnw -q clean package")).isEmpty();
         assertThat(TestCommandClassifier.classify("mvn install -DskipTests")).isEmpty();
         assertThat(TestCommandClassifier.classify("mvnw clean")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn -Dtest=UserServiceTest compile")).isEmpty();
     }
 
     @Test
@@ -80,6 +81,8 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("npm run build && echo test")).isEmpty();
         assertThat(TestCommandClassifier.classify("echo junit")).isEmpty();
         assertThat(TestCommandClassifier.classify("./gradlew check")).contains(TestFamily.GRADLE);
+        assertThat(TestCommandClassifier.classify("./gradlew testClasses")).isEmpty();
+        assertThat(TestCommandClassifier.classify("gradle checkstyleMain")).isEmpty();
         assertThat(TestCommandClassifier.classify("pnpm test")).contains(TestFamily.NPM);
         assertThat(TestCommandClassifier.classify("yarn test")).contains(TestFamily.NPM);
         assertThat(TestCommandClassifier.classify("dotnet test")).contains(TestFamily.DOTNET);

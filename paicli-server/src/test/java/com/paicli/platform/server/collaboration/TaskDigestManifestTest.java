@@ -1,6 +1,7 @@
 package com.paicli.platform.server.collaboration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.store.CollaborationStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
@@ -48,6 +49,34 @@ class TaskDigestManifestTest {
         assertThat(snapshot.snapshotJson()).contains("build the widget").contains("deliveries");
         assertThat(runtime.latestAcceptedSnapshot(task.id())).hasValueSatisfying(value ->
                 assertThat(value.snapshotJson()).contains("accepted_at"));
+    }
+
+    @Test
+    void unifiedDeliveryManifestExcludesNoOpWritesToolResultsAndNonTestCommands() throws Exception {
+        PlatformProperties properties = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        CollaborationStore collaboration = new CollaborationStore(properties);
+        ObjectMapper mapper = new ObjectMapper();
+        DeliveryManifestService manifests = new DeliveryManifestService(collaboration, runtime, mapper);
+        var task = collaboration.saveTask(null, "default", "deliver", "description", "IN_PROGRESS", 0,
+                "AGENT", "agent-a", "done", null, 0, null, "USER");
+        var session = runtime.createSession("delivery evidence", "default");
+        var run = runtime.createRun(session.id(), "inspect", "auto", "", List.of(),
+                null, "agent-a", 0, 0, "bash");
+
+        completeSuccessfulTool(runtime, session.id(), run.id(), "write_file", "{\"path\":\"src/Noop.java\"}",
+                "{\"path\":\"src/Noop.java\",\"changed\":false}", 0);
+        completeSuccessfulTool(runtime, session.id(), run.id(), "execute_command", "{\"command\":\"mvn compile\"}",
+                "{\"exitCode\":0}", 1);
+        runtime.createArtifact(run.id(), "tool_result", "command-output", "tool.log", 1, "sha");
+
+        var delivery = manifests.recordStageDelivery(task.id(), 1, run.id());
+
+        assertThat(delivery.manifestJson())
+                .contains("\"changedFiles\":[]", "\"artifacts\":[]", "\"testEvidence\":[]",
+                        "\"workspaceMutations\":[]")
+                .doesNotContain("Noop.java", "mvn compile", "tool.log");
     }
 
     @Test
@@ -113,5 +142,15 @@ class TaskDigestManifestTest {
                 .doesNotContain("完整的旧会话评论不应出现在摘要")
                 .doesNotContain("frontend.js")
                 .doesNotContain("stage 3 前端页面");
+    }
+
+    private static void completeSuccessfulTool(SqliteRuntimeStore runtime, String sessionId, String runId,
+                                               String toolName, String arguments, String metadata, int step) {
+        runtime.markRunStatus(runId, RunStatus.WAITING_TOOL);
+        var call = runtime.createToolCall(runId, "provider-evidence-" + step, toolName, arguments,
+                "delivery-evidence-" + step);
+        runtime.markToolRunning(call.id());
+        assertThat(runtime.commitToolOutcome(sessionId, runId, call, true, "ok", null,
+                metadata, metadata, step)).isTrue();
     }
 }

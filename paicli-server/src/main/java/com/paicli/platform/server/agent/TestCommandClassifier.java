@@ -101,14 +101,12 @@ public final class TestCommandClassifier {
     private static boolean mavenTestArgument(String argument) {
         String lower = argument.toLowerCase(Locale.ROOT);
         return lower.equals("test") || lower.equals("verify") || lower.equals("integration-test")
-                || lower.equals("surefire:test") || lower.equals("failsafe:integration-test")
-                || lower.startsWith("-dtest=") || lower.startsWith("-dit.test=");
+                || lower.equals("surefire:test") || lower.equals("failsafe:integration-test");
     }
 
     private static boolean gradleTestArgument(String argument) {
         String lower = argument.toLowerCase(Locale.ROOT);
-        return lower.equals("test") || lower.equals("check") || lower.startsWith("test")
-                || lower.startsWith("check");
+        return lower.equals("test") || lower.equals("check");
     }
 
     private static boolean npmTestInvocation(List<String> args) {
