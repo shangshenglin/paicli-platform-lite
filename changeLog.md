@@ -4,6 +4,14 @@
 
 ## 2026-08-09
 
+### PRD Analysis Agent 复审重构：移除独立 Runtime，回归 PaiCLI Managed Run Harness
+
+- 变更：基于最新 `master` 撤销 `PrdAnalysisEngine + ModelClient + TaskExecutor + prd_analysis_actions + AtomicFileWriter` 的独立执行链，改为 `PrdAnalysisCoordinator` 只维护业务状态；Mapper、Node Analyst、Reconciler 均创建普通持久化 Run，由现有 `RunProcessor / ContextManager / ToolCatalog / ToolRouter` 执行，三个结构化提交统一落到 `PrdAnalysisToolProvider` 和普通 `tool_calls` 生命周期。
+- 变更：恢复附件摄入与快照分块、迁移 40 的 source/chunk/node/dependency/finding/evidence/question/check/run binding 模型、Java Validator 的有限 FIXABLE 回流、用户回答后重新 RECONCILING、ArtifactStore 五类标准产物、PlanService Handoff、Console 独立入口、Micrometer 指标与过期 claim 恢复；删除格式失败时伪造业务事实的 fallback 路径。
+- 变更：修复内置 PRD Profile 的跨项目解析。启动种子仍只创建一套 `system.prd.mapper/node-analyst/reconciler`，但仅 `templateKey=system.prd` 可被其他项目复用；普通用户 Profile 继续严格项目隔离。恢复 Windows Maven Wrapper 对普通目录空 `Target` 的兼容判断，并同步 Console 静态资源版本安全测试。
+- 思路：PRD 层只拥有可审计业务状态和确定性门禁，不拥有第二套 Agent Loop、ToolCall、并发模型或 Artifact 文件协议；模型失败必须由普通 Run 重试/失败暴露，不能用正则或默认实体掩盖。数据库迁移号顺延到 40，避免与 ExpertThread 迁移 38、Completion Contract 迁移 39 冲突。
+- 验证：新增 `PrdAnalysisHarnessIntegrationTest`，用 Scripted Model 真实贯通 Profile/required Skill/RunProcessor/普通 ToolCall/PrdAnalysisToolProvider，并验证 providerCallId 与内部 ToolCall ID 的持久化边界；新增跨项目内置 Profile、同模板伪装 Profile 与普通 Profile 的隔离测试。`node --check paicli-server/src/main/resources/static/app.js`、全量 `.\mvnw.cmd clean test` 与 `.\mvnw.cmd clean package` 均通过；每轮 common 3 + server 316 + sandbox 4，共 323 项测试零失败，`git diff --check` 通过。API/运行架构/阶段/配置与 Console 已同步 README、OpenAPI、`docs/architecture.md`、`docs/phases.md`、`.env.example`；Sandbox 与产品站行为未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
+
 ### 技术架构与面试材料同步：远端 master 协作连续性与 Harness 证据闭环
 
 - 变更：以远端 `origin/master` 的近期提交（截至 `2520438`）和本文件 2026-08-08/09 条目为事实来源，更新根目录《PaiCLI Platform Lite 技术架构与面试讲解》和《PaiCLI Platform Lite 技术架构与面试指南》。补齐 ExpertThread 的逻辑线程边界、按专家归属的 resume/digest、活跃 Run 评论的原子竞态处理与 `archived` 语义；补齐 `WAITING_EXTERNAL` / `WAITING_AGENT` 的 deferred `get_agent_result` 恢复链路。

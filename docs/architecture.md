@@ -82,7 +82,7 @@ Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService → PrdA
     状态机：INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED
     ├─ INGESTING   PrdSourceIngestionService（DocumentTextExtractor + StructuredDocumentChunker 快照分块）
     ├─ MAPPING     Mapper Run（system.prd.mapper + prd-map skill）→ prd_submit_map
-    ├─ ANALYZING   N 个 Node Analyst Child Run（system.prd.node-analyst + prd-node-analyze）→ prd_submit_node_analysis
+    ├─ ANALYZING   N 个 Node Analyst 业务子 Run（普通 Managed Run，由 prd_analysis_runs 绑定）→ prd_submit_node_analysis
     ├─ RECONCILING Reconciler Run（system.prd.reconciler + prd-reconcile）→ prd_submit_reconciliation
     ├─ VERIFYING   PrdAnalysisValidator（Java 8 项确定性校验）→ FIXABLE 回流 / AMBIGUOUS 进入 WAITING_USER
     ├─ WAITING_USER 用户批量回答 → 重新 RECONCILING
@@ -97,7 +97,8 @@ Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService → PrdA
 - **结构化提交**：模型只通过三个粗粒度 submit 工具提交，全部事务写入；ID 由 Server 生成，Markdown 是派生产物。
 - **确定性校验**：Validator 纯 Java，FIXABLE（重复实体等）自动回流最多 2 轮，AMBIGUOUS（字段缺失/规则互斥）产生 BLOCKING 问题进入 WAITING_USER。
 - **Skill 注入**：Agent Profile 的 `skillNamesJson` 作为 required skill，由 ContextManager 把 SKILL.md 全文注入 system 前缀（普通 Run 不受影响）。
-- **评测**：simple-order fixture + 确定性评分（实体/规则数、指定字段映射、冲突发现、阻塞问题与回答后通过），LLM Judge 不作硬门禁。
+- **系统 Profile 作用域**：只有 `templateKey=system.prd` 的三个内置 Profile 可跨项目解析，避免启动时在 `default` 种子化后其他项目无法创建 Mapper Run；普通 Profile 仍保持项目隔离。
+- **评测**：simple-order fixture + 确定性评分（实体/规则数、指定字段映射、冲突发现、阻塞问题与回答后通过），并以 Scripted Model 真实执行一次 `RunProcessor → ToolCall → PrdAnalysisToolProvider`；LLM Judge 不作硬门禁。
 
 
 Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把“计划”从模型文本变成可恢复、可审计、可调度的数据对象，但不替代现有 RunProcessor，也不绕过 ToolCall、Approval、Event、Artifact 和预算链路。
@@ -247,7 +248,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 38：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 40：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–37 覆盖协作工作区、WorkingPlan、Run 反思和任务摘要/交付清单；38 增加 ExpertThread，39 增加 Completion Contract、结构化工具证据和 Deferred 外部工具调用，40 增加 PRD Analysis 的 10 张业务状态表。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

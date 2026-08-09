@@ -775,6 +775,25 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void resolvesOnlyBuiltInPrdProfilesAcrossProjects() throws Exception {
+        store();
+        ProductivityStore productivity = new ProductivityStore(properties());
+        var systemPrd = productivity.saveAgentProfile("system.prd.mapper", "default", "PRD Mapper",
+                "built in", "map", null, "[]", "[]", "", "EXPERT", "MANUAL",
+                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "system.prd", 1);
+        var ordinary = productivity.saveAgentProfile("ordinary-agent", "default", "Ordinary",
+                "project scoped", "work", null, "[]", "[]", "", "EXPERT", "MANUAL",
+                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "", 0);
+        var lookalike = productivity.saveAgentProfile("user-prd-lookalike", "default", "Lookalike",
+                "must remain scoped", "work", null, "[]", "[]", "", "EXPERT", "MANUAL",
+                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "system.prd", 1);
+
+        assertThat(productivity.resolveAgentProfile("another-project", systemPrd.id())).contains(systemPrd);
+        assertThat(productivity.resolveAgentProfile("another-project", ordinary.id())).isEmpty();
+        assertThat(productivity.resolveAgentProfile("another-project", lookalike.id())).isEmpty();
+    }
+
+    @Test
     void persistsP1TemplatesProfilesBudgetsQueueSchedulesAndNotifications() throws Exception {
         SqliteRuntimeStore store = store();
         ProductivityStore productivity = new ProductivityStore(properties());
