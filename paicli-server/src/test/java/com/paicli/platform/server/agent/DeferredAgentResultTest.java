@@ -132,8 +132,10 @@ class DeferredAgentResultTest {
             @Override
             public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
                 if (calls.incrementAndGet() == 1) {
-                    return ModelResponse.tool("c-result", "get_agent_result",
-                            Map.of("child_run_id", childRunId));
+                    return ModelResponse.tools(List.of(
+                            new ModelResponse.ToolPlan("c-result", "get_agent_result",
+                                    Map.of("child_run_id", childRunId)),
+                            new ModelResponse.ToolPlan("c-list", "list_agents", Map.of())));
                 }
                 return ModelResponse.text("done");
             }
@@ -162,6 +164,11 @@ class DeferredAgentResultTest {
         assertThat(parked.waitKind()).isEqualTo("CHILD_RUN");
         assertThat(parked.waitRef()).isEqualTo(childRunId);
         assertThat(parked.waitingSince()).isNotNull();
+        // get_agent_result parks before the following read-only call can be
+        // parallelized; otherwise the batch would complete list_agents first.
+        var untouched = store.toolCallsForRun(parentRun.id()).stream()
+                .filter(call -> "list_agents".equals(call.toolName())).findFirst().orElseThrow();
+        assertThat(untouched.status()).isEqualTo(ToolCallStatus.REQUESTED);
         // No final tool message while waiting.
         assertThat(store.messages(parentSession.id()).stream()
                 .noneMatch(message -> "tool".equals(message.role()))).isTrue();

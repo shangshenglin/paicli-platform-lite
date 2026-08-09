@@ -28,6 +28,11 @@ public record RunEvidence(
         return filesChanged.stream().map(FileEvidence::path).distinct().toList();
     }
 
+    /** True when a real write or an explicit non-test command mutation was recorded. */
+    public boolean hasWorkspaceMutationEvidence() {
+        return !filesChanged.isEmpty() || lastMutationOrdinal >= 0;
+    }
+
     /** Artifacts that represent business output, excluding tool-output externalization. */
     public List<ArtifactEvidence> businessArtifacts() {
         return artifacts.stream()

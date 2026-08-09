@@ -60,6 +60,16 @@ class TestCommandClassifierTest {
     }
 
     @Test
+    void unsafeAggregatesCannotBecomePassingTestEvidence() {
+        assertThat(TestCommandClassifier.classify("mvn test || true")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn test; true")).isEmpty();
+        assertThat(TestCommandClassifier.classify("pytest | tee test.log")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn test && echo done")).isEmpty();
+        assertThat(TestCommandClassifier.classify("cd server && mvn test")).contains(TestFamily.MAVEN);
+        assertThat(TestCommandClassifier.classify("cd server && mvn test && mvn test")).contains(TestFamily.MAVEN);
+    }
+
+    @Test
     void shellOperatorsAndAdditionalFamiliesAreClassifiedConservatively() {
         assertThat(TestCommandClassifier.classify("mvn compile && echo test")).isEmpty();
         assertThat(TestCommandClassifier.classify("npm run build && echo test")).isEmpty();

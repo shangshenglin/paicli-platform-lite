@@ -50,13 +50,20 @@ class RunVerificationServiceTest {
         var result = service.verify(run(), "已经修改完成", contract(CompletionMode.MUTATION_REQUIRED, true, false, List.of()),
                 evidence(-1));
         assertThat(result.status()).isEqualTo(RunVerificationService.Status.REPAIRABLE);
-        assertThat(result.missingEvidence()).contains("a changed workspace file written by this Run");
+        assertThat(result.missingEvidence()).contains("a real workspace mutation recorded by this Run");
     }
 
     @Test
     void mutationRequiredPassesWithRealChange() {
         var result = service.verify(run(), "完成", contract(CompletionMode.MUTATION_REQUIRED, true, false, List.of()),
                 evidenceWithFile("src/A.java", 0));
+        assertThat(result.status()).isEqualTo(RunVerificationService.Status.PASS);
+    }
+
+    @Test
+    void mutationRequiredPassesWithExplicitCommandMutation() {
+        var result = service.verify(run(), "done", contract(CompletionMode.MUTATION_REQUIRED, true, false, List.of()),
+                new RunEvidence(List.of(), List.of(), List.of(), List.of(), 0));
         assertThat(result.status()).isEqualTo(RunVerificationService.Status.PASS);
     }
 

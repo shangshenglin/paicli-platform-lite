@@ -620,7 +620,8 @@ public class RunProcessor {
     private List<ToolCallRecord> readOnlyPrefix(List<ToolCallRecord> calls) {
         List<ToolCallRecord> batch = new ArrayList<>();
         for (ToolCallRecord call : calls) {
-            if (toolRouter.effect(call.toolName()) == ToolEffect.READ_ONLY
+            if (!"get_agent_result".equals(call.toolName())
+                    && toolRouter.effect(call.toolName()) == ToolEffect.READ_ONLY
                     && !approvalService.requiresApproval(call)) {
                 batch.add(call);
             } else {

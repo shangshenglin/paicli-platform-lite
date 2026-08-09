@@ -65,9 +65,9 @@ public class RunVerificationService {
         passed.add("completion contract: " + contract.mode().name());
 
         if (contract.requiresWorkspaceChange()) {
-            if (evidence.filesChanged().isEmpty()) {
-                failed.add("task requires workspace changes but no real file change was found");
-                missing.add("a changed workspace file written by this Run");
+            if (!evidence.hasWorkspaceMutationEvidence()) {
+                failed.add("task requires workspace changes but no real workspace mutation evidence was found");
+                missing.add("a real workspace mutation recorded by this Run");
             } else {
                 passed.add("real workspace change evidence");
             }

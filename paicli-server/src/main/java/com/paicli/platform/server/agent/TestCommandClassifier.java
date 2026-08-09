@@ -13,14 +13,15 @@ import java.util.Optional;
 public final class TestCommandClassifier {
     private TestCommandClassifier() { }
 
-    /** Returns the first high-confidence test family in the command. */
+    /** Returns a high-confidence test family whose exit code represents the test invocation. */
     public static Optional<TestFamily> classify(String command) {
         if (command == null || command.isBlank()) return Optional.empty();
-        for (String segment : segments(command)) {
-            Optional<TestFamily> family = classifySegment(tokens(segment));
-            if (family.isPresent()) return family;
-        }
-        return Optional.empty();
+        if (hasUnsafeOperator(command)) return Optional.empty();
+        List<String> segments = segments(command);
+        if (segments.isEmpty()) return Optional.empty();
+        // A pure && chain is safe only when the final command is the test
+        // invocation; its exit code is then the test command's exit code.
+        return classifySegment(tokens(segments.get(segments.size() - 1)));
     }
 
     public static boolean isTestCommand(String command) {
@@ -162,6 +163,19 @@ public final class TestCommandClassifier {
         }
         addSegment(result, current);
         return result;
+    }
+
+    private static boolean hasUnsafeOperator(String command) {
+        char quote = 0;
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+            if ((c == '\'' || c == '"') && (quote == 0 || quote == c)) {
+                quote = quote == 0 ? c : 0;
+                continue;
+            }
+            if (quote == 0 && (c == ';' || c == '|')) return true;
+        }
+        return false;
     }
 
     private static void addSegment(List<String> result, StringBuilder value) {

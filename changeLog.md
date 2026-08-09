@@ -4,6 +4,12 @@
 
 ## 2026-08-09
 
+### Completion Evidence 复核收尾：Deferred 批处理、mutation 边界与复合测试命令
+
+- 变更：将 `get_agent_result` 从只读工具集合和 `RunProcessor` 只读并行前缀中排除，保证会停放/唤醒父 Run 的调用先独立持久化；`RunEvidenceCollector` 不再把已识别测试命令的 workspace fingerprint 当作最后一次 mutation，非测试命令的显式 workspace mutation 可作为 `MUTATION_REQUIRED` 证据；`TestCommandClassifier` 拒绝 `||`、`;`、管道以及测试命令后的尾部命令，避免用复合命令最终的 0 退出码生成伪造 PASSED TestEvidence。
+- 思路：Completion Contract 必须区分源码/产品变更、测试生成物和可能改变父 Run 生命周期的外部等待；验证器消费统一的 mutation evidence，而不是只看 `write_file`，并让测试证据的退出码与最后一个实际测试 invocation 对齐。数据库 Schema、REST 请求/响应和 OpenAPI 未变，产品站未变。
+- 验证：定向 Maven 回归测试 23 项全部通过（`DeferredAgentResultTest`、`RunEvidenceCollectorTest`、`RunVerificationServiceTest`、`TestCommandClassifierTest`）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 仍有既有解析问题，测试使用同版本缓存 Maven 3.9.9 并包含 `paicli-common` 上游模块执行。
+
 ### Harness Loop v2 · PR：Completion Contract、执行证据与 Deferred get_agent_result（9 个提交）
 
 - 变更（Commit 1·结构化工具证据）：迁移 39 新增 `tool_calls.result_metadata_json`；LocalSandboxDriver 与 Sandbox 代理的 `write_file` 统一返回 `path/changed/beforeSha256/afterSha256/bytesWritten`，`execute_command` 继续带 `exitCode/timedOut/shell/cwd/durationMs`；ToolResult.metadata 持久化，证据不再依赖解析 stdout 文本。

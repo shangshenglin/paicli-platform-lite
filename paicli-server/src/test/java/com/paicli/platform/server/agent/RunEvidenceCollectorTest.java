@@ -104,6 +104,30 @@ class RunEvidenceCollectorTest {
         assertThat(evidence.tests()).isEmpty();
     }
 
+    @Test
+    void testOutputFingerprintDoesNotReplaceSourceMutationBoundary() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, new ObjectMapper());
+
+        var session = store.createSession("evidence4", "project-e");
+        var run = store.createRun(session.id(), "modify and test with generated output");
+        execute(store, session.id(), run.id(), "write_file",
+                "{\"path\":\"src/A.java\",\"content\":\"class A {}\"}",
+                "{\"path\":\"src/A.java\",\"changed\":true,\"afterSha256\":\"abc\"}", 0);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"mvn test\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 1);
+
+        RunEvidence evidence = collector.collect(run.id());
+
+        assertThat(evidence.lastMutationOrdinal()).isZero();
+        assertThat(evidence.hasWorkspaceMutationEvidence()).isTrue();
+        assertThat(evidence.testStatusAfterLastMutation()).containsEntry(TestFamily.MAVEN, TestStatus.PASSED);
+    }
+
     private static void execute(SqliteRuntimeStore store, String sessionId, String runId,
                                 String toolName, String arguments, String metadata, int step) {
         store.markRunStatus(runId, com.paicli.platform.common.RunStatus.WAITING_TOOL);

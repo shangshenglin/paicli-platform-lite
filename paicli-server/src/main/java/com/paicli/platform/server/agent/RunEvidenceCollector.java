@@ -58,7 +58,10 @@ public class RunEvidenceCollector {
                                 testStatus(command),
                                 command.exitCode(), ordinal));
                     }
-                    if (workspaceChanged(call)) lastMutationOrdinal = ordinal;
+                    // Test/build output commonly changes target/, caches, or
+                    // reports. Those generated files must not move the
+                    // source mutation boundary past the TestEvidence itself.
+                    if (family == null && workspaceChanged(call)) lastMutationOrdinal = ordinal;
                 }
                 continue;
             }
