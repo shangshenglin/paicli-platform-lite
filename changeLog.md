@@ -2,6 +2,50 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-09
+
+### WorkingPlan 基础能力常驻与明确触发规则
+
+- 变更：`ContextManager` 在 Agent Profile 配置非空业务 Tool allowlist 时，额外保留 `update_working_plan`，确保 WorkingPlan 作为 Run 内部 Harness 能力不会被业务工具白名单过滤；未扩大其他 Core Tool 权限。
+- 变更：Agent 通用 System Prompt 明确 WorkingPlan 的创建条件、简短记录与 `evidenceRefs` 更新要求，以及工具失败、验证失败、用户补充要求或执行方向变化时先更新再继续的规则；简单单步/只读/可直接回答任务仍不要求创建计划。
+- 思路：继续由模型在正常 Model Decision 中自主判断 WorkingPlan，保持 Act → Observe → Replan 流程，不新增 Plan 阶段、Run 状态、独立 Model Call、数据结构或 Tool Schema。
+- 验证：新增 `ContextManagerTest` 覆盖无 allowlist、有业务 allowlist 时的 `update_working_plan` 可见性，以及其他基础工具不被额外放开；新增 System Prompt 触发规则断言。同步修正已有迁移断言以包含当前代码中的迁移 40，随后执行全量 `clean verify`。同步更新 README 与架构说明；未修改 API、配置、Sandbox、Formal Plan 或产品站，`docs/phases.md`、OpenAPI、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用。
+
+### Completion Evidence 二次复核：命令 mutation 证据统一与测试分类再收紧
+
+- 变更：新增 `WorkspaceMutationEvidence` 和 `RunEvidence.workspaceMutations`；`AgentResultService`、SQLite 终态 delegation envelope、`AgentResultValidator` 与 `RunVerificationService` 统一消费/传递 `workspace_mutations`，命令修改未知具体文件时不伪造 `files_changed`。`TestCommandClassifier` 拒绝换行、单独后台 `&`、`-DskipTests=true`、pytest `--collect-only` 和 cargo `--no-run`。
+- 思路：Child CompletionVerifier 与 Parent AgentResultValidator 必须基于同一份结构化证据判断 Completion Contract；测试证据继续采用宁可漏报、不可误报的保守边界。未改变数据库 Schema、REST 路径请求响应或产品站能力，OpenAPI 与产品站文档不适用。
+- 验证：新增并通过 21 项定向测试，覆盖分类器绕过、RunEvidence → AgentResultService → AgentResultValidator 端到端命令 mutation，以及 SQLite delegation envelope；随后执行全量 `clean test` 与 `clean package`。
+
+### Completion Evidence 复核收尾：Deferred 批处理、mutation 边界与复合测试命令
+
+- 变更：将 `get_agent_result` 从只读工具集合和 `RunProcessor` 只读并行前缀中排除，保证会停放/唤醒父 Run 的调用先独立持久化；`RunEvidenceCollector` 不再把已识别测试命令的 workspace fingerprint 当作最后一次 mutation，非测试命令的显式 workspace mutation 可作为 `MUTATION_REQUIRED` 证据；`TestCommandClassifier` 拒绝 `||`、`;`、管道以及测试命令后的尾部命令，避免用复合命令最终的 0 退出码生成伪造 PASSED TestEvidence。
+- 思路：Completion Contract 必须区分源码/产品变更、测试生成物和可能改变父 Run 生命周期的外部等待；验证器消费统一的 mutation evidence，而不是只看 `write_file`，并让测试证据的退出码与最后一个实际测试 invocation 对齐。数据库 Schema、REST 请求/响应和 OpenAPI 未变，产品站未变。
+- 验证：定向 Maven 回归测试 23 项全部通过（`DeferredAgentResultTest`、`RunEvidenceCollectorTest`、`RunVerificationServiceTest`、`TestCommandClassifierTest`）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 仍有既有解析问题，测试使用同版本缓存 Maven 3.9.9 并包含 `paicli-common` 上游模块执行。
+
+### Harness Loop v2 · PR：Completion Contract、执行证据与 Deferred get_agent_result（9 个提交）
+
+- 变更（Commit 1·结构化工具证据）：迁移 39 新增 `tool_calls.result_metadata_json`；LocalSandboxDriver 与 Sandbox 代理的 `write_file` 统一返回 `path/changed/beforeSha256/afterSha256/bytesWritten`，`execute_command` 继续带 `exitCode/timedOut/shell/cwd/durationMs`；ToolResult.metadata 持久化，证据不再依赖解析 stdout 文本。
+- 变更（Commit 2·测试族分类）：新增 `TestFamily` 与 `TestCommandClassifier`，删除 `contains("mvn")/contains("check")` 粗糙启发式；`mvn compile`、`./check-status.sh` 不再误判为测试。
+- 变更（Commit 3·证据收集）：新增 `RunEvidenceCollector` 与 `RunEvidence/FileEvidence/CommandEvidence/TestEvidence/ArtifactEvidence/TestStatus`；`lastMutationOrdinal` 仅由真实 write_file 变更决定，供“最后 mutation 之后测试必须通过”判定。
+- 变更（Commit 4·完成合同）：新增 `CompletionMode`、`RunCompletionContractRecord` 与 `run_completion_contracts` 表；`CompletionContractService` 按 DelegationEnvelope → PlanStep → Root 保守分类器 → WorkingPlan completion 的可靠性顺序建立合同，只可加强不可被模型削弱；`CompletionRequirementClassifier` 只识别高置信度命令式任务，问答默认 TEXT_ONLY；`update_working_plan` 增加可选 `completion` 结构化声明。
+- 变更（Commit 5·合同驱动验证）：`RunVerificationService` 重构为纯逻辑 `verify(run, finalAnswer, contract, evidence)`，按 TEXT_ONLY / MUTATION_REQUIRED / TEST_REQUIRED / MUTATION_AND_TEST 验证；不同 TestFamily 互不覆盖，required tests 必须在最后一次真实 mutation 之后通过。
+- 变更（Commit 6·AgentResult 证据闭环）：新增 `AgentResultService` 自动归集 `files_changed/commands_executed/tests/artifacts/completion_contract/evidence`；`AgentResultValidator` 增加 contract-aware 校验；`DeliveryManifestService.recordStageDelivery(taskId, stage, runId)` 与 `WorkspaceMergeService.ChildChanges.of` 复用统一证据。
+- 变更（Commit 7·Deferred get_agent_result）：`ToolCallStatus.WAITING_EXTERNAL`；`tool_calls` 增加 `wait_kind/wait_ref/waiting_since`；`get_agent_result` 在 child 未终态时返回 deferred metadata，RunProcessor 标记 WAITING_EXTERNAL 且 Parent 进入 WAITING_AGENT（不追加最终 tool 消息、不轮询）；child 终态由 `DeferredAgentResultService` 原子完成原始 ToolCall、追加 tool 消息并重排队 Parent。
+- 变更（Commit 8·恢复/竞态/审计）：`@PostConstruct` 启动恢复扫描 WAITING_EXTERNAL CHILD_RUN（child 已终态立即 resolve）；Lost Wakeup 双边幂等保护；事件 `tool.deferred / tool.deferred.resolved / agent.result.validated / run.evidence.collected / run.completion_contract.created / strengthened`。
+- 变更（Commit 9·文档与回归）：README、docs/architecture.md、docs/phases.md、docs/docker-sandbox.md、changeLog 同步；`.\mvnw.cmd clean test` 全量通过（paicli-common + paicli-server + paicli-sandbox-agent）。
+- 思路：Harness 从“行为驱动”升级为“任务要求驱动”——模型负责策略与代码生成，系统环境提供真实执行事实（ToolCall/ToolResult/Workspace/Artifact），CompletionVerifier 用机器可验证的合同 vs 证据决定是否完成；自然语言业务语义仍由 Parent Reviewer/人工/真实测试负责，不引入 Completion Judge LLM，不假装自动理解所有 done_criteria。
+- 验证：`.\mvnw.cmd clean test` 全量通过（含新增 TestCommandClassifierTest、RunEvidenceCollectorTest、CompletionRequirementClassifierTest、CompletionContractServiceTest、RunVerificationServiceTest、AgentResultValidatorTest、AgentResultServiceTest、DeferredAgentResultTest、LocalSandboxDriverTest/SqliteRuntimeStoreTest 扩展）；OpenAPI 无 REST 路径变更（get_agent_result 行为变化为 Server 内部协议，不改变请求/响应 schema），`paicli-site/README.md` 无产品可见能力变更，故二者本次不适用；`git diff --check` 通过。
+### Harness Loop v2 审查修复：真实变更证据、原子 Deferred 停放与严格完成门禁
+
+- 变更：修复 Docker Sandbox `write_file` 在写入后才计算 before hash 的问题；`execute_command` 持久化 workspace fingerprint，RunEvidence 只接受明确的变更证据，缺少 metadata 时不猜测 `changed=true`。
+- 变更：新增 `parkDeferredToolCallAndWaitParent` SQLite 原子操作，在同一事务内提交 ToolCall `WAITING_EXTERNAL`、父 Run `WAITING_AGENT` 和事件，消除 child 终态与 parent 停放之间的 Lost Wakeup 窗口。
+- 变更：Formal PlanStep 按绑定 `run_id` 参与 Contract 推导；WorkingPlan completion 更新触发 strengthen；预算停止先经过 CompletionVerifier，合同未满足时进入 FAILED。
+- 变更：测试命令按 shell operator boundary 与 executable/参数保守分类，补充 Gradle check、pnpm/yarn、dotnet test，并拒绝 `echo test`、`echo junit`、`test-data.sh` 等假阳性；AgentResult 不再允许普通 command 替代 PASSED TestEvidence。
+- 变更：RunEvidence 增加业务 Artifact 视图，`tool_result` 不再进入 AgentResult 或 DeliveryManifest 的业务交付清单；同步 README、架构、阶段、Docker Sandbox 和 Agent prompt 规则。
+- 思路：Completion Contract -> Real Evidence -> Deterministic Verification 保持单一闭环，恢复与交付路径复用同一证据源；数据库 schema、REST API/OpenAPI、配置和产品站能力未变，不适用对应文档同步。
+- 验证：完整 Maven 测试通过（common 3、server 281、sandbox-agent 4，BUILD SUCCESS）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 直接调用存在既有解析问题，测试使用同版本已缓存 Maven 二进制完成。
+
 ## 2026-08-08
 
 ### ExpertThread：同一专家在协作任务内的逻辑线程 + 模型执行期间新评论竞态保护
