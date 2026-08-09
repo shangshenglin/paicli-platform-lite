@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,8 @@ public class PlanParser {
     private static final Set<String> EDGE_TYPES = Set.of("DEPENDENCY", "CONDITIONAL", "REWORK");
     private static final Set<String> EDGE_CONDITIONS = Set.of("ALWAYS", "ON_SUCCESS", "ON_FAILURE",
             "ON_VALIDATION_FAILURE", "ON_SKIPPED");
+    private static final Set<String> ISOLATION_STRATEGIES = Set.of("SHARED_SESSION", "INTERNAL_SESSION",
+            "GIT_WORKTREE");
     private final ObjectMapper mapper;
 
     public PlanParser(ObjectMapper mapper) {
@@ -56,13 +59,21 @@ public class PlanParser {
                     String type = text(node.path("type").asText("ANALYSIS"), "ANALYSIS", 40).toUpperCase();
                     if (!TYPES.contains(type)) errors.add(clientId + " has unsupported type: " + type);
                     String mode = text(node.path("execution_mode").asText("REACT"), "REACT", 40).toUpperCase();
+                    if ("ASYNC_JOB".equals(type)) mode = "ASYNC";
+                    if ("USER_APPROVAL".equals(type)) mode = "MANUAL";
                     if (!EXECUTION_MODES.contains(mode)) errors.add(clientId + " has unsupported execution_mode: " + mode);
+                    if ("MANUAL".equals(mode) && !"USER_APPROVAL".equals(type)) {
+                        errors.add(clientId + " MANUAL mode requires USER_APPROVAL type");
+                    }
                     List<String> criteria = stringList(node.path("done_criteria"), 20, 500);
                     List<String> deps = stringList(node.path("dependencies"), 20, 120);
-                    List<String> readSet = stringList(firstArray(node, "resource_read_set", "read_set"), 50, 240);
-                    List<String> writeSet = stringList(firstArray(node, "resource_write_set", "write_set"), 50, 240);
+                    List<String> readSet = resourceList(firstArray(node, "resource_read_set", "read_set"), 50, 240);
+                    List<String> writeSet = resourceList(firstArray(node, "resource_write_set", "write_set"), 50, 240);
                     String isolation = text(node.path("isolation_strategy").asText("SHARED_SESSION"),
                             "SHARED_SESSION", 40).toUpperCase();
+                    if (!ISOLATION_STRATEGIES.contains(isolation)) {
+                        errors.add(clientId + " has unsupported isolation_strategy: " + isolation);
+                    }
                     int maxParallelism = Math.max(1, Math.min(node.path("max_parallelism").asInt(1), 16));
                     int criticalPathWeight = Math.max(0, node.path("critical_path_weight").asInt(0));
                     parsed.add(new ParsedStep(clientId, original, index + 1, title, description, type, mode,
@@ -131,10 +142,12 @@ public class PlanParser {
                     };
                     String condition = text(edge.path("condition").asText(defaultCondition),
                             defaultCondition, 40).toUpperCase();
-                    if ("DEPENDENCY".equals(type)) condition = "ON_SUCCESS";
                     if (!EDGE_TYPES.contains(type)) errors.add(label + " has unsupported type: " + type);
                     if (!EDGE_CONDITIONS.contains(condition)) {
                         errors.add(label + " has unsupported condition: " + condition);
+                    }
+                    if ("DEPENDENCY".equals(type) && !"ON_SUCCESS".equals(condition)) {
+                        errors.add(label + " DEPENDENCY edge must use ON_SUCCESS");
                     }
                     String pair = fromStepId + "->" + toStepId;
                     if (!edgePairs.add(pair)) {
@@ -188,6 +201,21 @@ public class PlanParser {
             if (!value.isBlank()) values.add(value.length() > maxChars ? value.substring(0, maxChars) : value);
         }
         return values;
+    }
+
+    private static List<String> resourceList(JsonNode node, int maxItems, int maxChars) {
+        Set<String> values = new LinkedHashSet<>();
+        if (!node.isArray()) return List.of();
+        int itemCount = 0;
+        for (JsonNode item : node) {
+            String raw = item.asText("").trim();
+            if (raw.isBlank()) continue;
+            if (++itemCount > maxItems) throw new IllegalArgumentException("list contains too many items");
+            String bounded = raw.length() > maxChars ? raw.substring(0, maxChars) : raw;
+            String normalized = PlanResourceNormalizer.normalize(bounded);
+            if (!normalized.isBlank()) values.add(normalized);
+        }
+        return List.copyOf(values);
     }
 
     private static JsonNode firstArray(JsonNode node, String first, String second) {

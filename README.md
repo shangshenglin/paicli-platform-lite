@@ -643,7 +643,7 @@ GET                         /v1/async-jobs/{jobId}
 POST                        /v1/async-jobs/{jobId}/cancel
 ```
 
-Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、关键路径权重、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、失败分类、调度幂等键和绑定的普通 `run_id`；`plan_edges` 保存 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类边、确定性条件、优先级、最大回流次数和已回流次数。旧数据库中的边自动迁移为 `DEPENDENCY + ON_SUCCESS`。条件只支持 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE` 和 `ON_SKIPPED`，由 Server 代码判断，不让模型临时解释布尔逻辑；未命中的分支自动进入 `SKIPPED`，Validation Check 与 `plan_events` 同步收口。`REWORK` 只重置目标节点及其下游分支，并受持久化 `max_traversals` 限制，耗尽后按原失败语义终止 Plan。
+Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭环：`plans` 保存目标、摘要、状态、版本和原始 JSON；`plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、作为兼容优先级 Hint 的 `critical_path_weight`、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、失败分类、调度幂等键和绑定的普通 `run_id`；`plan_edges` 保存 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类边、确定性条件、优先级、最大回流次数和已回流次数。`PlanParser` 会将 `ASYNC_JOB` 和 `USER_APPROVAL` 分别规范为 `ASYNC` 和 `MANUAL`，拒绝非 `USER_APPROVAL` 的 `MANUAL` 模式、非 `ON_SUCCESS` 的 `DEPENDENCY` 边以及未知隔离策略；资源读写集在持久化前统一为小写、正斜杠、无 `./` 前缀且去重。旧数据库中的边自动迁移为 `DEPENDENCY + ON_SUCCESS`。条件只支持 `ALWAYS`、`ON_SUCCESS`、`ON_FAILURE`、`ON_VALIDATION_FAILURE` 和 `ON_SKIPPED`，由 Server 代码判断，不让模型临时解释布尔逻辑；未命中的分支自动进入 `SKIPPED`，Validation Check 与 `plan_events` 同步收口。`REWORK` 只重置目标节点及其下游分支，并受持久化 `max_traversals` 限制，耗尽后按原失败语义终止 Plan。
 
 `GET /v1/plans/{id}` 和独立的 `/state` 接口会返回结构化 `PlanState`：状态计数、READY/活跃/等待人工 Step、阻塞原因、累计模型 Token、最后事件序号和更新时间。`USER_APPROVAL` 是真实 Human Node，必须通过 `/v1/plan-steps/{id}/decision` 持久化 `APPROVED` 或 `REJECTED`；决定完成后才计算条件边。Console 的 Plan 详情展示类型化边、状态快照、阻塞原因和回流计数，并允许处理等待中的人工节点。
 
@@ -651,7 +651,7 @@ Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭
 
 新增 API 包括 `/v1/sessions/{sessionId}/plans`、`/v1/plans/{id}/dispatch`、`/v1/plans/{id}/dag/batches`、`/v1/plans/{id}/jobs`、`/v1/plans/{id}/validation-checks`、`/v1/async-jobs` 和 `/v1/async-jobs/{id}/cancel`。Console 普通消息区会在当前 Session 顶部以 Plan 摘要作为短任务名，并展示完整目标、状态、步骤进度和当前步骤，保留打开工作台、详情和调度动作。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
 
-阶段 5/6 增量把上述基础执行闭环推进到受控并行和反馈闭环：Plan JSON 可声明 `resource_read_set`、`resource_write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；调度器会按关键路径优先级领取 Step，并用资源读写集阻止同一计划内的活跃写写或读写冲突。需要隔离的 Step 会创建内部 Session，`GIT_WORKTREE` 当前落为 Lite 受控 workspace 引用和目录边界；真实 Git worktree 的 add/merge 仍预留在后续工具层，不在当前版本自动执行。Plan 验证结果会写入 `agent_feedback`，验证通过时生成可追溯的过程型 Memory，失败时记录 validation/failure class，供后续专家评分、调度策略和人工复盘使用；Actuator 指标同步记录 Plan 验证成功/失败、资源冲突、Agent Feedback 和验证 Memory 写入次数。
+阶段 5/6 增量把上述基础执行闭环推进到受控并行和反馈闭环：Plan JSON 可声明 `resource_read_set`、`resource_write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；标准 Planner 只生成资源与隔离契约，不生成后两项。调度器按运行时计算的非 `REWORK` 图关键深度、兼容保留的人工 `critical_path_weight` Hint、下游数量和 ordinal 领取 Step，并用规范化后的资源读写集阻止同一计划内的活跃写写或读写冲突。需要隔离的 Step 会创建内部 Session，`GIT_WORKTREE` 当前落为 Lite 受控 workspace 引用和目录边界；真实 Git worktree 的 add/merge 仍预留在后续工具层，不在当前版本自动执行。Plan 验证结果会写入 `agent_feedback`，验证通过时生成可追溯的过程型 Memory，失败时记录 validation/failure class，供后续专家评分、调度策略和人工复盘使用；Actuator 指标同步记录 Plan 验证成功/失败、资源冲突、Agent Feedback 和验证 Memory 写入次数。
 
 所有绑定 Agent Profile 的专家 Run 都会获得受控 Plan 工具：`list_plans`、`get_plan`、`create_plan`、`replan_plan`、`start_plan` 和 `cancel_plan`。读取只限当前项目；创建、调整、启动和取消必须经过既有持久化 Approval 流程，并且只能修改专家自己创建、当前 Step 绑定或父委派明确分配的 Plan。写操作以 ToolCall 为幂等边界，普通未绑定专家 Profile 的 Run 不开放这些工具。
 

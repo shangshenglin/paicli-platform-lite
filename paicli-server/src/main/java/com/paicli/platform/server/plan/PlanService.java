@@ -1,8 +1,6 @@
 package com.paicli.platform.server.plan;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.paicli.platform.server.domain.SessionRecord;
 import com.paicli.platform.server.model.ModelClient;
 import com.paicli.platform.server.model.ModelMessage;
@@ -34,7 +32,10 @@ public class PlanService {
                   "type": "INFORMATION_GATHERING|ANALYSIS|TOOL_EXECUTION|VALIDATION|SYNTHESIS|DELEGATION|ASYNC_JOB|USER_APPROVAL",
                   "execution_mode": "REACT|MANUAL|ASYNC|NONE",
                   "dependencies": [],
-                  "done_criteria": ["observable completion criterion"]
+                  "done_criteria": ["observable completion criterion"],
+                  "resource_read_set": [],
+                  "resource_write_set": [],
+                  "isolation_strategy": "SHARED_SESSION|INTERNAL_SESSION|GIT_WORKTREE"
                 }
               ],
               "edges": [
@@ -56,6 +57,11 @@ public class PlanService {
             - 第一个步骤的 dependencies 必须是空数组；后续步骤只能依赖其他步骤的 client_id，步骤不得依赖自己。
             - 能由 Agent 读取信息、分析、修改代码或执行验证的步骤必须使用 execution_mode=REACT。
             - 只有明确需要用户作出决定或提供外部信息时，才同时使用 type=USER_APPROVAL 和 execution_mode=MANUAL；不得把读取错误、检查文件、修复代码或运行测试设为 MANUAL。
+            - type=ASYNC_JOB 必须使用 execution_mode=ASYNC；type=USER_APPROVAL 必须使用 execution_mode=MANUAL。
+            - 只有明确知道资源路径时才填写 resource_read_set 或 resource_write_set；未知时使用空数组，不得猜测不存在的文件或资源。
+            - 会修改文件的步骤必须在 resource_write_set 中声明已知的目标路径。
+            - 普通步骤使用 SHARED_SESSION；明确需要独立上下文时使用 INTERNAL_SESSION；需要独立代码工作区时使用 GIT_WORKTREE。
+            - 不要生成 critical_path_weight 或 max_parallelism；调度优先级由 Runtime 根据 Graph 自动计算。
             - 步骤保持在任务层级，不要写成底层工具参数。
             - 结果需要检查或汇总时，必须包含验证或综合步骤。
             - objective、summary、title、description 和 done_criteria 的自然语言内容使用中文。
@@ -90,7 +96,7 @@ public class PlanService {
     public PlanStore.Plan generate(String sessionId, String projectKey, String objective) {
         String resolvedProject = resolveProject(sessionId, projectKey);
         String userPrompt = "项目：" + resolvedProject + "\n用户目标：\n" + objective;
-        String raw = normalizeGeneratedPlan(generatePlanJson(userPrompt));
+        String raw = generatePlanJson(userPrompt);
         if ("demo".equalsIgnoreCase(modelClient.name()) && (raw == null || !raw.trim().startsWith("{"))) {
             raw = fallbackPlan(objective);
         }
@@ -101,7 +107,7 @@ public class PlanService {
                     + "\n\n上一次生成的计划未通过结构校验。请根据错误重新生成完整 JSON，不要解释。"
                     + "\n校验错误：" + firstFailure.getMessage()
                     + "\n无效计划：\n" + bounded(raw, 16_000);
-            String repaired = normalizeGeneratedPlan(generatePlanJson(repairPrompt));
+            String repaired = generatePlanJson(repairPrompt);
             try {
                 return create(sessionId, null, resolvedProject, objective, repaired, "MODEL");
             } catch (IllegalArgumentException secondFailure) {
@@ -116,25 +122,6 @@ public class PlanService {
                 ModelMessage.system(PLANNER_PROMPT),
                 ModelMessage.user(userPrompt)
         ), List.of(), 4096, "disabled", "")).content();
-    }
-
-    private String normalizeGeneratedPlan(String raw) {
-        try {
-            JsonNode root = mapper.readTree(raw);
-            JsonNode steps = root.path("steps");
-            if (!steps.isArray()) return raw;
-            for (JsonNode step : steps) {
-                if (!(step instanceof ObjectNode object)) continue;
-                String mode = step.path("execution_mode").asText("REACT");
-                String type = step.path("type").asText("ANALYSIS");
-                if ("MANUAL".equalsIgnoreCase(mode) && !"USER_APPROVAL".equalsIgnoreCase(type)) {
-                    object.put("execution_mode", "REACT");
-                }
-            }
-            return mapper.writeValueAsString(root);
-        } catch (Exception ignored) {
-            return raw;
-        }
     }
 
     private static String bounded(String value, int maxChars) {

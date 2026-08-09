@@ -85,17 +85,88 @@ class PlanServiceTest {
     }
 
     @Test
-    void normalizesGeneratedNonInteractiveManualStepToReact() throws Exception {
+    void regeneratesGeneratedNonInteractiveManualStepInsteadOfSilentlyChangingIt() throws Exception {
         SqliteRuntimeStore runtime = runtime();
-        PlanService service = service(runtime, new JsonModelClient(manualAnalysisPlan()));
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<String> repairPrompt = new AtomicReference<>();
+        ModelClient model = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                if (calls.incrementAndGet() == 1) return ModelResponse.text(manualAnalysisPlan());
+                repairPrompt.set(request.messages().get(1).content());
+                return ModelResponse.text(oneStepPlan());
+            }
 
+            @Override
+            public String name() {
+                return "test";
+            }
+        };
+
+        PlanService service = service(runtime, model);
         var plan = service.generate(null, "default", "inspect and repair");
 
+        assertThat(calls).hasValue(2);
+        assertThat(repairPrompt.get()).contains("MANUAL mode requires USER_APPROVAL type");
         assertThat(service.view(plan.id()).steps()).singleElement()
                 .satisfies(step -> {
-                    assertThat(step.type()).isEqualTo("ANALYSIS");
+                    assertThat(step.type()).isEqualTo("SYNTHESIS");
                     assertThat(step.executionMode()).isEqualTo("REACT");
                 });
+    }
+
+    @Test
+    void canonicalizesSpecialStepModesAndResourceSetsBeforePersistence() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanService service = service(runtime, new JsonModelClient(oneStepPlan()));
+
+        var plan = service.create(null, null, "default", "canonical plan", canonicalPlan(), "MANUAL");
+
+        assertThat(service.view(plan.id()).steps()).satisfiesExactly(
+                async -> assertThat(async.executionMode()).isEqualTo("ASYNC"),
+                approval -> assertThat(approval.executionMode()).isEqualTo("MANUAL"),
+                resourceStep -> {
+                    assertThat(resourceStep.resourceReadSetJson()).isEqualTo("[\"src/auth\"]");
+                    assertThat(resourceStep.resourceWriteSetJson()).isEqualTo("[\"docs/readme.md\"]");
+                });
+    }
+
+    @Test
+    void rejectsInvalidDependencyConditionAndIsolationStrategyBeforePersistence() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanService service = service(runtime, new JsonModelClient(oneStepPlan()));
+
+        assertThatThrownBy(() -> service.create(null, null, "default", "invalid dependency",
+                invalidDependencyConditionPlan(), "MANUAL"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("DEPENDENCY edge must use ON_SUCCESS");
+        assertThatThrownBy(() -> service.create(null, null, "default", "invalid isolation",
+                invalidIsolationPlan(), "MANUAL"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported isolation_strategy");
+    }
+
+    @Test
+    void exposesResourceAndIsolationContractsToPlannerPrompt() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        AtomicReference<String> plannerPrompt = new AtomicReference<>();
+        ModelClient model = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                plannerPrompt.set(request.messages().get(0).content());
+                return ModelResponse.text(oneStepPlan());
+            }
+
+            @Override
+            public String name() {
+                return "test";
+            }
+        };
+
+        service(runtime, model).generate(null, "default", "inspect prompt");
+
+        assertThat(plannerPrompt.get()).contains("resource_read_set", "resource_write_set", "isolation_strategy",
+                "不得猜测不存在的文件或资源", "不要生成 critical_path_weight 或 max_parallelism");
     }
 
     @Test
@@ -106,10 +177,10 @@ class PlanServiceTest {
                 new JsonModelClient(oneStepPlan()), mapper);
         PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
         var session = runtime.createSession("stuck-manual-plan", "project-a");
-        var plan = service.create(session.id(), null, null, "inspect and repair",
-                manualAnalysisPlan(), "MANUAL_IMPORT");
+        var plan = service.create(session.id(), null, null, "inspect and repair", oneStepPlan(), "MANUAL_IMPORT");
         service.start(plan.id());
         var step = service.view(plan.id()).steps().get(0);
+        setStepExecutionMode(properties(), step.id(), "MANUAL");
         store.claimReadyStep(step.id(), "old-worker", 60).orElseThrow();
         store.markStepWaitingApproval(step.id());
 
@@ -192,7 +263,7 @@ class PlanServiceTest {
         assertThat(view.steps()).filteredOn(step -> step.status().equals("RUNNING"))
                 .singleElement().satisfies(step -> {
                     assertThat(step.title()).isEqualTo("Patch first");
-                    assertThat(step.resourceWriteSetJson()).contains("src/App.java");
+                    assertThat(step.resourceWriteSetJson()).isEqualTo("[\"src/app.java\"]");
                     assertThat(step.isolationStrategy()).isEqualTo("GIT_WORKTREE");
                     assertThat(step.workspaceRef()).startsWith("plan-worktrees/");
                     assertThat(runtime.workspaceOwnerRunId(step.runId())).isEqualTo(step.workspaceRef());
@@ -351,6 +422,7 @@ class PlanServiceTest {
         execution.dispatchPlan(plan.id(), 1);
 
         var step = service.view(plan.id()).steps().get(0);
+        assertThat(step.executionMode()).isEqualTo("ASYNC");
         assertThat(step.status()).isEqualTo("WAITING_JOB");
         assertThat(store.asyncJobs(plan.id(), 10)).singleElement()
                 .satisfies(job -> assertThat(job.runId()).isEqualTo(step.runId()));
@@ -361,6 +433,22 @@ class PlanServiceTest {
         assertThat(store.asyncJobs(plan.id(), 10)).singleElement()
                 .satisfies(job -> assertThat(job.status()).isEqualTo("COMPLETED"));
         assertThat(service.view(plan.id()).plan().status()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void prioritizesRuntimeCriticalDepthBeforeManualPriorityHint() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PlanStore store = new PlanStore(properties());
+        PlanService service = new PlanService(store, new PlanParser(mapper), runtime,
+                new JsonModelClient(criticalPathPlan()), mapper);
+        PlanExecutionService execution = new PlanExecutionService(store, runtime, new PlanValidator(runtime, mapper));
+
+        var plan = service.generate(null, "default", "prioritize longest chain");
+        service.start(plan.id());
+        execution.dispatchPlan(plan.id(), 1);
+
+        assertThat(service.view(plan.id()).steps()).filteredOn(step -> "RUNNING".equals(step.status()))
+                .singleElement().satisfies(step -> assertThat(step.title()).isEqualTo("Long chain root"));
     }
 
     @Test
@@ -606,6 +694,16 @@ class PlanServiceTest {
         }
     }
 
+    private static void setStepExecutionMode(PlatformProperties props, String stepId, String mode) throws Exception {
+        String url = "jdbc:sqlite:" + props.dataDir().resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url);
+             var statement = connection.prepareStatement("UPDATE plan_steps SET execution_mode=? WHERE id=?")) {
+            statement.setString(1, mode);
+            statement.setString(2, stepId);
+            statement.executeUpdate();
+        }
+    }
+
     private static String validPlan() {
         return """
                 {
@@ -651,7 +749,7 @@ class PlanServiceTest {
                   "objective": "long task",
                   "summary": "One async step.",
                   "steps": [
-                    {"client_id":"async","title":"Long task","description":"Run a long task","type":"ASYNC_JOB","execution_mode":"ASYNC","dependencies":[],"done_criteria":["run_status:COMPLETED"]}
+                    {"client_id":"async","title":"Long task","description":"Run a long task","type":"ASYNC_JOB","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"]}
                   ]
                 }
                 """;
@@ -700,8 +798,65 @@ class PlanServiceTest {
                   "objective": "edit same file carefully",
                   "summary": "Two independent writes target the same resource.",
                   "steps": [
-                    {"client_id":"patch_a","title":"Patch first","description":"Patch first section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":10},
+                    {"client_id":"patch_a","title":"Patch first","description":"Patch first section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src\\\\App.java","SRC/App.java","./src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":10},
                     {"client_id":"patch_b","title":"Patch second","description":"Patch second section","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":["run_status:COMPLETED"],"resource_write_set":["src/App.java"],"isolation_strategy":"GIT_WORKTREE","critical_path_weight":1}
+                  ]
+                }
+                """;
+    }
+
+    private static String canonicalPlan() {
+        return """
+                {
+                  "objective": "canonical",
+                  "summary": "Canonical modes and resources.",
+                  "steps": [
+                    {"client_id":"async","title":"Async","description":"Async","type":"ASYNC_JOB","execution_mode":"REACT","dependencies":[],"done_criteria":[]},
+                    {"client_id":"approval","title":"Approval","description":"Approval","type":"USER_APPROVAL","execution_mode":"REACT","dependencies":[],"done_criteria":[]},
+                    {"client_id":"resource","title":"Resource","description":"Resource","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":[],"resource_read_set":["src\\\\Auth","SRC/Auth","./src/Auth"],"resource_write_set":["./docs//README.md","DOCS\\\\README.md"]}
+                  ]
+                }
+                """;
+    }
+
+    private static String invalidDependencyConditionPlan() {
+        return """
+                {
+                  "objective": "invalid dependency condition",
+                  "summary": "Must be rejected.",
+                  "steps": [
+                    {"client_id":"first","title":"First","description":"First","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":[]},
+                    {"client_id":"second","title":"Second","description":"Second","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":[]}
+                  ],
+                  "edges": [
+                    {"from":"first","to":"second","type":"DEPENDENCY","condition":"ON_FAILURE"}
+                  ]
+                }
+                """;
+    }
+
+    private static String invalidIsolationPlan() {
+        return """
+                {
+                  "objective": "invalid isolation",
+                  "summary": "Must be rejected.",
+                  "steps": [
+                    {"client_id":"first","title":"First","description":"First","type":"ANALYSIS","execution_mode":"NONE","dependencies":[],"done_criteria":[],"isolation_strategy":"CONTAINER"}
+                  ]
+                }
+                """;
+    }
+
+    private static String criticalPathPlan() {
+        return """
+                {
+                  "objective": "prioritize longest chain",
+                  "summary": "The longest downstream chain wins over the manual hint.",
+                  "steps": [
+                    {"client_id":"short","title":"Short chain root","description":"Short root","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":[],"critical_path_weight":100},
+                    {"client_id":"long","title":"Long chain root","description":"Long root","type":"ANALYSIS","execution_mode":"REACT","dependencies":[],"done_criteria":[]},
+                    {"client_id":"middle","title":"Long chain middle","description":"Long middle","type":"ANALYSIS","execution_mode":"REACT","dependencies":["long"],"done_criteria":[]},
+                    {"client_id":"end","title":"Shared end","description":"Shared end","type":"ANALYSIS","execution_mode":"REACT","dependencies":["short","middle"],"done_criteria":[]}
                   ]
                 }
                 """;

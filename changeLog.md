@@ -4,6 +4,16 @@
 
 ## 2026-08-09
 
+### Plan Graph 语义一致性、资源契约与确定性调度
+
+- 变更：PlanParser 统一 ASYNC_JOB -> ASYNC、USER_APPROVAL -> MANUAL；非 USER_APPROVAL 的 MANUAL 不再由生成阶段静默改写，而是返回持久化前校验错误供 Planner 完整重生成。DEPENDENCY 边仅接受 ON_SUCCESS，并把 isolation_strategy 白名单校验前移到 Parser，同时保留 PlanStore 的二次防御校验。
+- 变更：新增 PlanResourceNormalizer，在 Plan 解析持久化前把资源读写集规范为小写、正斜杠、移除重复 ./ 前缀、压缩重复分隔符并保持首次出现顺序去重；调度器对既有数据继续调用同一规范化器作为防御。
+- 变更：PlanExecutionService 只按规范化后的 execution_mode=ASYNC 创建 Async Job，并按 Runtime 计算的 DEPENDENCY/CONDITIONAL 图关键深度、兼容保留的人工 critical_path_weight Hint、下游数量和 ordinal 排序 READY Step；REWORK 不参与关键深度计算。
+- 变更：Planner Schema 和规则补充资源读写集与隔离策略，要求未知资源使用空数组、文件修改步骤声明已知写集；明确不生成 critical_path_weight 或 max_parallelism。README、架构、阶段和技术指南同步说明该契约及旧字段的兼容语义。
+- 变更：完整回归发现 schema_migrations 登记遗漏既有的 39、40 版本；补回与已经存在的 ToolResult metadata、Completion Contract、Deferred ToolCall 和 Run Evidence 结构对应的迁移账本条目，使新建和升级 SQLite 数据库的版本记录连续。
+- 思路：模型只提交候选 Plan，Parser 把候选收敛为合法类型图，Graph Runtime 在不猜测 JSON 意图的前提下执行确定性调度；本次不引入 normalized plan JSON、Async Executor 抽象、真实 shard 并行或字段重命名，避免将语义修复扩大为架构升级。API 路径、请求响应、配置、Sandbox 和产品站能力未变，OpenAPI、docs/docker-sandbox.md 与 paicli-site/README.md 不适用。
+- 验证：.\\mvnw.cmd -pl paicli-server -am "-Dtest=PlanServiceTest" "-Dsurefire.failIfNoSpecifiedTests=false" test 通过，23 项覆盖特殊模式规范化、非法条件/隔离拒绝、资源规范化、Planner Prompt、历史 MANUAL 恢复和运行时关键深度排序；随后 .\\mvnw.cmd clean test 与 .\\mvnw.cmd clean package 均通过（paicli-common、paicli-server、paicli-sandbox-agent）。scripts/start-local.ps1 在验证进程显式 PAICLI_WEB_ENABLED=false 时成功启动，GET /v1/system/info 返回 paicli-platform-lite；未提供搜索 URL 的既有 Web 配置会阻止默认启动，验证服务及临时 data/cache/log 均已清理。最终 git diff --check 通过。
+
 ### WorkingPlan 基础能力常驻与明确触发规则
 
 - 变更：`ContextManager` 在 Agent Profile 配置非空业务 Tool allowlist 时，额外保留 `update_working_plan`，确保 WorkingPlan 作为 Run 内部 Harness 能力不会被业务工具白名单过滤；未扩大其他 Core Tool 权限。

@@ -1416,7 +1416,7 @@ Plan 是任务层编排，Run 是动作层执行。模型生成候选 Plan JSON�
 | `plan_events` | 路由、领取、验证、回流和人工决策时间线 |
 | `PlanState` | 状态计数、READY/活跃/人工节点、阻塞原因和 Token 快照 |
 
-Plan JSON 是不可信输入。`PlanParser` 会清理 code fence、限制数量和长度、重映射 client id、校验 Step 类型和执行模式、检查依赖存在、检测 DAG 环、规范化资源集合和隔离策略。
+Plan JSON 是不可信输入。`PlanParser` 会清理 code fence、限制数量和长度、重映射 client id、校验 Step 类型和执行模式、将 `ASYNC_JOB`/`USER_APPROVAL` 规范为 `ASYNC`/`MANUAL`、拒绝非 `USER_APPROVAL` 的 `MANUAL`、拒绝非 `ON_SUCCESS` 的 `DEPENDENCY`、检查依赖存在、检测 DAG 环、校验隔离策略，并把资源集合规范为小写正斜杠、移除 `./` 前缀后去重。
 
 #### Plan 的生命周期
 
@@ -1451,8 +1451,7 @@ DRAFT
       "done_criteria": ["answer_contains:PlanExecutionService"],
       "resource_read_set": ["paicli-server/src/main/java/**"],
       "resource_write_set": [],
-      "isolation_strategy": "SHARED_SESSION",
-      "critical_path_weight": 10
+      "isolation_strategy": "SHARED_SESSION"
     },
     {
       "client_id": "update_doc",
@@ -1465,8 +1464,7 @@ DRAFT
       ],
       "resource_read_set": ["*.md"],
       "resource_write_set": ["PaiCLI Platform Lite 技术架构与面试指南.md"],
-      "isolation_strategy": "GIT_WORKTREE",
-      "critical_path_weight": 8
+      "isolation_strategy": "GIT_WORKTREE"
     },
     {
       "client_id": "human_check",
@@ -1496,7 +1494,7 @@ DRAFT
 }
 ```
 
-模型可以给出 `client_id`，但数据库 Step id 由 Server 生成并重映射。未知依赖、自依赖、重复边、非法类型、无限回流、过长字段和越界枚举都会被拒绝。
+模型可以给出 `client_id`，但数据库 Step id 由 Server 生成并重映射。未知依赖、自依赖、重复边、非法类型、非 `ON_SUCCESS` 的 `DEPENDENCY`、非法隔离策略、无限回流、过长字段和越界枚举都会被拒绝。
 
 #### Parser 的治理职责
 
@@ -1504,12 +1502,12 @@ DRAFT
 
 1. 从 Markdown code fence 中提取 JSON。
 2. 校验根对象、目标、摘要和 Step 数量。
-3. 规范 Step type、execution mode、done criteria 和资源集合。
+3. 规范 Step type、execution mode、done criteria 和资源集合；`ASYNC_JOB`/ `USER_APPROVAL` 固定到 `ASYNC`/`MANUAL`。
 4. 建立 client id 到内部 id 的映射。
 5. 校验 dependency 和 Edge 引用。
 6. 对非 REWORK 边执行 DAG 环检测。
-7. 校验隔离策略、并行上限和关键路径权重。
-8. 校验条件白名单、Edge 优先级和 REWORK 次数上限。
+7. 校验隔离策略、并行上限和兼容保留的人工优先级 Hint。
+8. 校验条件白名单、`DEPENDENCY=ON_SUCCESS` 契约、Edge 优先级和 REWORK 次数上限。
 
 执行时不再让模型重新解释图结构，因此恢复后的路由结果与原服务进程一致。
 
@@ -1605,11 +1603,11 @@ Step type 描述任务性质，execution mode 决定调度动作：
 | execution mode / type | 当前行为 |
 |---|---|
 | `REACT` | 创建普通 Run，由 `RunProcessor` 执行 |
-| `ASYNC` 或 type=`ASYNC_JOB` | 创建普通 Run，同时创建并绑定 `async_jobs` |
+| `ASYNC` | 创建普通 Run，同时创建并绑定 `async_jobs`；`ASYNC_JOB` 会在解析时规范为该模式 |
 | `NONE` | 不创建 Run，直接完成该无执行步骤 |
 | type=`USER_APPROVAL` + mode=`MANUAL` | 进入持久化 Human Node，等待 decision API |
 
-非 `USER_APPROVAL` 的模型生成 MANUAL 步骤会被规范为 REACT，避免“看似等待人工、实际没有审批对象”的永久卡死。
+非 `USER_APPROVAL` 的 `MANUAL` 步骤会被 Parser 拒绝；模型生成时会收到校验错误并重新生成完整 Plan，避免“看似等待人工、实际没有审批对象”的永久卡死。
 
 Step 状态：
 
@@ -1635,7 +1633,8 @@ dispatch(plan):
   applyBoundedRework()
 
   ready = sort(
-      criticalPathWeight desc,
+      runtimeCriticalDepth desc,
+      manualPriorityHint desc,
       downstreamCount desc,
       ordinal asc
   )
@@ -1664,11 +1663,12 @@ Step 被领取后先进入 RUNNING，但创建内部 Session、Workspace 和普�
 
 READY Step 按以下顺序排序：
 
-1. `critical_path_weight` 高者优先。
-2. 下游依赖数量多者优先。
-3. ordinal 小者优先。
+1. Runtime 按 `DEPENDENCY` 和 `CONDITIONAL` 边计算的关键深度高者优先；`REWORK` 不参与计算。
+2. 兼容保留的人工 `critical_path_weight` Hint 高者优先。
+3. 下游依赖数量多者优先。
+4. ordinal 小者优先。
 
-这是一种可解释的关键路径启发式，不是完整 CPM 求解器。它的目标是在 Lite 环境中优先释放会阻塞更多下游的步骤。
+运行时深度由 Graph 结构确定，避免模型随意给出不稳定的权重；`critical_path_weight` 只保留给手工或业务层的显式 Hint。这仍不是完整 CPM 求解器，但能在 Lite 环境中优先释放更长后续链上的步骤。
 
 资源集合冲突规则：
 
@@ -1760,7 +1760,7 @@ Run `COMPLETED` 后 Step 先进入 `VALIDATING`。`PlanValidator` 支持：
 ### 18.7 后端补充：租约、冲突与受控并行
 
 - Step 领取写入 `claim_owner`、lease、heartbeat、attempt 和 dispatch 幂等键；过期且未绑定 Run 的 Step 才回收，解决“领取成功、创建 Run 前宕机”的空窗，而不把租约误当业务完成。
-- 资源读写集把写写、写读冲突留在 READY 队列并记录原因，读读可并发。并发批次还需满足只读、依赖确定、资源兼容等条件，因此当前 `parallelBatches` 是受控并行而非任意 DAG 全并发。
+- 资源读写集在解析时统一为小写、正斜杠、无 `./` 前缀且去重；调度器再次用同一规范化器防御历史数据。写写、写读冲突留在 READY 队列并记录原因，读读可并发。并发批次还需满足只读、依赖确定、资源兼容等条件，因此当前 `parallelBatches` 是受控并行而非任意 DAG 全并发。
 - 事务上应坚持先绑定/持久化 Run 再启动执行；Validation 独立于 Run 终态，防止模型说“完成”就提前提交业务成功。
 
 ## 19. Agent 评测中心

@@ -158,7 +158,7 @@
 ## 阶段 14：Plan Runtime 基础
 
 - [x] 新增 `plans`、`plan_steps`、`plan_edges`、`plan_revisions` 和 `plan_events` 持久化表；Schema 迁移 15
-- [x] 新增 Plan JSON 解析器，清理 Markdown code fence，重映射模型 step id，并校验 Step 类型、执行模式、依赖存在和 DAG 循环
+- [x] 新增 Plan JSON 解析器，清理 Markdown code fence，重映射模型 step id，并校验 Step 类型、执行模式、依赖存在和 DAG 循环；`ASYNC_JOB`/`USER_APPROVAL` 模式规范化、`MANUAL`/`DEPENDENCY` 条件和隔离策略语义在持久化前拒绝错误输入
 - [x] 新增 Planner 服务，通过现有 ModelClient 生成结构化计划；Demo 模型保留单步计划降级，方便本地无模型 Key 验证
 - [x] 新增 Plan 生命周期 API：创建、生成、查看、批准/启动、取消、Replan、Step retry/skip 和 Plan events
 - [x] 启动 Plan 时只将依赖已满足的根 Step 推进到 `READY`，不提前绕过 ReAct Run、ToolCall 或 Approval 边界
@@ -193,8 +193,8 @@
 ## 阶段 17：受控并行与闭环生产加固
 
 - [x] `plan_steps` 增加资源读集、资源写集、隔离策略、最大并行度、关键路径权重和 workspace 引用；新增 `agent_feedback` 闭环表，Schema 迁移 21。
-- [x] Plan JSON 解析支持 `resource_read_set`/`read_set`、`resource_write_set`/`write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`。
-- [x] Plan 调度按关键路径权重、下游数量和 ordinal 排序，调度前检查活跃 Step 的资源读写集，阻止同一计划内写写和读写冲突。
+- [x] Plan JSON 解析支持 `resource_read_set`/`read_set`、`resource_write_set`/`write_set`、`isolation_strategy`、`max_parallelism` 和 `critical_path_weight`；资源路径统一为小写正斜杠、移除 `./` 前缀并去重。
+- [x] Plan 调度按运行时关键深度、兼容保留的 `critical_path_weight` Hint、下游数量和 ordinal 排序，调度前检查活跃 Step 的规范化资源读写集，阻止同一计划内写写和读写冲突。
 - [x] 冲突 Step 写入 `RESOURCE_CONFLICT` 并短暂延后；下一轮调度可自动恢复，避免永久失败。
 - [x] `INTERNAL_SESSION` 和 `GIT_WORKTREE` 隔离策略会创建内部 Session 与受控 workspace 引用；`GIT_WORKTREE` 当前是 Lite 目录边界和后续真实 worktree 工具层预留，不自动执行 git merge。
 - [x] Plan 验证通过/失败都会写入 Agent Feedback；验证通过会生成过程型 Memory，验证失败会保留 failure class 和证据质量。

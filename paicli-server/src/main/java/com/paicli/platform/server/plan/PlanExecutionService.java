@@ -15,7 +15,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -186,7 +188,7 @@ public class PlanExecutionService {
                 String sessionId = sessionForStep(plan, claimed);
                 RunRecord run = runtime.createRun(sessionId, promptFor(plan, claimed), "auto", "", List.of(),
                         null, readOnlyCandidate(claimed) ? 1 : 0, 0);
-                if ("ASYNC".equals(claimed.executionMode()) || "ASYNC_JOB".equals(claimed.type())) {
+                if ("ASYNC".equals(claimed.executionMode())) {
                     String jobKey = claimed.dispatchIdempotencyKey() == null
                             ? "plan-step:" + claimed.id() + ":job"
                             : claimed.dispatchIdempotencyKey() + ":job";
@@ -247,9 +249,13 @@ public class PlanExecutionService {
     }
 
     private List<PlanStore.PlanStep> prioritizedReadySteps(PlanStore.Plan plan, int limit) {
-        Map<String, Integer> downstream = downstreamCounts(plans.edges(plan.id()));
+        List<PlanStore.PlanEdge> edges = plans.edges(plan.id());
+        Map<String, Integer> criticalDepth = criticalPathDepth(plans.steps(plan.id()), edges);
+        Map<String, Integer> downstream = downstreamCounts(edges);
         return plans.readySteps(plan.id(), Math.max(1, Math.min(limit, 100))).stream()
-                .sorted(Comparator.comparingInt(PlanStore.PlanStep::criticalPathWeight).reversed()
+                .sorted(Comparator.comparingInt((PlanStore.PlanStep step) ->
+                                criticalDepth.getOrDefault(step.id(), 1)).reversed()
+                        .thenComparing(PlanStore.PlanStep::criticalPathWeight, Comparator.reverseOrder())
                         .thenComparing((PlanStore.PlanStep step) -> downstream.getOrDefault(step.id(), 0),
                                 Comparator.reverseOrder())
                         .thenComparingInt(PlanStore.PlanStep::ordinal))
@@ -257,11 +263,44 @@ public class PlanExecutionService {
     }
 
     private Map<String, Integer> downstreamCounts(List<PlanStore.PlanEdge> edges) {
-        java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
+        Map<String, Integer> counts = new HashMap<>();
         for (PlanStore.PlanEdge edge : edges) {
             if (!"REWORK".equals(edge.type())) counts.merge(edge.fromStepId(), 1, Integer::sum);
         }
         return counts;
+    }
+
+    private Map<String, Integer> criticalPathDepth(List<PlanStore.PlanStep> steps,
+                                                   List<PlanStore.PlanEdge> edges) {
+        Map<String, Set<String>> successors = new HashMap<>();
+        for (PlanStore.PlanStep step : steps) successors.put(step.id(), new LinkedHashSet<>());
+        for (PlanStore.PlanEdge edge : edges) {
+            if ("DEPENDENCY".equals(edge.type()) || "CONDITIONAL".equals(edge.type())) {
+                successors.computeIfAbsent(edge.fromStepId(), ignored -> new LinkedHashSet<>()).add(edge.toStepId());
+            }
+        }
+        Map<String, Integer> depths = new HashMap<>();
+        Set<String> visiting = new HashSet<>();
+        for (PlanStore.PlanStep step : steps) {
+            criticalPathDepth(step.id(), successors, depths, visiting);
+        }
+        return depths;
+    }
+
+    private int criticalPathDepth(String stepId, Map<String, Set<String>> successors,
+                                  Map<String, Integer> depths, Set<String> visiting) {
+        Integer known = depths.get(stepId);
+        if (known != null) return known;
+        if (!visiting.add(stepId)) return 0;
+        int maxSuccessorDepth = 0;
+        for (String successor : successors.getOrDefault(stepId, Set.of())) {
+            maxSuccessorDepth = Math.max(maxSuccessorDepth,
+                    criticalPathDepth(successor, successors, depths, visiting));
+        }
+        visiting.remove(stepId);
+        int depth = maxSuccessorDepth + 1;
+        depths.put(stepId, depth);
+        return depth;
     }
 
     private boolean resourceSafeBatch(List<PlanStore.PlanStep> batch) {
@@ -295,8 +334,8 @@ public class PlanExecutionService {
         try {
             Set<String> values = new HashSet<>();
             for (String value : mapper.readValue(json == null || json.isBlank() ? "[]" : json, STRING_LIST)) {
-                String normalized = value == null ? "" : value.trim().replace('\\', '/');
-                if (!normalized.isBlank()) values.add(normalized.toLowerCase());
+                String normalized = PlanResourceNormalizer.normalize(value);
+                if (!normalized.isBlank()) values.add(normalized);
             }
             return values;
         } catch (Exception ignored) {

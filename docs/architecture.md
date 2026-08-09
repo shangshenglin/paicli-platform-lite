@@ -79,16 +79,16 @@ PaiCLI Server
 Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把“计划”从模型文本变成可恢复、可审计、可调度的数据对象，但不替代现有 RunProcessor，也不绕过 ToolCall、Approval、Event、Artifact 和预算链路。
 
 - `plans` 保存目标、摘要、项目、可选 Session/Run 关联、状态、版本、来源、原始计划 JSON 和失败原因。
-- `plan_steps` 保存任务级步骤、执行模式、验收标准、资源读写集、隔离策略、关键路径权重、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、调度幂等键和绑定的普通 `run_id`。Step 是任务层对象，不直接保存工具参数；执行时仍由普通 Run 和 ToolCall 落库真实动作。
+- `plan_steps` 保存任务级步骤、执行模式、验收标准、规范化资源读写集、隔离策略、兼容保留的人工 `critical_path_weight` 优先级 Hint、workspace 引用、状态、领取 owner、租约、心跳、尝试次数、调度幂等键和绑定的普通 `run_id`。Step 是任务层对象，不直接保存工具参数；执行时仍由普通 Run 和 ToolCall 落库真实动作。
 - `plan_edges` 保存 `DEPENDENCY`、`CONDITIONAL`、`REWORK` 三类边，方向为“来源 Step -> 目标 Step”，并持久化确定性条件、优先级、最大回流次数和已回流次数。普通依赖满足后推进；条件未命中的分支自动跳过；失败回流只重置目标及其下游且受次数上限控制。
 - `plan_revisions` 保存 Replan 版本原因和原始 JSON；非 ACTIVE 草稿可整体替换，FAILED/ACTIVE Plan 在没有运行中、等待审批、等待 Job 或验证中的 Step 时支持局部尾部替换，已完成/跳过/取消步骤及其证据会被冻结保留。
 - `plan_events` 保存 Plan/Step 状态事件，供后续 Console 时间线和审计使用。
 - `async_jobs` 保存异步 Step 和外部长任务的状态、幂等键、payload、result、log 与错误，支持 poll 和 cancel。
 - `validation_checks` 保存每个 Step 的 Done Criteria、实际结果、证据和错误，供 Console 与最终回答引用。
 
-Planner 调用现有 `ModelClient` 生成结构化 JSON。Server 会清理 Markdown code fence、重新映射模型给出的 step id、限制步骤数量、校验 Step 类型与执行模式、校验依赖存在和循环依赖。校验失败不会创建可执行 Plan。默认 Demo 模型会生成单步分析计划，保证本地无模型 Key 时仍能验证 API。
+Planner 调用现有 `ModelClient` 生成结构化 JSON，并显式声明资源读写集和隔离策略；未知资源必须为空数组，模型不生成 `critical_path_weight` 或 `max_parallelism`。Server 会清理 Markdown code fence、重新映射模型给出的 step id、限制步骤数量、校验 Step 类型与执行模式、将 `ASYNC_JOB`/`USER_APPROVAL` 规范为 `ASYNC`/`MANUAL`、拒绝非 `USER_APPROVAL` 的 `MANUAL` 模式、拒绝非 `ON_SUCCESS` 的 `DEPENDENCY` 边、校验隔离策略并规范化去重资源路径，再校验依赖存在和循环依赖。校验失败不会创建可执行 Plan。默认 Demo 模型会生成单步分析计划，保证本地无模型 Key 时仍能验证 API。
 
-计划启动后，`PlanExecutionService` 会先回收过期且尚未绑定 Run 的 `RUNNING` Step 租约，再按关键路径权重、下游数量和 ordinal 领取 `READY` Step。调度前会汇总活跃 Step 的资源读写集，阻止写写或读写冲突；冲突 Step 会写入 `RESOURCE_CONFLICT` 并短暂延后。`REACT` Step 创建普通 Run；`ASYNC`/`ASYNC_JOB` Step 同时登记 Async Job；`NONE` Step 可直接完成；只有 `USER_APPROVAL` 进入 Human Node 等待状态，并通过持久化 decision API 决定后续条件边。条件命中、未命中和失败回流都写入 `plan_events`，未选分支及其 Validation Check 一起标记 `SKIPPED`。`REWORK` 命中时只重置目标节点和非回流边可达的下游分支，保留其他已完成分支；超过 `max_traversals` 后不再自动回流。Run 进入 `COMPLETED` 只代表执行链路结束，Step 会先进入 `VALIDATING`，验证通过才推进后续边；未被条件边处理且无法回流的失败才终止 Plan。
+计划启动后，`PlanExecutionService` 会先回收过期且尚未绑定 Run 的 `RUNNING` Step 租约，再按运行时计算的 `DEPENDENCY`/`CONDITIONAL` 图关键深度、人工 `critical_path_weight` Hint、下游数量和 ordinal 领取 `READY` Step；`REWORK` 不参与关键深度计算。调度前会汇总活跃 Step 的规范化资源读写集，阻止写写或读写冲突；冲突 Step 会写入 `RESOURCE_CONFLICT` 并短暂延后。`REACT` Step 创建普通 Run；`ASYNC` Step 同时登记 Async Job；`NONE` Step 可直接完成；只有 `USER_APPROVAL` 进入 Human Node 等待状态，并通过持久化 decision API 决定后续条件边。条件命中、未命中和失败回流都写入 `plan_events`，未选分支及其 Validation Check 一起标记 `SKIPPED`。`REWORK` 命中时只重置目标节点和非回流边可达的下游分支，保留其他已完成分支；超过 `max_traversals` 后不再自动回流。Run 进入 `COMPLETED` 只代表执行链路结束，Step 会先进入 `VALIDATING`，验证通过才推进后续边；未被条件边处理且无法回流的失败才终止 Plan。
 
 `PlanState` 是从 Plan、Step、Edge、Event 和 ModelUsage 生成的结构化运行快照，包含状态计数、可运行/活跃/等待人工节点、阻塞原因、累计 Token 和最后事件序号。Console、恢复 Worker、API 客户端和后续 Evaluation 可以共享同一状态视图，不需要各自从聊天文本推断进度。
 

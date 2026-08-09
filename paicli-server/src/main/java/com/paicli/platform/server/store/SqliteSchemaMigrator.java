@@ -47,7 +47,9 @@ final class SqliteSchemaMigrator {
             new Migration(35, "lightweight per-run working plan"),
             new Migration(36, "durable run reflections"),
             new Migration(37, "collaboration digests deliveries and accept snapshots"),
-            new Migration(38, "expert threads and thread run bindings")
+            new Migration(38, "expert threads and thread run bindings"),
+            new Migration(39, "durable tool result metadata"),
+            new Migration(40, "completion contracts deferred tool calls and run evidence")
     );
 
     private SqliteSchemaMigrator() { }
