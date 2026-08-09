@@ -24,6 +24,7 @@ import com.paicli.platform.server.memory.LayeredMemoryService;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.collaboration.CollaborationToolProvider;
+import com.paicli.platform.server.agent.WorkingPlanToolProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -116,6 +117,7 @@ public class ContextManager {
         if (agentProfile != null && !allowedTools.isEmpty()) {
             allowedTools.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
             allowedTools.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
+            allowedTools.add(WorkingPlanToolProvider.UPDATE_WORKING_PLAN);
         }
         String runtime = prompts.runtimeContext(
                 platformProperties.workspaceRoot().resolve(workspaceRunId), run.createdAt());
