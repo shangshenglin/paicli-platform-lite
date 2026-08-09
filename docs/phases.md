@@ -1,15 +1,5 @@
 # 交付阶段
 
-## 2026-08-09 PRD Analysis Agent：固定质量状态机、并行节点分析与机械验证闭环
-
-- [x] 迁移 40：持久化 `prd_analysis_jobs/nodes/actions/items/clarifications/events`；运行中断后在原阶段重新排队，结构化 Action 按幂等键先持久化再执行。
-- [x] `PrdNodeMapper` 按 Markdown 标题、层级与行号确定性切分，父级依赖形成可复现调度层；Dispatch 每批最多 8 个隔离节点，失败不覆盖已提交节点。
-- [x] 六阶段转换表：`MAP_PRD → DISPATCH → MERGE → PROBE → CLARIFY → HANDOFF`，支持 Probe 修复回流、Clarify 回 Probe，拒绝越级 Handoff。
-- [x] Function Calling `submit_node_result` + 完成护栏：实体/规则/流程、条件矩阵、假设、预测报告、敏感度检查；事务内全局 ID 重编号与引用替换。
-- [x] 自动产物：领域分析、节点计划、术语、设计预测、条件矩阵、预测对账、设计索引、Probe 报告、状态、策略日志、数据源契约和 Handoff Manifest。
-- [x] REST/OpenAPI：创建/列表/详情、Skill allowlist、节点/条目/Action/事件/澄清/产物、回答澄清、重试和取消；产物下载固定白名单且不能逃逸 data root。
-- [x] 测试覆盖迁移与恢复、Action 幂等、全局 ID、确定性节点依赖、转换表、离线完整流水线、澄清等待/恢复和 Handoff 产物。
-
 ## 2026-08-09 Harness Loop v2 · PR10：完成合同、执行证据与 Deferred get_agent_result
 
 - 迁移 39：`run_completion_contracts`（完成合同）、`tool_calls.result_metadata_json`（结构化工具证据）、`tool_calls.wait_kind/wait_ref/waiting_since`（Deferred 外部工具调用）。

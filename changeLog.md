@@ -4,15 +4,6 @@
 
 ## 2026-08-09
 
-### PRD Analysis Agent：可恢复质量流水线、并行节点提交与 Handoff Gate
-
-- 变更：新增迁移 40 与 `PrdAnalysisStore`，持久化 Job、确定性节点、结构化 Action、全局设计条目、澄清问题和事件；启动时把中断的 `RUNNING` Job 回到原阶段队列。`submit_node_result` Function Calling 先按幂等键写 `REQUESTED` Action，再在单事务内分配全局 E/R/F ID、提交节点与条目、完成 Action 和追加事件，恢复时复用首次参数。
-- 变更：新增 `PrdAnalysisStateMachine`、`PrdNodeMapper`、`PrdAnalysisEngine`、并行 Executor/Worker 和六个独立 Skill 指令。实现 `map_prd → dispatch → merge → probe → clarify → handoff`，父节点依赖、最多 8 路节点隔离、三次模型异常退避、离线 Demo 保守降级、条件矩阵完成护栏、孤立字段/歧义 Probe、用户回答后回 Probe 与最终 Handoff Gate。
-- 变更：生成 `domain_analysis.md`、节点调度、术语、设计预测、条件矩阵、预测对账、设计索引、Probe、状态、策略日志、数据源契约和 Handoff Manifest；产物写入 `data/prd-analysis/{jobId}/output`，下载接口只接受固定白名单名称。
-- 变更：新增 `/v1/prd-analyses` REST/OpenAPI（创建/列表/详情、Skill allowlist、节点/条目/Action/澄清/事件/产物、回答、重试、取消）与 `PAICLI_PRD_ANALYSIS_WORKER_DELAY_MS`；同步 README、架构与阶段文档。修复 Maven Wrapper 在普通 Windows 目录上读取空 `Target[0]` 导致无法启动的问题；可选 Web Search 默认关闭，避免没有配置 URL 的离线 Demo 启动被配置校验拒绝。
-- 思路：复用现有 ModelClient 和 SQLite，但不把 PRD 质量流程伪装成一次聊天或固定细节 DAG；Runtime 决定阶段、权限、验证和提交，模型只负责节点语义提取。自动 Probe 保持机械边界，无法裁决的事实进入可审计人工问题；OpenCode/下游实现由 Handoff Manifest 作为接口边界，本次不在 Lite 内嵌第二个代码生成器。
-- 验证：新增 `PrdAnalysisStoreTest`、`PrdNodeMapperTest`、`PrdAnalysisStateMachineTest`、`PrdAnalysisEngineTest`，覆盖迁移/重启、Action 幂等、全局重编号、依赖层、非法跳转、离线完整管线、澄清恢复和交付产物；`.\mvnw.cmd clean test` 全量 303 项通过（Common 3、Server 296、Sandbox 4），`.\mvnw.cmd clean package` 成功生成三个模块 JAR。临时 18080 Demo Server 真实 REST/OpenAPI 冒烟通过：Job 六次阶段推进后 `COMPLETED/HANDOFF`，3/3 节点成功，生成 12 个产物，Handoff `READY`，Probe 通过，临时服务随后停止。Sandbox 协议与产品站未修改，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用；API、配置、运行架构与阶段状态已同步 README/OpenAPI、application.yml、`.env.example`、`docs/architecture.md`、`docs/phases.md`。
-
 ### 技术架构与面试材料同步：远端 master 协作连续性与 Harness 证据闭环
 
 - 变更：以远端 `origin/master` 的近期提交（截至 `2520438`）和本文件 2026-08-08/09 条目为事实来源，更新根目录《PaiCLI Platform Lite 技术架构与面试讲解》和《PaiCLI Platform Lite 技术架构与面试指南》。补齐 ExpertThread 的逻辑线程边界、按专家归属的 resume/digest、活跃 Run 评论的原子竞态处理与 `archived` 语义；补齐 `WAITING_EXTERNAL` / `WAITING_AGENT` 的 deferred `get_agent_result` 恢复链路。
