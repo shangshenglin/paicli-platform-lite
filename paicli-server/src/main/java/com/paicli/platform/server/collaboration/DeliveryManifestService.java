@@ -127,9 +127,17 @@ public class DeliveryManifestService {
                 "at", comment.createdAt().toString())).toList());
         snapshot.put("stages", stages.stream().map(stage -> Map.of(
                 "id", stage.id(), "stage", stage.stage(), "title", stage.title(), "status", stage.status())).toList());
-        snapshot.put("deliveries", store.deliveriesForTask(taskId).stream().map(delivery -> Map.of(
-                "stage", delivery.stage(), "attempt", delivery.attempt(), "status", delivery.status(),
-                "content_hash", delivery.contentHash(), "at", delivery.createdAt().toString())).toList());
+        List<String> deliveryTaskIds = new java.util.ArrayList<>();
+        deliveryTaskIds.add(task.id());
+        stages.forEach(stage -> deliveryTaskIds.add(stage.id()));
+        List<Map<String, Object>> deliveries = new java.util.ArrayList<>();
+        for (String deliveryTaskId : deliveryTaskIds) {
+            store.deliveriesForTask(deliveryTaskId).forEach(delivery -> deliveries.add(Map.of(
+                    "task_id", deliveryTaskId, "run_id", delivery.runId(), "stage", delivery.stage(),
+                    "attempt", delivery.attempt(), "status", delivery.status(),
+                    "content_hash", delivery.contentHash(), "at", delivery.createdAt().toString())));
+        }
+        snapshot.put("deliveries", List.copyOf(deliveries));
         snapshot.put("run_ids", runs.stream().map(CollaborationStore.TaskRun::runId).distinct().toList());
         snapshot.put("agent_profile_ids", runs.stream().map(CollaborationStore.TaskRun::agentProfileId)
                 .filter(value -> value != null && !value.isBlank()).distinct().toList());

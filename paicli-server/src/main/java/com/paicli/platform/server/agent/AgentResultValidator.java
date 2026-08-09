@@ -88,8 +88,7 @@ public class AgentResultValidator {
         Map<String, Boolean> passedByFamily = new LinkedHashMap<>();
         for (Object test : tests) {
             if (!(test instanceof Map<?, ?> map)) continue;
-            Object status = map.get("status");
-            if (!"PASSED".equals(String.valueOf(status))) continue;
+            if (!passedAfterLastMutation(map)) continue;
             Object family = map.get("family");
             String familyName = family == null ? "" : String.valueOf(family);
             passedByFamily.put(familyName, true);
@@ -105,11 +104,17 @@ public class AgentResultValidator {
 
     private static boolean hasPassedTestEvidence(Map<String, Object> value) {
         for (Object test : asList(value.get("tests"))) {
-            if (test instanceof Map<?, ?> map && "PASSED".equals(String.valueOf(map.get("status")))) {
+            if (test instanceof Map<?, ?> map && passedAfterLastMutation(map)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** A parent must not accept a passing test that predates the child's last mutation. */
+    private static boolean passedAfterLastMutation(Map<?, ?> test) {
+        return "PASSED".equals(String.valueOf(test.get("status")))
+                && Boolean.TRUE.equals(test.get("after_last_mutation"));
     }
 
     private static List<CriterionResult> criterionStatuses(List<String> doneCriteria, Map<String, Object> value) {

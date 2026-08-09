@@ -118,7 +118,8 @@ class AgentResultValidatorTest {
                 "status", "COMPLETED",
                 "summary", "完成",
                 "files_changed", List.of(Map.of("path", "src/A.java")),
-                "tests", List.of(Map.of("family", "MAVEN", "status", "PASSED")));
+                "tests", List.of(Map.of("family", "MAVEN", "status", "PASSED",
+                        "ordinal", 2, "after_last_mutation", true)));
         var validation = validator.validate(child(), contract, result);
         assertThat(validation.valid()).isTrue();
 
@@ -126,8 +127,27 @@ class AgentResultValidatorTest {
                 "status", "COMPLETED",
                 "summary", "完成",
                 "files_changed", List.of(Map.of("path", "src/A.java")),
-                "tests", List.of(Map.of("family", "NPM", "status", "PASSED")));
+                "tests", List.of(Map.of("family", "NPM", "status", "PASSED",
+                        "ordinal", 2, "after_last_mutation", true)));
         var invalid = validator.validate(child(), contract, wrongFamily);
         assertThat(invalid.valid()).isFalse();
+    }
+
+    @Test
+    void contractRequiringTestsRejectsPassBeforeLastMutation() {
+        RunCompletionContractRecord contract = new RunCompletionContractRecord("child-1",
+                CompletionMode.TEST_REQUIRED, false, true, List.of("MAVEN"), List.of(), List.of(),
+                "test", "test", Instant.now(), Instant.now());
+        Map<String, Object> result = Map.of(
+                "status", "COMPLETED",
+                "summary", "完成",
+                "files_changed", List.of(Map.of("path", "src/A.java")),
+                "tests", List.of(Map.of("family", "MAVEN", "status", "PASSED",
+                        "ordinal", 1, "after_last_mutation", false)));
+
+        var validation = validator.validate(child(), contract, result);
+
+        assertThat(validation.valid()).isFalse();
+        assertThat(validation.issues()).contains("contract requires tests but no passing test evidence for required families");
     }
 }

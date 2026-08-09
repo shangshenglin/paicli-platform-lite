@@ -891,6 +891,6 @@ npm run dev
 
 需要修改工作区或运行测试的 Run 会在启动时建立持久化 Completion Contract。最终完成必须由真实 ToolCall、Workspace、Artifact 和 TestEvidence 满足该合同；预算耗尽但合同未满足时，Run 会进入 `FAILED`，不会以 `COMPLETED` 表示部分结果。
 
-`RunEvidenceCollector` 是 AgentResult、Run 验证和协作交付清单的统一证据来源：`write_file` 使用写入前后 SHA-256，Sandbox `execute_command` 记录 workspace fingerprint，测试命令按可识别的 executable 与参数分类；`tool_result` 仅用于工具输出外置，不计入业务交付 Artifact。Deferred `get_agent_result` 会在 SQLite 事务中同时停放 ToolCall 和父 Run，避免 Lost Wakeup。
+`RunEvidenceCollector` 是 AgentResult、Run 验证和协作交付清单的统一证据来源：`write_file` 使用写入前后 SHA-256，Sandbox `execute_command` 记录 workspace fingerprint；已知构建命令（如 Maven compile/package、Gradle assemble、npm build）的 generated output 不构成业务 mutation，也不会推进最后 mutation 边界。测试命令按可识别的 executable、任务与 no-run/exclude 参数分类；`tool_result` 仅用于工具输出外置，不计入业务交付 Artifact。Deferred `get_agent_result` 会在 SQLite 事务中同时停放 ToolCall 和父 Run，避免 Lost Wakeup。
 
-AgentResult v2 同时输出 `workspace_mutations`：当命令明确改变工作区但无法可靠知道具体文件时，父 AgentResultValidator 使用该结构化证据完成合同校验，不伪造 `files_changed` 路径。测试命令含换行、后台 `&`、skip/no-run 参数时不会生成 TestEvidence。
+AgentResult v2 同时输出 `workspace_mutations`：当非构建命令明确改变工作区但无法可靠知道具体文件时，父 AgentResultValidator 使用该结构化证据完成合同校验，不伪造 `files_changed` 路径。每条 TestEvidence 带 `ordinal` 和 `after_last_mutation`，父子校验都只接受最后 mutation 之后的通过结果。测试命令含换行、后台 `&`、skip/no-run 或 Gradle exclude 参数时不会生成 TestEvidence；人工 `ACCEPT` 的快照聚合根任务与全部阶段的 DeliveryManifest。

@@ -5227,7 +5227,9 @@ public class SqliteRuntimeStore {
                 "timed_out", command.timedOut())).toList());
         value.put("tests", evidence.tests().stream().map(test -> Map.of(
                 "tool_call_id", test.toolCallId(), "family", test.family().name(),
-                "command", test.command(), "status", test.status().name())).toList());
+                "command", test.command(), "status", test.status().name(),
+                "ordinal", test.ordinal(),
+                "after_last_mutation", test.ordinal() > evidence.lastMutationOrdinal())).toList());
         value.put("findings", List.of());
         value.put("risks", status == RunStatus.COMPLETED ? List.of()
                 : List.of(error == null || error.isBlank() ? status.name() : error));

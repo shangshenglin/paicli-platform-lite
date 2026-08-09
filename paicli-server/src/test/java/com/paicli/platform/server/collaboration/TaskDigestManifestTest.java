@@ -52,6 +52,31 @@ class TaskDigestManifestTest {
     }
 
     @Test
+    void acceptedSnapshotIncludesDeliveriesFromEveryStageTask() throws Exception {
+        PlatformProperties properties = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        CollaborationStore collaboration = new CollaborationStore(properties);
+        DeliveryManifestService manifests = new DeliveryManifestService(collaboration, runtime, new ObjectMapper());
+        var root = collaboration.saveTask(null, "default", "root", "description", "IN_REVIEW", 0,
+                "TEAM", "team-a", "done", null, 0, null, "USER");
+        var stageOne = collaboration.saveTask(null, "default", "stage one", "implement", "IN_REVIEW", 0,
+                "AGENT", "agent-a", "done", root.id(), 1, null, "AGENT:leader-a");
+        var stageTwo = collaboration.saveTask(null, "default", "stage two", "verify", "IN_REVIEW", 0,
+                "AGENT", "agent-b", "done", root.id(), 2, null, "AGENT:leader-a");
+        var first = manifests.recordStageDelivery(stageOne.id(), stageOne.stage(), "run-stage-1",
+                List.of("src/A.java"), List.of("artifact-a"), List.of("MAVEN=PASSED"), Map.of());
+        var second = manifests.recordStageDelivery(stageTwo.id(), stageTwo.stage(), "run-stage-2",
+                List.of("src/B.java"), List.of("artifact-b"), List.of("NPM=PASSED"), Map.of());
+
+        var snapshot = manifests.accept(root.id(), "accepted");
+
+        assertThat(snapshot.snapshotJson())
+                .contains("\"task_id\":\"" + stageOne.id() + "\"", "\"task_id\":\"" + stageTwo.id() + "\"")
+                .contains(first.contentHash(), second.contentHash());
+    }
+
+    @Test
     void unifiedDeliveryManifestExcludesNoOpWritesToolResultsAndNonTestCommands() throws Exception {
         PlatformProperties properties = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
         SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);

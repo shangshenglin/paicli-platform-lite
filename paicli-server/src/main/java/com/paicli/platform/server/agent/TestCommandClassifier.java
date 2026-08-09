@@ -46,20 +46,29 @@ public final class TestCommandClassifier {
                     ? Optional.of(TestFamily.MAVEN) : Optional.empty();
         }
         if (isGradle(executableLower)) {
+            if (gradleSkipsTests(args)) return Optional.empty();
             return args.stream().anyMatch(TestCommandClassifier::gradleTestArgument)
                     ? Optional.of(TestFamily.GRADLE) : Optional.empty();
         }
         if (isNodePackageManager(executableLower)) {
+            if (args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)) return Optional.empty();
             if (args.stream().anyMatch(arg -> arg.equalsIgnoreCase("jest"))) {
                 return Optional.of(TestFamily.JEST);
             }
             return npmTestInvocation(args) ? Optional.of(TestFamily.NPM) : Optional.empty();
         }
         if (executableLower.equals("npx") && args.stream().anyMatch(arg -> arg.equalsIgnoreCase("jest"))) {
-            return Optional.of(TestFamily.JEST);
+            return args.stream().anyMatch(TestCommandClassifier::nodeNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.JEST);
         }
-        if (executableLower.equals("jest")) return Optional.of(TestFamily.JEST);
-        if (executableLower.equals("vitest")) return Optional.of(TestFamily.VITEST);
+        if (executableLower.equals("jest")) {
+            return args.stream().anyMatch(TestCommandClassifier::jestNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.JEST);
+        }
+        if (executableLower.equals("vitest")) {
+            return args.stream().anyMatch(TestCommandClassifier::vitestNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.VITEST);
+        }
         if (executableLower.equals("pytest")) {
             return args.stream().anyMatch(TestCommandClassifier::pytestNoRunArgument)
                     ? Optional.empty() : Optional.of(TestFamily.PYTEST);
@@ -70,7 +79,10 @@ public final class TestCommandClassifier {
             return args.stream().anyMatch(arg -> arg.equalsIgnoreCase("--no-run"))
                     ? Optional.empty() : Optional.of(TestFamily.CARGO);
         }
-        if (executableLower.equals("dotnet") && hasArgument(args, "test")) return Optional.of(TestFamily.DOTNET);
+        if (executableLower.equals("dotnet") && hasArgument(args, "test")) {
+            return args.stream().anyMatch(TestCommandClassifier::dotnetNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.DOTNET);
+        }
         if (executableLower.equals("junit")) return Optional.of(TestFamily.JUNIT);
         if (isShell(executableLower) && args.stream().anyMatch(TestCommandClassifier::testScript)) {
             return Optional.of(TestFamily.SHELL_TEST);
@@ -109,6 +121,28 @@ public final class TestCommandClassifier {
         return lower.equals("test") || lower.equals("check");
     }
 
+    private static boolean gradleSkipsTests(List<String> args) {
+        for (int index = 0; index < args.size(); index++) {
+            String argument = args.get(index).toLowerCase(Locale.ROOT);
+            if ((argument.equals("-x") || argument.equals("--exclude-task")) && index + 1 < args.size()
+                    && testTask(args.get(index + 1))) return true;
+            if (argument.startsWith("-x=") || argument.startsWith("--exclude-task=")) {
+                return testTask(argument.substring(argument.indexOf('=') + 1));
+            }
+            if (argument.startsWith("-x") && argument.length() > 2) {
+                return testTask(argument.substring(2));
+            }
+        }
+        return false;
+    }
+
+    private static boolean testTask(String value) {
+        String task = value.toLowerCase(Locale.ROOT);
+        int colon = task.lastIndexOf(':');
+        if (colon >= 0) task = task.substring(colon + 1);
+        return task.equals("test") || task.equals("check");
+    }
+
     private static boolean npmTestInvocation(List<String> args) {
         for (int i = 0; i < args.size(); i++) {
             String argument = args.get(i).toLowerCase(Locale.ROOT);
@@ -130,6 +164,22 @@ public final class TestCommandClassifier {
         String lower = argument.toLowerCase(Locale.ROOT);
         return lower.equals("--collect-only") || lower.equals("--co")
                 || lower.startsWith("--collect-only=");
+    }
+
+    private static boolean jestNoRunArgument(String argument) {
+        return argument.equalsIgnoreCase("--listTests");
+    }
+
+    private static boolean vitestNoRunArgument(String argument) {
+        return argument.equalsIgnoreCase("--list");
+    }
+
+    private static boolean dotnetNoRunArgument(String argument) {
+        return argument.equalsIgnoreCase("--list-tests");
+    }
+
+    private static boolean nodeNoRunArgument(String argument) {
+        return jestNoRunArgument(argument) || vitestNoRunArgument(argument);
     }
 
     private static boolean hasArgument(List<String> args, String expected) {

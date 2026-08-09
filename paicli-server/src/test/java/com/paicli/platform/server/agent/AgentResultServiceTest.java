@@ -69,6 +69,8 @@ class AgentResultServiceTest {
             Map<?, ?> entry = (Map<?, ?>) testEvidence;
             assertThat(entry.get("family")).isEqualTo("MAVEN");
             assertThat(entry.get("status")).isEqualTo("PASSED");
+            assertThat(entry.get("ordinal")).isEqualTo(1);
+            assertThat(entry.get("after_last_mutation")).isEqualTo(true);
         });
         assertThat(((Map<?, ?>) result.get("completion_contract")).get("mode"))
                 .isEqualTo("MUTATION_AND_TEST");

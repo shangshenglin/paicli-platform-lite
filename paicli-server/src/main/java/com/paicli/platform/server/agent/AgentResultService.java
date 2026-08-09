@@ -58,7 +58,9 @@ public class AgentResultService {
                 "tool_call_id", test.toolCallId(),
                 "family", test.family().name(),
                 "command", test.command(),
-                "status", test.status().name())).toList());
+                "status", test.status().name(),
+                "ordinal", test.ordinal(),
+                "after_last_mutation", test.ordinal() > evidence.lastMutationOrdinal())).toList());
         value.put("artifacts", evidence.businessArtifacts().stream().map(artifact -> Map.of(
                 "id", artifact.id(),
                 "type", artifact.type(),

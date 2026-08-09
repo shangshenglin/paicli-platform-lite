@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.domain.CompletionMode;
+import com.paicli.platform.server.domain.RunCompletionContractRecord;
 import com.paicli.platform.server.sandbox.LocalSandboxDriver;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,7 +97,7 @@ class RunEvidenceCollectorTest {
         var session = store.createSession("evidence3", "project-e");
         var run = store.createRun(session.id(), "build only");
         execute(store, session.id(), run.id(), "execute_command",
-                "{\"command\":\"mvn compile\"}", "{\"exitCode\":0}", 0);
+                "{\"command\":\"mvn compile\"}", "{\"exitCode\":0,\"workspaceChanged\":true}", 0);
         execute(store, session.id(), run.id(), "execute_command",
                 "{\"command\":\"./check-status.sh\"}", "{\"exitCode\":0}", 1);
 
@@ -102,6 +105,14 @@ class RunEvidenceCollectorTest {
 
         assertThat(evidence.commandsExecuted()).hasSize(2);
         assertThat(evidence.tests()).isEmpty();
+        assertThat(evidence.workspaceMutations()).isEmpty();
+        assertThat(evidence.lastMutationOrdinal()).isEqualTo(-1);
+        RunCompletionContractRecord contract = new RunCompletionContractRecord(run.id(),
+                CompletionMode.MUTATION_REQUIRED, true, false, List.of(), List.of(), List.of(),
+                "test", "test", run.createdAt(), run.createdAt());
+        var verification = new RunVerificationService(null, null, null)
+                .verify(run, "build completed", contract, evidence);
+        assertThat(verification.status()).isEqualTo(RunVerificationService.Status.REPAIRABLE);
     }
 
     @Test
@@ -120,6 +131,9 @@ class RunEvidenceCollectorTest {
         execute(store, session.id(), run.id(), "execute_command",
                 "{\"command\":\"mvn test\"}",
                 "{\"exitCode\":0,\"workspaceChanged\":true}", 1);
+        execute(store, session.id(), run.id(), "execute_command",
+                "{\"command\":\"mvn package\"}",
+                "{\"exitCode\":0,\"workspaceChanged\":true}", 2);
 
         RunEvidence evidence = collector.collect(run.id());
 

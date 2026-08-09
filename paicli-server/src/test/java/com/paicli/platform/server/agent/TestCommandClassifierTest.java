@@ -69,8 +69,16 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("mvn test\ntrue")).isEmpty();
         assertThat(TestCommandClassifier.classify("mvn test & true")).isEmpty();
         assertThat(TestCommandClassifier.classify("mvn test -DskipTests=true")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew test -x test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew check --exclude-task test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew :server:test -x :server:test")).isEmpty();
         assertThat(TestCommandClassifier.classify("pytest --collect-only")).isEmpty();
         assertThat(TestCommandClassifier.classify("cargo test --no-run")).isEmpty();
+        assertThat(TestCommandClassifier.classify("jest --listTests")).isEmpty();
+        assertThat(TestCommandClassifier.classify("npx jest --listTests")).isEmpty();
+        assertThat(TestCommandClassifier.classify("npm test -- --listTests")).isEmpty();
+        assertThat(TestCommandClassifier.classify("vitest --list")).isEmpty();
+        assertThat(TestCommandClassifier.classify("dotnet test --list-tests")).isEmpty();
         assertThat(TestCommandClassifier.classify("cd server && mvn test")).contains(TestFamily.MAVEN);
         assertThat(TestCommandClassifier.classify("cd server && mvn test && mvn test")).contains(TestFamily.MAVEN);
     }

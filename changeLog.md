@@ -950,3 +950,10 @@
 - 变更：收紧 `TestCommandClassifier`：`-Dtest`/`-Dit.test` 是 Maven selector 而不是测试 goal；Gradle 仅把显式 `test`/`check` 任务作为测试，`testClasses`、`checkstyleMain` 不再生成 TestEvidence。
 - 验证：新增 SQLite terminal delegation envelope、统一 DeliveryManifest 和实际协作阶段调用路径的回归测试，并扩展分类器用例。定向 reactor 测试 `TestCommandClassifierTest`、`CollaborationServiceTest`、`TaskDigestManifestTest`、`SqliteRuntimeStoreTest` 共 96 项通过；`./mvnw.cmd clean test`、`./mvnw.cmd clean package` 全量均通过（common 3 + server 288 + sandbox-agent 4 = 295）。`git diff --check` 与文档覆盖复核通过。
 - 文档：README、`docs/architecture.md`、`docs/phases.md` 已同步。本次未修改 Sandbox 行为、配置、REST/OpenAPI 或产品站，故 `docs/docker-sandbox.md`、OpenAPI 与 `paicli-site/README.md` 不适用。
+# Completion Evidence 复核收尾（二）：构建输出、测试时序与树级验收快照
+
+- 变更（构建输出不算业务 mutation）：新增 `BuildCommandClassifier`。`RunEvidenceDecoder` 对已知 Maven/Gradle/npm/Cargo/Go/Make 构建命令的 workspace fingerprint 保守排除，生成的 `target/`、classes、bundle、缓存等不再单独满足 `MUTATION_REQUIRED`，也不会覆盖前一次真实源码 mutation 的 ordinal；未知非测试命令的显式 workspaceChanged 仍可作为 `workspace_mutations` 证据。
+- 变更（测试实际执行语义）：`TestCommandClassifier` 增加 Gradle `-x/--exclude-task test`（含模块 task）、Jest/Vitest 列表模式和 `.NET --list-tests` 的 no-run 拒绝。`AgentResultService` 与 SQLite terminal delegation envelope 的 test 条目统一输出 `ordinal`、`after_last_mutation`；`AgentResultValidator` 的合同测试校验只接受最后 mutation 之后的 PASSED，避免 Parent 接受子 Run 的过期测试。
+- 变更（验收快照范围）：`DeliveryManifestService.accept` 聚合根任务与所有 descendant stage task 的 DeliveryManifest，每条保留 `task_id`、`run_id`、stage、attempt、hash 和时间，因此 AcceptedSnapshot 可追溯实际被验收的全任务树交付，而不再只包含根任务的直接 delivery。
+- 验证：新增 BuildCommandClassifier、构建 fingerprint 不推进 mutation、Gradle exclude/Jest/Vitest/.NET no-run、Parent 拒绝 mutation 前测试、树级 AcceptedSnapshot 的回归测试。定向 reactor 测试 77 项通过；`./mvnw.cmd clean test` 与 `./mvnw.cmd clean package` 全量均通过（common 3 + server 292 + sandbox-agent 4 = 299），`git diff --check` 与文档覆盖复核通过。
+- 文档：README、`docs/architecture.md`、`docs/phases.md` 已同步。本次未改变 Sandbox 返回协议、配置、REST/OpenAPI 或产品站，故 `docs/docker-sandbox.md`、OpenAPI 与 `paicli-site/README.md` 不适用。

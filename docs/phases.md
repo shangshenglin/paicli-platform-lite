@@ -4,9 +4,9 @@
 
 - 迁移 39：`run_completion_contracts`（完成合同）、`tool_calls.result_metadata_json`（结构化工具证据）、`tool_calls.wait_kind/wait_ref/waiting_since`（Deferred 外部工具调用）。
 - Completion Contract：`CompletionContractService` 按 DelegationEnvelope → PlanStep → WorkingPlan completion → Root 保守分类器建立合同，只可加强不可被模型削弱；`CompletionRequirementClassifier` 对 Root 任务做高置信度命令式识别。
-- Evidence：`RunEvidenceCollector` 通过与 SQLite terminal envelope 共用的 `RunEvidenceDecoder` 统一收集 files/commands/tests/artifacts/workspaceMutations/lastMutationOrdinal；`TestCommandClassifier` 高精度测试族分类；`write_file` 结构化 before/after sha256。
+- Evidence：`RunEvidenceCollector` 通过与 SQLite terminal envelope 共用的 `RunEvidenceDecoder` 统一收集 files/commands/tests/artifacts/workspaceMutations/lastMutationOrdinal；`BuildCommandClassifier` 排除构建生成物，`TestCommandClassifier` 高精度测试族分类；`write_file` 结构化 before/after sha256。
 - 验证：`RunVerificationService` 按合同模式验证，required tests 在最后一次 mutation 后通过、不同 TestFamily 互不覆盖。
-- AgentResult：`AgentResultService` 自动归集结构化结果，`AgentResultValidator` contract-aware，DeliveryManifest/WorkspaceMerge 复用同一证据。
+- AgentResult：`AgentResultService` 自动归集结构化结果并输出 test ordinal/after_last_mutation，`AgentResultValidator` contract-aware，DeliveryManifest/WorkspaceMerge 复用同一证据；AcceptedSnapshot 聚合整棵任务树的交付清单。
 - Deferred：`WAITING_EXTERNAL` + child 终态自动 resolve 原始 `get_agent_result` ToolCall；启动恢复、Lost Wakeup 双边保护、幂等。
 - 状态：完成。`.\mvnw.cmd clean test` 全量通过；无 REST 路径变更，产品站无展示变更（不适用）。
 ## 2026-08-08 ExpertThread · PR9：专家线程与执行期新输入竞态保护
@@ -312,7 +312,7 @@
 ### 2026-08-09 Completion Evidence 审查修复
 
 - [x] 收紧 Completion Contract 证据边界：`get_agent_result` 不进入只读并行批处理；测试生成物 fingerprint 不覆盖源码 mutation 边界；非测试命令 mutation 可作为工作区证据；不安全复合命令不生成测试通过证据。
-- [x] AgentResult/SQLite delegation envelope 输出 `workspace_mutations`，让命令级工作区变更在 Child CompletionVerifier 与 Parent AgentResultValidator 之间保持同一语义；SQLite terminal、阶段 delivery gate 与 DeliveryManifest 统一消费 RunEvidence，`tool_result` 不外泄为交付物，也不按共享 workspace 时间戳归属文件；分类器拒绝换行、后台 `&`、no-run/skip、孤立 Maven selector 与 Gradle `testClasses`/`checkstyle*` 误报。
+- [x] AgentResult/SQLite delegation envelope 输出 `workspace_mutations`，让命令级工作区变更在 Child CompletionVerifier 与 Parent AgentResultValidator 之间保持同一语义；`BuildCommandClassifier` 阻止构建输出伪造 mutation、AgentResult 以 `after_last_mutation` 同步父子测试时序；SQLite terminal、阶段 delivery gate 与 DeliveryManifest 统一消费 RunEvidence，`tool_result` 不外泄为交付物，也不按共享 workspace 时间戳归属文件；分类器拒绝换行、后台 `&`、no-run/skip、Gradle exclude、孤立 Maven selector 与 Gradle `testClasses`/`checkstyle*` 误报，AcceptedSnapshot 聚合根与全部阶段交付。
 
 - [x] 修复 Docker Sandbox `write_file` 的 pre-write/post-write 证据顺序，并为 `execute_command` 增加 workspace fingerprint。
 - [x] 以 SQLite 原子事务提交 Deferred ToolCall 停放和父 Run `WAITING_AGENT`，补齐启动、竞争和重复解析的可恢复边界。
