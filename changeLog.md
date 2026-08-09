@@ -23,6 +23,12 @@
 - 变更：`BuildCommandClassifier` 从 boolean 构建白名单升级为 `GENERATED_ONLY / POTENTIAL_PRODUCT_MUTATION / UNTRUSTED_OR_UNKNOWN` 三态；`RunEvidenceDecoder` 只允许高置信度直接写入命令的 workspace fingerprint 形成 `workspace_mutations`，Maven/Gradle/npm/dotnet/webpack/tsc 生成物、未知脚本及 `||`/`;`/管道等不安全复合命令均不能降级满足 `MUTATION_REQUIRED`。`TestCommandClassifier` 仅接受真实 Node executable invocation，拒绝安装 Jest 与 Gradle `--dry-run/-m`；`AgentResultValidator` 按 family 选择最后 mutation 后 ordinal 最大的测试结果，后续失败会覆盖早先通过。
 - 思路：整体 workspace fingerprint 只能证明“某处变化”，不能证明产品源文件变化，因此未知命令必须默认不可信；Parent 必须复刻 Child 的 latest-per-family 时序语义，避免历史 PASS 穿透后续 FAIL。未改变数据库 Schema、REST API、配置、启动方式或产品站能力，OpenAPI 与产品站文档不适用；Sandbox 元数据格式未变，但 Server 对 fingerprint 的解释收紧，因此同步 `docs/docker-sandbox.md`。
 - 验证：新增/扩展三态分类、复合 build/test 不降级、未知脚本不形成 mutation、Node 安装与 Gradle dry-run 不形成 TestEvidence、Parent `PASS → FAIL` 回归；定向 Maven 测试 26 项通过。最终工作树的 `clean test` 与 `clean package` 均通过（common 3 + server 294 + sandbox-agent 4 = 301），`git diff --check` 与文档覆盖复核通过。
+### WorkingPlan 基础能力常驻与明确触发规则
+
+- 变更：`ContextManager` 在 Agent Profile 配置非空业务 Tool allowlist 时，额外保留 `update_working_plan`，确保 WorkingPlan 作为 Run 内部 Harness 能力不会被业务工具白名单过滤；未扩大其他 Core Tool 权限。
+- 变更：Agent 通用 System Prompt 明确 WorkingPlan 的创建条件、简短记录与 `evidenceRefs` 更新要求，以及工具失败、验证失败、用户补充要求或执行方向变化时先更新再继续的规则；简单单步/只读/可直接回答任务仍不要求创建计划。
+- 思路：继续由模型在正常 Model Decision 中自主判断 WorkingPlan，保持 Act → Observe → Replan 流程，不新增 Plan 阶段、Run 状态、独立 Model Call、数据结构或 Tool Schema。
+- 验证：新增 `ContextManagerTest` 覆盖无 allowlist、有业务 allowlist 时的 `update_working_plan` 可见性，以及其他基础工具不被额外放开；新增 System Prompt 触发规则断言。合并时核对 SQLite 迁移器实际版本为 39，迁移断言保留 1–39，随后执行受影响回归测试；同步更新 README 与架构说明；未修改 API、配置、Sandbox、Formal Plan 或产品站，`docs/phases.md`、OpenAPI、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用。
 
 ### Completion Evidence 二次复核：命令 mutation 证据统一与测试分类再收紧
 
