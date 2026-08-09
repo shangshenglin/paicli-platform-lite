@@ -237,10 +237,20 @@ public class PrdAnalysisCoordinator {
     // ----------------------------------------------------------------
 
     private void waitingUser(PrdAnalysisStore.PrdTask task) {
-        if (store.countOpenBlocking(task.id()) == 0) {
-            ensureFreshReconcileRun(task);
-            store.updateTaskStatus(task.id(), "RECONCILING", "user answers received; re-reconciling");
+        if (store.countOpenBlocking(task.id()) > 0) {
+            return;
         }
+        if (store.countUnresolvedBlocking(task.id()) == 0) {
+            return;
+        }
+        if (task.reconcileIteration() >= MAX_RECONCILE_ITERATIONS) {
+            store.markTaskFailed(task.id(),
+                    "answered blocking questions were not resolved after max reconciliation iterations");
+            return;
+        }
+        store.incrementReconcileIteration(task.id());
+        ensureFreshReconcileRun(task);
+        store.updateTaskStatus(task.id(), "RECONCILING", "user answers received; re-reconciling");
     }
 
     // ----------------------------------------------------------------

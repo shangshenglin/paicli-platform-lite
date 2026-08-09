@@ -4,6 +4,12 @@
 
 ## 2026-08-09
 
+### PRD Analysis Agent：已回答 Blocking 问题的 Reconcile 循环上限
+
+- 变更：`WAITING_USER` 在没有 `OPEN` Blocking 问题、但仍有 `ANSWERED` 未闭环问题时，复用 `reconcileIteration` 和 `MAX_RECONCILE_ITERATIONS` 计数后才创建新的 Reconcile Run；达到上限时明确标记任务 FAILED，不再无限消耗模型 Token。已经全部 RESOLVED 的场景不会额外创建 Run。
+- 思路：用户答案解除的是人工等待，不等于 Reconciler 已把业务事实应用到最终模型；因此必须继续以 `countUnresolvedBlocking` 为完成门槛，同时为模型漏填 `resolvedQuestionIds` 设置与现有 FIXABLE 回流一致的持久化上限。
+- 验证：新增 Coordinator 回归，覆盖 ANSWERED Blocking 在两轮未 RESOLVED 的 Reconcile 后进入 FAILED，避免无限循环；聚焦 Coordinator + Harness 回归通过 8 项，完整 `clean package` 完成，Surefire 报告汇总 329 项、0 failure、0 error、0 skipped，`git diff --check` 通过。本次不改变 REST/OpenAPI、配置、Sandbox、阶段范围或产品站，相关文档不适用；README 与架构状态机说明已同步。
+
 ### PRD Analysis Agent MVP 五项稳定性修复
 
 - 变更：Coordinator 的 Node retry 死锁判定改为读取 SQLite 中持久化的 `RUNNING` 节点数，避免同一次 `advance()` 中创建 attempt=1 后仍按局部计数把任务误判失败；`/start` 现在只将 DRAFT 任务持久化为 `INGESTING` 并立即返回，附件提取完全由 PRD Worker 异步推进。

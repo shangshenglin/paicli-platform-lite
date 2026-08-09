@@ -210,6 +210,37 @@ class PrdAnalysisCoordinatorTest {
         assertThat(harness.store.task(task.id())).get().extracting("status").isEqualTo("COMPLETED");
     }
 
+    @Test
+    void answeredBlockingQuestionFailsAfterBoundedUnresolvedReconciliationAttempts() throws Exception {
+        Harness harness = harness();
+        var task = harness.store.createTask("project-a", "T", "USER", 1, "session-1");
+        harness.skills.ensureProfiles("project-a");
+        var question = harness.store.insertQuestion(task.id(), "RULE_AMBIGUITY", "BLOCKING",
+                "Which time basis applies?", "not stated");
+        harness.store.answerQuestions(task.id(), List.of(
+                new PrdAnalysisStore.QuestionAnswer(question.id(), "payment completion")));
+        harness.store.updateTaskStatus(task.id(), "WAITING_USER", null);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            harness.coordinator.advance(task.id()); // WAITING_USER -> RECONCILING, consumes bounded iteration
+            assertThat(harness.store.task(task.id())).get().extracting("currentStage", "reconcileIteration")
+                    .containsExactly("RECONCILING", attempt + 1);
+            harness.coordinator.advance(task.id()); // create RECONCILE run
+            var reconcile = harness.store.latestRunBinding(task.id(), "RECONCILE", null).orElseThrow();
+            harness.store.submitReconciliation(task.id(), reconcile.id(), "tc-rec-" + attempt,
+                    mapper.writeValueAsString(Map.of("summary", "answer considered but not resolved",
+                            "resolvedQuestionIds", List.of())));
+            harness.runtime.completeRun(reconcile.runId());
+            harness.coordinator.advance(task.id()); // -> VERIFYING
+            harness.coordinator.advance(task.id()); // unresolved ANSWERED -> WAITING_USER
+            assertThat(harness.store.task(task.id())).get().extracting("currentStage").isEqualTo("WAITING_USER");
+        }
+
+        harness.coordinator.advance(task.id());
+        assertThat(harness.store.task(task.id())).get().extracting("status", "lastError")
+                .containsExactly("FAILED", "answered blocking questions were not resolved after max reconciliation iterations");
+    }
+
 
     @Test
     void mapperCompletingWithoutSubmissionIsRetriedThenFailsTask() throws Exception {

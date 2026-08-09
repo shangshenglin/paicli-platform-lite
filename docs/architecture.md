@@ -85,7 +85,7 @@ Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService（`/star
     ├─ ANALYZING   N 个 Node Analyst 业务子 Run（普通 Managed Run，由 prd_analysis_runs 绑定）→ prd_submit_node_analysis
     ├─ RECONCILING Reconciler Run（system.prd.reconciler + prd-reconcile）→ prd_submit_reconciliation
     ├─ VERIFYING   PrdAnalysisValidator（Java 8 项确定性校验）→ FIXABLE 回流 / AMBIGUOUS 进入 WAITING_USER
-    ├─ WAITING_USER 用户批量回答 → 重新 RECONCILING
+    ├─ WAITING_USER 用户批量回答 → 重新 RECONCILING（ANSWERED 未被 RESOLVED 时复用 reconcileIteration，最多 2 轮后 FAILED）
     └─ PACKAGING   PrdAnalysisRenderer → 5 类 Artifact → COMPLETED
 ```
 
