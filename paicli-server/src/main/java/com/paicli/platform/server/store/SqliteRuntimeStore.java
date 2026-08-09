@@ -715,6 +715,10 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(source_id) REFERENCES prd_analysis_sources(id) ON DELETE CASCADE)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_chunks_source " +
                     "ON prd_analysis_source_chunks(source_id,ordinal)");
+            statement.execute("DELETE FROM prd_analysis_source_chunks WHERE id NOT IN (" +
+                    "SELECT MIN(id) FROM prd_analysis_source_chunks GROUP BY source_id,ordinal)");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_prd_chunks_source_ordinal " +
+                    "ON prd_analysis_source_chunks(source_id,ordinal)");
             statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_nodes (" +
                     "id TEXT PRIMARY KEY,task_id TEXT NOT NULL,client_key TEXT NOT NULL," +
                     "title TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '',source_id TEXT NOT NULL," +
@@ -724,6 +728,10 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(task_id) REFERENCES prd_analysis_tasks(id) ON DELETE CASCADE)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_nodes_task " +
                     "ON prd_analysis_nodes(task_id,status,created_at)");
+            statement.execute("DELETE FROM prd_analysis_nodes WHERE id NOT IN (" +
+                    "SELECT MIN(id) FROM prd_analysis_nodes GROUP BY task_id,client_key)");
+            statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_prd_nodes_task_client_key " +
+                    "ON prd_analysis_nodes(task_id,client_key)");
             statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_node_dependencies (" +
                     "task_id TEXT NOT NULL,from_node_id TEXT NOT NULL,to_node_id TEXT NOT NULL," +
                     "dependency_type TEXT NOT NULL," +

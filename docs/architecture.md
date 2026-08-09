@@ -96,7 +96,7 @@ Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService → PrdA
 - **后端绑定权限**：`prd_*` 工具从当前 RunId 反查 `prd_analysis_runs` 的 purpose/task/node 绑定，Mapper/Node/Reconciler 不能越权。
 - **结构化提交**：模型只通过三个粗粒度 submit 工具提交，全部事务写入；ID 由 Server 生成，Markdown 是派生产物。
 - **确定性校验**：Validator 纯 Java，FIXABLE（重复实体等）自动回流最多 2 轮，AMBIGUOUS（字段缺失/规则互斥）产生 BLOCKING 问题进入 WAITING_USER。
-- **Skill 注入**：Agent Profile 的 `skillNamesJson` 作为 required skill，由 ContextManager 把 SKILL.md 全文注入 system 前缀（普通 Run 不受影响）。
+- **Skill / Tool 隔离**：仅内置 `system.prd` Profile 将 `skillNamesJson` 作为 required skill，由 ContextManager 注入 SKILL.md 全文；普通 Profile 保持按需 Skill 索引。PRD Profile 是严格工具白名单，不隐式附加 Plan、协作或 WorkingPlan 工具；后端仍按 `prd_analysis_runs` purpose/node binding 复核。
 - **系统 Profile 作用域**：只有 `templateKey=system.prd` 的三个内置 Profile 可跨项目解析，避免启动时在 `default` 种子化后其他项目无法创建 Mapper Run；普通 Profile 仍保持项目隔离。
 - **评测**：simple-order fixture + 确定性评分（实体/规则数、指定字段映射、冲突发现、阻塞问题与回答后通过），并以 Scripted Model 真实执行一次 `RunProcessor → ToolCall → PrdAnalysisToolProvider`；LLM Judge 不作硬门禁。
 
@@ -248,7 +248,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 40：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–37 覆盖协作工作区、WorkingPlan、Run 反思和任务摘要/交付清单；38 增加 ExpertThread，39 增加 Completion Contract、结构化工具证据和 Deferred 外部工具调用，40 增加 PRD Analysis 的 10 张业务状态表。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 41：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–37 覆盖协作工作区、WorkingPlan、Run 反思和任务摘要/交付清单；38 增加 ExpertThread，39 增加 Completion Contract、结构化工具证据和 Deferred 外部工具调用，40 增加 PRD Analysis 的 10 张业务状态表，41 为 source chunk ordinal 和 task node clientKey 添加唯一性约束。PRD 的 submit 写入和 submission marker、以及摄入分块替换和 source 状态更新均在同一事务内完成；Coordinator 对依赖循环和无进展图明确失败，避免任务无期限停留在 ANALYZING。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

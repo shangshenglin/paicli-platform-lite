@@ -11,6 +11,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -322,28 +324,62 @@ public class PrdAnalysisStore {
         try (Connection c = open()) {
             c.setAutoCommit(false);
             try {
-                try (PreparedStatement ps = c.prepareStatement(
-                        "INSERT INTO prd_analysis_source_chunks(id,source_id,ordinal,heading,start_offset," +
-                                "end_offset,text,content_hash) VALUES(?,?,?,?,?,?,?,?)")) {
-                    for (ChunkDraft draft : chunks) {
-                        ps.setString(1, id("prdchunk"));
-                        ps.setString(2, sourceId);
-                        ps.setInt(3, draft.ordinal());
-                        ps.setString(4, nullable(draft.heading()));
-                        ps.setInt(5, draft.startOffset());
-                        ps.setInt(6, draft.endOffset());
-                        ps.setString(7, draft.text());
-                        ps.setString(8, draft.contentHash());
-                        ps.addBatch();
-                    }
-                    ps.executeBatch();
-                }
+                insertChunksWithinTransaction(c, sourceId, chunks);
                 c.commit();
             } catch (Exception e) {
                 c.rollback();
                 throw e;
             }
         } catch (SQLException e) { throw failure("insert prd chunks", e); }
+    }
+
+    /** Replaces an extracted source snapshot and its terminal extraction state atomically. */
+    public void replaceChunksAndMarkExtracted(String sourceId, List<ChunkDraft> chunks,
+                                              String extractionStatus, String textArtifactId) {
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                try (PreparedStatement delete = c.prepareStatement(
+                        "DELETE FROM prd_analysis_source_chunks WHERE source_id=?")) {
+                    delete.setString(1, sourceId);
+                    delete.executeUpdate();
+                }
+                insertChunksWithinTransaction(c, sourceId, chunks);
+                try (PreparedStatement update = c.prepareStatement(
+                        "UPDATE prd_analysis_sources SET extraction_status=?,text_artifact_id=? WHERE id=?")) {
+                    update.setString(1, extractionStatus == null || extractionStatus.isBlank()
+                            ? "COMPLETED" : extractionStatus.trim().toUpperCase());
+                    update.setString(2, nullable(textArtifactId));
+                    update.setString(3, sourceId);
+                    update.executeUpdate();
+                }
+                c.commit();
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            }
+        } catch (SQLException e) { throw failure("replace prd source chunks", e); }
+    }
+
+    private void insertChunksWithinTransaction(Connection c, String sourceId, List<ChunkDraft> chunks)
+            throws SQLException {
+        if (chunks == null || chunks.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO prd_analysis_source_chunks(id,source_id,ordinal,heading,start_offset," +
+                        "end_offset,text,content_hash) VALUES(?,?,?,?,?,?,?,?)")) {
+            for (ChunkDraft draft : chunks) {
+                ps.setString(1, id("prdchunk"));
+                ps.setString(2, sourceId);
+                ps.setInt(3, draft.ordinal());
+                ps.setString(4, nullable(draft.heading()));
+                ps.setInt(5, draft.startOffset());
+                ps.setInt(6, draft.endOffset());
+                ps.setString(7, draft.text());
+                ps.setString(8, draft.contentHash());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
     }
 
     public List<PrdChunk> chunks(String sourceId, int offset, int limit) {
@@ -855,7 +891,7 @@ public class PrdAnalysisStore {
         PrdRunBinding binding = requireBinding(bindingId);
         requirePurpose(binding, "MAP");
         requireTask(binding, taskId);
-        return withSubmission(binding, toolCallId, payloadJson, () -> {
+        return withSubmission(binding, toolCallId, payloadJson, c -> {
             Map<String, Object> payload = parsePayload(payloadJson);
             List<Map<String, Object>> nodePayloads = list(payload, "nodes");
             List<Map<String, Object>> dependencyPayloads = list(payload, "dependencies");
@@ -864,6 +900,7 @@ public class PrdAnalysisStore {
             if (nodePayloads.size() > MAX_NODES) {
                 throw new IllegalArgumentException("too many nodes (max " + MAX_NODES + ")");
             }
+            validateDependencyGraph(nodePayloads, dependencyPayloads);
             List<PrdNode> existing = nodes(taskId);
             if (!existing.isEmpty()) {
                 throw new IllegalStateException("nodes already submitted for task " + taskId
@@ -875,10 +912,7 @@ public class PrdAnalysisStore {
             List<String> clientKeys = new ArrayList<>();
             Map<String, String> clientKeyToId = new LinkedHashMap<>();
             List<PrdNode> createdNodes = new ArrayList<>();
-            try (Connection c = open()) {
-                c.setAutoCommit(false);
-                try {
-                    try (PreparedStatement ps = c.prepareStatement(
+            try (PreparedStatement ps = c.prepareStatement(
                             "INSERT INTO prd_analysis_nodes(id,task_id,client_key,title,summary,source_id," +
                                     "start_chunk_ordinal,end_chunk_ordinal,status,domain_tags_json,created_at,updated_at) "
                                     + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")) {
@@ -939,12 +973,6 @@ public class PrdAnalysisStore {
                     if (!glossaryPayload.isEmpty()) {
                         updateGlossaryWithinTransaction(c, taskId, mapper.writeValueAsString(glossaryPayload));
                     }
-                    c.commit();
-                } catch (Exception e) {
-                    c.rollback();
-                    throw e;
-                }
-            } catch (SQLException e) { throw failure("submit prd map", e); }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("taskId", taskId);
             result.put("status", "SUBMITTED");
@@ -965,16 +993,13 @@ public class PrdAnalysisStore {
             throw new IllegalArgumentException("this Run is not bound to node " + nodeId);
         }
         PrdNode node = node(nodeId).orElseThrow(() -> new IllegalArgumentException("node not found: " + nodeId));
-        return withSubmission(binding, toolCallId, payloadJson, () -> {
+        return withSubmission(binding, toolCallId, payloadJson, c -> {
             Map<String, Object> payload = parsePayload(payloadJson);
             List<Map<String, Object>> findingPayloads = list(payload, "findings");
             List<Map<String, Object>> questionPayloads = list(payload, "questions");
             String summary = value(String.valueOf(payload.getOrDefault("summary", node.summary())), 8_000);
             List<PrdFinding> createdFindings = new ArrayList<>();
-            try (Connection c = open()) {
-                c.setAutoCommit(false);
-                try {
-                    try (PreparedStatement ps = c.prepareStatement(
+            try (PreparedStatement ps = c.prepareStatement(
                             "INSERT INTO prd_analysis_findings(id,task_id,node_id,finding_type,name,summary," +
                                     "payload_json,status,severity,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
                         for (Map<String, Object> item : findingPayloads) {
@@ -1000,24 +1025,18 @@ public class PrdAnalysisStore {
                                     Instant.now(), Instant.now()));
                         }
                         ps.executeBatch();
-                    }
-                    insertEvidenceBatch(c, taskId, createdFindings, findingPayloads);
-                    List<PrdQuestion> createdQuestions = insertQuestionsWithinTransaction(c, taskId, nodeId, questionPayloads);
-                    updateNodeWithinTransaction(c, nodeId, "COMPLETED", summary);
-                    c.commit();
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("taskId", taskId);
-                    result.put("nodeId", nodeId);
-                    result.put("status", "SUBMITTED");
-                    result.put("findings", createdFindings.size());
-                    result.put("questions", createdQuestions.size());
-                    result.put("findingIds", createdFindings.stream().map(PrdFinding::id).toList());
-                    return result;
-                } catch (Exception e) {
-                    c.rollback();
-                    throw e;
-                }
-            } catch (SQLException e) { throw failure("submit prd node analysis", e); }
+            }
+            insertEvidenceBatch(c, taskId, createdFindings, findingPayloads);
+            List<PrdQuestion> createdQuestions = insertQuestionsWithinTransaction(c, taskId, nodeId, questionPayloads);
+            updateNodeWithinTransaction(c, nodeId, "COMPLETED", summary);
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("taskId", taskId);
+            result.put("nodeId", nodeId);
+            result.put("status", "SUBMITTED");
+            result.put("findings", createdFindings.size());
+            result.put("questions", createdQuestions.size());
+            result.put("findingIds", createdFindings.stream().map(PrdFinding::id).toList());
+            return result;
         });
     }
 
@@ -1027,17 +1046,14 @@ public class PrdAnalysisStore {
         PrdRunBinding binding = requireBinding(bindingId);
         requirePurpose(binding, "RECONCILE");
         requireTask(binding, taskId);
-        return withSubmission(binding, toolCallId, payloadJson, () -> {
+        return withSubmission(binding, toolCallId, payloadJson, c -> {
             Map<String, Object> payload = parsePayload(payloadJson);
             List<Map<String, Object>> mergeActions = list(payload, "mergeActions");
             List<Map<String, Object>> statusActions = list(payload, "statusActions");
             List<Map<String, Object>> newQuestions = list(payload, "newQuestions");
             List<String> resolvedQuestionIds = stringList(payload.get("resolvedQuestionIds"));
             String summary = value(String.valueOf(payload.getOrDefault("summary", "")), 8_000);
-            try (Connection c = open()) {
-                c.setAutoCommit(false);
-                try {
-                    try (PreparedStatement ps = c.prepareStatement(
+            try (PreparedStatement ps = c.prepareStatement(
                             "UPDATE prd_analysis_findings SET status='MERGED',merged_into_id=?,updated_at=? WHERE id=? AND task_id=?")) {
                         for (Map<String, Object> action : mergeActions) {
                             String canonical = String.valueOf(action.get("canonicalFindingId"));
@@ -1093,20 +1109,14 @@ public class PrdAnalysisStore {
                         }
                         ps.executeBatch();
                     }
-                    c.commit();
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("taskId", taskId);
-                    result.put("status", "SUBMITTED");
-                    result.put("merges", mergeActions.size());
-                    result.put("statusActions", statusActions.size());
-                    result.put("newQuestions", createdQuestions.size());
-                    result.put("resolvedQuestions", resolvedQuestionIds.size());
-                    return result;
-                } catch (Exception e) {
-                    c.rollback();
-                    throw e;
-                }
-            } catch (SQLException e) { throw failure("submit prd reconciliation", e); }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("taskId", taskId);
+            result.put("status", "SUBMITTED");
+            result.put("merges", mergeActions.size());
+            result.put("statusActions", statusActions.size());
+            result.put("newQuestions", createdQuestions.size());
+            result.put("resolvedQuestions", resolvedQuestionIds.size());
+            return result;
         });
     }
 
@@ -1115,42 +1125,72 @@ public class PrdAnalysisStore {
     // ------------------------------------------------------------------
 
     private Map<String, Object> withSubmission(PrdRunBinding binding, String toolCallId,
-                                               String payloadJson, ThrowingSupplier<Map<String, Object>> action) {
-        if (!blank(binding.submissionToolCallId()) && binding.submissionToolCallId().equals(toolCallId)) {
-            return storedSubmission(binding);
-        }
-        if (!blank(binding.submissionToolCallId())) {
-            throw new IllegalStateException("this PRD Run has already submitted with a different tool call");
-        }
+                                               String payloadJson, ThrowingConnectionSupplier<Map<String, Object>> action) {
         if (payloadJson == null || payloadJson.isBlank()) throw new IllegalArgumentException("payload is required");
         if (payloadJson.length() > MAX_PAYLOAD_JSON) {
             throw new IllegalArgumentException("payload is too large");
         }
-        Map<String, Object> result;
-        try {
-            result = action.get();
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new IllegalStateException("PRD submission failed", e);
-        }
-        String resultJson = writeJson(result);
-        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+        try (Connection c = open()) {
+            c.setAutoCommit(false);
+            try {
+                // SQLite has database-level write locking. This no-op update obtains that
+                // lock before observing the marker, so concurrent retries serialize.
+                try (PreparedStatement lock = c.prepareStatement(
+                        "UPDATE prd_analysis_runs SET updated_at=updated_at WHERE id=?")) {
+                    lock.setString(1, binding.id());
+                    if (lock.executeUpdate() != 1) throw new IllegalArgumentException("PRD Run binding not found");
+                }
+                try (PreparedStatement existing = c.prepareStatement(
+                        "SELECT submission_tool_call_id,submission_result_json FROM prd_analysis_runs WHERE id=?")) {
+                    existing.setString(1, binding.id());
+                    try (ResultSet rs = existing.executeQuery()) {
+                        if (!rs.next()) throw new IllegalArgumentException("PRD Run binding not found");
+                        String priorToolCallId = rs.getString(1);
+                        if (!blank(priorToolCallId)) {
+                            if (!priorToolCallId.equals(toolCallId)) {
+                                throw new IllegalStateException("this PRD Run has already submitted with a different tool call");
+                            }
+                            Map<String, Object> stored = storedSubmission(rs.getString(2));
+                            c.commit();
+                            return stored;
+                        }
+                    }
+                }
+                Map<String, Object> result = action.get(c);
+                persistSubmissionWithinTransaction(c, binding.id(), toolCallId, payloadJson, writeJson(result));
+                c.commit();
+                return result;
+            } catch (RuntimeException e) {
+                c.rollback();
+                throw e;
+            } catch (Exception e) {
+                c.rollback();
+                throw new IllegalStateException("PRD submission failed", e);
+            }
+        } catch (SQLException e) { throw failure("persist prd submission", e); }
+    }
+
+    private void persistSubmissionWithinTransaction(Connection c, String bindingId, String toolCallId,
+                                                     String payloadJson, String resultJson) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
                 "UPDATE prd_analysis_runs SET submission_tool_call_id=?,submission_payload_json=?,submission_result_json=?,submitted_at=?,updated_at=? WHERE id=?")) {
             ps.setString(1, toolCallId);
             ps.setString(2, payloadJson);
             ps.setString(3, resultJson);
             ps.setString(4, Instant.now().toString());
             ps.setString(5, Instant.now().toString());
-            ps.setString(6, binding.id());
+            ps.setString(6, bindingId);
             ps.executeUpdate();
-        } catch (SQLException e) { throw failure("persist prd submission", e); }
-        return result;
+        }
     }
 
     private Map<String, Object> storedSubmission(PrdRunBinding binding) {
+        return storedSubmission(binding.submissionResultJson());
+    }
+
+    private Map<String, Object> storedSubmission(String resultJson) {
         try {
-            return mapper.readValue(binding.submissionResultJson(), new com.fasterxml.jackson.core.type.TypeReference<>() { });
+            return mapper.readValue(resultJson, new com.fasterxml.jackson.core.type.TypeReference<>() { });
         } catch (Exception e) {
             throw new IllegalStateException("stored submission result is corrupt", e);
         }
@@ -1289,6 +1329,44 @@ public class PrdAnalysisStore {
                 }
             }
         } catch (SQLException e) { throw failure("validate prd chunk range", e); }
+    }
+
+    private static void validateDependencyGraph(List<Map<String, Object>> nodes,
+                                                List<Map<String, Object>> dependencies) {
+        Set<String> keys = new HashSet<>();
+        Map<String, List<String>> edges = new HashMap<>();
+        for (Map<String, Object> node : nodes) {
+            String key = text(String.valueOf(node.get("clientKey")), "clientKey", 120);
+            if (!keys.add(key)) throw new IllegalArgumentException("duplicate clientKey: " + key);
+            edges.put(key, new ArrayList<>());
+        }
+        for (Map<String, Object> dependency : dependencies) {
+            String from = String.valueOf(dependency.get("fromClientKey"));
+            String to = String.valueOf(dependency.get("toClientKey"));
+            if (!keys.contains(from)) throw new IllegalArgumentException("dependency fromClientKey not found: " + from);
+            if (!keys.contains(to)) throw new IllegalArgumentException("dependency toClientKey not found: " + to);
+            if (from.equals(to)) throw new IllegalArgumentException("self dependency is not allowed");
+            edges.get(from).add(to);
+        }
+        Set<String> visiting = new HashSet<>();
+        Set<String> visited = new HashSet<>();
+        for (String key : keys) {
+            if (hasDependencyCycle(key, edges, visiting, visited)) {
+                throw new IllegalArgumentException("dependency graph contains a cycle");
+            }
+        }
+    }
+
+    private static boolean hasDependencyCycle(String key, Map<String, List<String>> edges,
+                                              Set<String> visiting, Set<String> visited) {
+        if (visited.contains(key)) return false;
+        if (!visiting.add(key)) return true;
+        for (String next : edges.getOrDefault(key, List.of())) {
+            if (hasDependencyCycle(next, edges, visiting, visited)) return true;
+        }
+        visiting.remove(key);
+        visited.add(key);
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -1614,7 +1692,7 @@ public class PrdAnalysisStore {
                              String subjectId, String message, String expectedJson, String actualJson) { }
 
     @FunctionalInterface
-    private interface ThrowingSupplier<T> {
-        T get() throws Exception;
+    private interface ThrowingConnectionSupplier<T> {
+        T get(Connection connection) throws Exception;
     }
 }

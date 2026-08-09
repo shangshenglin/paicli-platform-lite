@@ -146,6 +146,7 @@ public class PrdAnalysisCoordinator {
                 }
             }
         }
+        int scheduled = 0;
         int slots = Math.max(0, task.maxParallelism() - running);
         if (slots > 0) {
             for (PrdAnalysisStore.PrdNode node : nodes) {
@@ -157,6 +158,7 @@ public class PrdAnalysisCoordinator {
                                 runInput(task, "NODE_ANALYSIS", node.id()), PROFILE_NODE_ANALYST, 0);
                         store.updateNodeStatus(node.id(), "RUNNING");
                         slots--;
+                        scheduled++;
                     }
                 }
             }
@@ -165,22 +167,23 @@ public class PrdAnalysisCoordinator {
         long failed = store.countNodesByStatus(task.id(), "FAILED");
         if (completed == nodes.size()) {
             store.updateTaskStatus(task.id(), "RECONCILING", null);
+        } else if (running == 0 && scheduled == 0 && readyIds.isEmpty() && failed == 0) {
+            store.markTaskFailed(task.id(), "dependency graph deadlock: incomplete nodes are neither ready nor running");
         } else if (completed + failed == nodes.size() && failed > 0) {
-            boolean anyRetryable = nodes.stream().anyMatch(node -> "FAILED".equals(node.status())
-                    && store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id())
-                    .map(binding -> binding.attempt() < MAX_NODE_RETRY).orElse(false));
-            if (!anyRetryable) {
-                store.markTaskFailed(task.id(), "one or more node analyses failed and are not retryable");
-            }
+            store.markTaskFailed(task.id(), "one or more node analyses failed and are not retryable");
         }
     }
 
     private void handleNodeFailure(PrdAnalysisStore.PrdTask task, PrdAnalysisStore.PrdNode node,
                                    PrdAnalysisStore.PrdRunBinding binding) {
         if (metrics != null) metrics.nodeFailed();
-        if (binding.attempt() >= MAX_NODE_RETRY) {
-            store.markTaskFailed(task.id(), "node " + node.clientKey() + " failed after max retries");
+        if (binding.attempt() < MAX_NODE_RETRY) {
+            createTaskRun(task, "NODE_ANALYSIS", node.id(),
+                    runInput(task, "NODE_ANALYSIS", node.id()), PROFILE_NODE_ANALYST, binding.attempt() + 1);
+            store.updateNodeStatus(node.id(), "RUNNING");
+            return;
         }
+        store.markTaskFailed(task.id(), "node " + node.clientKey() + " failed after max retries");
     }
 
     // ----------------------------------------------------------------

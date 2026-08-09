@@ -67,12 +67,11 @@ public class PrdSourceIngestionService {
                     drafts.add(new PrdAnalysisStore.ChunkDraft(ordinal++, chunk.heading(), chunk.start(),
                             chunk.end(), text, sha256(text)));
                 }
-                store.insertChunks(source.id(), drafts);
-                store.markSourceExtracted(source.id(), "COMPLETED", null);
+                store.replaceChunksAndMarkExtracted(source.id(), drafts, "COMPLETED", null);
                 log.info("Ingested PRD source {} into {} chunks", source.id(), drafts.size());
                 if ("PRD".equals(source.sourceType()) && drafts.isEmpty()) {
                     prdOk = false;
-                    store.markSourceExtracted(source.id(), "FAILED", null);
+                    store.replaceChunksAndMarkExtracted(source.id(), List.of(), "FAILED", null);
                 }
             } catch (Exception e) {
                 store.markSourceExtracted(source.id(), "FAILED", null);

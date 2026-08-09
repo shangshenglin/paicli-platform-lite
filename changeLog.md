@@ -4,6 +4,14 @@
 
 ## 2026-08-09
 
+### PRD Analysis Agent 可靠性门禁修复（R0–R3）
+
+- 变更：Console 将 `app.js` 移到 PRD Dialog 之后加载，新增缺失的 `openPrdDetail`，并把 PRD 状态提示改为独立的 `setPrdFormStatus`，不再覆盖其他表单的全局 `setFormError`。
+- 变更：Node Run 首次失败会创建 attempt=1 的普通 Managed Run，达到上限才失败；Mapper 提交会拒绝依赖环，Coordinator 对无 READY/RUNNING 的未完成依赖图显式失败，避免 ANALYZING 卡死。
+- 变更：三个 `prd_submit_*` 操作在同一个 SQLite 事务内串行检查 submission marker、写业务数据和持久化 submission 结果；摄入改为“替换 chunks + 更新 source 状态”同事务，迁移 41 增加 `(source_id, ordinal)` 与 `(task_id, client_key)` 唯一性约束并清理历史重复行。
+- 变更：只有内置 `system.prd` Profile 将 Skill 列表作为 required 全文注入，普通 Profile 恢复按需 Skill 语义；PRD Profile 不再隐式扩展 Plan/协作/WorkingPlan 工具，Node 的 `prd_search_sources` 补回后端 binding 权限校验；修正 required Skill 被重复计入 Context token 预算。
+- 验证：新增前端脚本顺序、Node 自动重试、Mapper DAG cycle、摄入替换原子性和 PRD 严格工具白名单回归；`.\mvnw.cmd test -pl paicli-server -am -Dtest=PrdAnalysisStoreTest,PrdAnalysisCoordinatorTest,ContextManagerTest,WebSecurityIntegrationTest` 通过 42 项，`node --check` 通过。全量 `.\mvnw.cmd clean test` 与 `.\mvnw.cmd clean package` 也均通过：common 3 + server 320 + sandbox 4，共 327 项零失败。API 路径、请求和响应未变，因此 OpenAPI 无需改动；运行架构、迁移、阶段与 Console 行为已同步 README、`docs/architecture.md`、`docs/phases.md`。Sandbox、配置和产品站未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
+
 ### PRD Analysis Agent 复审重构：移除独立 Runtime，回归 PaiCLI Managed Run Harness
 
 - 变更：基于最新 `master` 撤销 `PrdAnalysisEngine + ModelClient + TaskExecutor + prd_analysis_actions + AtomicFileWriter` 的独立执行链，改为 `PrdAnalysisCoordinator` 只维护业务状态；Mapper、Node Analyst、Reconciler 均创建普通持久化 Run，由现有 `RunProcessor / ContextManager / ToolCatalog / ToolRouter` 执行，三个结构化提交统一落到 `PrdAnalysisToolProvider` 和普通 `tool_calls` 生命周期。

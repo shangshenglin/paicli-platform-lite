@@ -234,6 +234,38 @@ class PrdAnalysisCoordinatorTest {
         assertThat(harness.store.task(task.id())).get().extracting("status").isEqualTo("FAILED");
     }
 
+    @Test
+    void failedNodeIsAutomaticallyRetriedOnceThenFailsTask() throws Exception {
+        Harness harness = harness();
+        var task = harness.store.createTask("project-a", "T", "USER", 2, "session-1");
+        harness.skills.ensureProfiles("project-a");
+        var source = harness.store.insertSource(task.id(), "a1", "PRD", "prd.md", "h", "COMPLETED", null);
+        harness.store.insertChunks(source.id(), List.of(
+                new PrdAnalysisStore.ChunkDraft(0, null, 0, 30, "Order creation.", "c")));
+        harness.store.updateTaskStatus(task.id(), "MAPPING", null);
+        harness.coordinator.advance(task.id());
+        var map = harness.store.latestRunBinding(task.id(), "MAP", null).orElseThrow();
+        harness.store.submitMap(task.id(), map.id(), "tc-map", mapper.writeValueAsString(Map.of(
+                "nodes", List.of(Map.of("clientKey", "order", "title", "Order", "sourceId", source.id(),
+                        "startChunkOrdinal", 0, "endChunkOrdinal", 0)))));
+        harness.runtime.completeRun(map.runId());
+        harness.coordinator.advance(task.id());
+        harness.coordinator.advance(task.id());
+
+        var node = harness.store.nodes(task.id()).get(0);
+        var first = harness.store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id()).orElseThrow();
+        harness.runtime.failRun(first.runId(), "model failed");
+        harness.coordinator.advance(task.id());
+        var retry = harness.store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id()).orElseThrow();
+        assertThat(retry.id()).isNotEqualTo(first.id());
+        assertThat(retry.attempt()).isEqualTo(1);
+        assertThat(harness.store.node(node.id())).get().extracting("status").isEqualTo("RUNNING");
+
+        harness.runtime.failRun(retry.runId(), "model failed again");
+        harness.coordinator.advance(task.id());
+        assertThat(harness.store.task(task.id())).get().extracting("status").isEqualTo("FAILED");
+    }
+
     private Harness harness() throws Exception {
         return new Harness(properties());
     }

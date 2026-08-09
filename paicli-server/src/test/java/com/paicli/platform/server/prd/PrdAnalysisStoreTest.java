@@ -122,6 +122,46 @@ class PrdAnalysisStoreTest {
     }
 
     @Test
+    void submitMapRejectsDependencyCycleBeforePersistingNodes() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        PrdAnalysisStore store = store();
+        var task = store.createTask("project-a", "T", "USER", 2, "session-1");
+        var source = store.insertSource(task.id(), "a1", "PRD", "prd.md", "h", "COMPLETED", null);
+        store.insertChunks(source.id(), List.of(new PrdAnalysisStore.ChunkDraft(0, null, 0, 10, "text", "c")));
+        var binding = store.createRunBinding(task.id(), "MAP", null, run(runtime, "project-a"), 0);
+
+        assertThatThrownBy(() -> store.submitMap(task.id(), binding.id(), "tool-cycle", mapper.writeValueAsString(Map.of(
+                "nodes", List.of(
+                        Map.of("clientKey", "a", "title", "A", "sourceId", source.id(), "startChunkOrdinal", 0, "endChunkOrdinal", 0),
+                        Map.of("clientKey", "b", "title", "B", "sourceId", source.id(), "startChunkOrdinal", 0, "endChunkOrdinal", 0),
+                        Map.of("clientKey", "c", "title", "C", "sourceId", source.id(), "startChunkOrdinal", 0, "endChunkOrdinal", 0)),
+                "dependencies", List.of(
+                        Map.of("fromClientKey", "a", "toClientKey", "b"),
+                        Map.of("fromClientKey", "b", "toClientKey", "c"),
+                        Map.of("fromClientKey", "c", "toClientKey", "a"))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cycle");
+        assertThat(store.nodes(task.id())).isEmpty();
+        assertThat(store.findBinding(binding.id())).get().extracting("submissionToolCallId").isNull();
+    }
+
+    @Test
+    void atomicallyReplacesChunksWhenMarkingSourceExtracted() throws Exception {
+        runtime();
+        PrdAnalysisStore store = store();
+        var task = store.createTask("project-a", "T", "USER", 2, "session-1");
+        var source = store.insertSource(task.id(), "a1", "PRD", "prd.md", "h", "PENDING", null);
+        store.insertChunks(source.id(), List.of(new PrdAnalysisStore.ChunkDraft(0, null, 0, 5, "old", "old")));
+
+        store.replaceChunksAndMarkExtracted(source.id(), List.of(
+                new PrdAnalysisStore.ChunkDraft(0, null, 0, 5, "new", "new"),
+                new PrdAnalysisStore.ChunkDraft(1, null, 6, 10, "next", "next")), "COMPLETED", null);
+
+        assertThat(store.source(source.id())).get().extracting("extractionStatus").isEqualTo("COMPLETED");
+        assertThat(store.chunks(source.id(), 0, 10)).extracting("text").containsExactly("new", "next");
+    }
+
+    @Test
     void submitNodeAnalysisPersistsFindingsEvidenceQuestionsAndCompletesNode() throws Exception {
         SqliteRuntimeStore runtime = runtime();
         PrdAnalysisStore store = store();

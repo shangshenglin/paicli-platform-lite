@@ -530,7 +530,7 @@ Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终
 - **确定性调度**：节点依赖满足才 READY，受 `maxParallelism` 与全局上限约束；全部节点完成后 barrier 只创建一次 Reconciler Run。
 - **确定性校验**：`PrdAnalysisValidator` 为纯 Java 的 8 项检查；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后继续。
 - **产物与交接**：`analysis.md` / `domain_model.json` / `traceability_matrix.json` / `validation_report.json` / `questions.json` 写入 Artifact Store；基于完成结果可复用 PlanService 生成实施 Plan。
-- **Skill 注入**：3 个内置 PRD Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`）启动种子到 data/skills；3 个系统 Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`）通过 `skillNamesJson` 把 required skill 全文注入 system 前缀。仅 `templateKey=system.prd` 的内置 Profile 可跨项目解析，普通用户 Profile 仍严格按项目隔离。
+- **Skill 与工具隔离**：3 个内置 PRD Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`）启动种子到 data/skills；仅三个 `templateKey=system.prd` Profile 将其 `skillNamesJson` 作为 required skill 全文注入 system 前缀，普通 Profile 的 skill 列表仍只是按需可加载索引。PRD Profile 不会隐式扩展 Plan、协作或 WorkingPlan 工具，只能看到其显式白名单，且 Node 的 `prd_search_sources` 也受后端 Run binding 校验。
 - **指标**：`paicli.prd.tasks.started/completed/failed`、`paicli.prd.nodes.failed`、`paicli.prd.validation.failures`、`paicli.prd.questions.blocking`、`paicli.prd.stage.duration`；Token 不重复统计，仍由绑定 Run 的 `model_usage` 汇总。
 
 
@@ -551,7 +551,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–40：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性），39 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`），40 增加 PRD Analysis 的 task/source/chunk/node/dependency/finding/evidence/question/check/run binding 表。
+SQLite `schema_migrations` 当前记录版本 1–41：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性），39 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`），40 增加 PRD Analysis 的 task/source/chunk/node/dependency/finding/evidence/question/check/run binding 表，41 为 source chunk ordinal 与 task node clientKey 增加唯一性约束，支持崩溃后的可替换摄入快照。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 

@@ -143,6 +143,29 @@ class ContextManagerTest {
     }
 
     @Test
+    void builtInPrdProfileDoesNotReceiveImplicitPlanOrWorkingPlanTools() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), workingPlanToolCatalog(store, mapper),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("prd", "default");
+        var run = store.createRun(session.id(), "map PRD");
+        var agent = new ProductivityStore.AgentProfile("system.prd.mapper", "default", "PRD Mapper",
+                "", "", null, "", "", "bash", "[\"read_file\"]", "[]", "", "EXPERT", "MANUAL",
+                "PROJECT", "INHERIT", "system.prd", 1, true, Instant.now(), Instant.now());
+
+        var request = manager.prepare(session.id(), run.id(), 128_000, 4_096, agent).request();
+
+        assertThat(request.tools()).extracting("name")
+                .doesNotContain("update_working_plan")
+                .doesNotContainAnyElementsOf(PlanToolProvider.PROFILE_PLAN_TOOLS);
+    }
+
+    @Test
     void systemPromptExplainsWorkingPlanTriggersAndReplanning() {
         PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
 

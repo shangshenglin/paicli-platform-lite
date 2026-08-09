@@ -25,7 +25,7 @@ import java.util.Set;
 public class PrdAnalysisToolProvider implements ServerToolProvider {
     private static final Set<String> MAPPER_TOOLS = Set.of("prd_list_source_chunks", "prd_submit_map");
     private static final Set<String> NODE_TOOLS = Set.of(
-            "prd_read_node", "prd_get_dependency_summaries", "prd_submit_node_analysis");
+            "prd_read_node", "prd_search_sources", "prd_get_dependency_summaries", "prd_submit_node_analysis");
     private static final Set<String> RECONCILER_TOOLS = Set.of(
             "prd_get_findings", "prd_get_open_questions", "prd_get_validation_report", "prd_submit_reconciliation");
     private static final Set<String> SUBMIT_TOOLS = Set.of(

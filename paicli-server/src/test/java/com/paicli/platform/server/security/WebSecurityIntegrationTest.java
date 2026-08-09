@@ -99,7 +99,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "data-effort=\"low\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260808-prd-analysis-1")))
+                        "20260809-prd-reliability-1")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
@@ -129,7 +129,15 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"executionShell\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "id=\"agentExecutionShell\"")));
+                        "id=\"agentExecutionShell\"")))
+                .andExpect(result -> {
+                    String html = result.getResponse().getContentAsString();
+                    int closePrd = html.indexOf("id=\"closePrd\"");
+                    int script = html.indexOf("/app.js?v=20260809-prd-reliability-1");
+                    if (closePrd < 0 || script <= closePrd) {
+                        throw new AssertionError("PRD dialog controls must precede app.js execution");
+                    }
+                });
         mvc.perform(get("/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

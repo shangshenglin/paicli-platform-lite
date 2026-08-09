@@ -5617,6 +5617,18 @@ async function refreshPrdTasks() {
   }
 }
 
+async function openPrdDetail(taskId) {
+  prdState.taskId = taskId;
+  const box = $('prdDetail');
+  box.textContent = '加载中…';
+  try {
+    const detail = await api('/v1/prd-analysis/tasks/' + encodeURIComponent(taskId));
+    renderPrdDetail(detail);
+  } catch (error) {
+    box.textContent = '详情加载失败：' + error.message;
+  }
+}
+
 function renderPrdTaskList(tasks) {
   const list = $('prdTaskList');
   list.textContent = '';
@@ -5685,16 +5697,16 @@ async function openPrdCreate() {
   $('prdTitle').value = '';
   $('prdFile').value = ''; $('prdContractFile').value = ''; $('prdSupportFiles').value = '';
   $('prdFileStatus').textContent = '选择 PRD 后自动上传到当前会话。';
-  setFormError('prdCreateStatus', '');
+  setPrdFormStatus('prdCreateStatus', '');
   $('prdCreateDialog').showModal();
 }
 
 async function submitPrdCreate() {
   const title = $('prdTitle').value.trim();
-  if (!title) { setFormError('prdCreateStatus', '请填写标题'); return; }
-  if (!prdState.attachment) { setFormError('prdCreateStatus', '请选择并等待 PRD 文档上传完成'); return; }
+  if (!title) { setPrdFormStatus('prdCreateStatus', '请填写标题'); return; }
+  if (!prdState.attachment) { setPrdFormStatus('prdCreateStatus', '请选择并等待 PRD 文档上传完成'); return; }
   const parallelism = Math.max(1, Math.min(parseInt($('prdMaxParallelism').value || '4', 10) || 4, 8));
-  setFormError('prdCreateStatus', '');
+  setPrdFormStatus('prdCreateStatus', '');
   try {
     const task = await api('/v1/prd-analysis/tasks', {
       method: 'POST',
@@ -5712,10 +5724,10 @@ async function submitPrdCreate() {
     prdState.taskId = task.task.id;
     await startPrd(task.task.id);
     await refreshPrdTasks();
-  } catch (error) { setFormError('prdCreateStatus', '创建失败：' + error.message); }
+  } catch (error) { setPrdFormStatus('prdCreateStatus', '创建失败：' + error.message); }
 }
 
-function setFormError(id, message) {
+function setPrdFormStatus(id, message) {
   const node = $(id);
   if (!node) return;
   node.textContent = message || '';
