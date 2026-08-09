@@ -36,6 +36,7 @@ public class RunEvidenceCollector {
         List<FileEvidence> files = new ArrayList<>();
         List<CommandEvidence> commands = new ArrayList<>();
         List<TestEvidence> tests = new ArrayList<>();
+        List<WorkspaceMutationEvidence> workspaceMutations = new ArrayList<>();
         int lastMutationOrdinal = -1;
         for (int index = 0; index < calls.size(); index++) {
             ToolCallRecord call = calls.get(index);
@@ -44,7 +45,11 @@ public class RunEvidenceCollector {
                 FileEvidence file = fileEvidence(call, ordinal);
                 if (file != null) {
                     files.add(file);
-                    if (file.changed()) lastMutationOrdinal = ordinal;
+                    if (file.changed()) {
+                        lastMutationOrdinal = ordinal;
+                        workspaceMutations.add(new WorkspaceMutationEvidence(
+                                "write_file", call.id(), null, true, ordinal));
+                    }
                 }
                 continue;
             }
@@ -61,15 +66,23 @@ public class RunEvidenceCollector {
                     // Test/build output commonly changes target/, caches, or
                     // reports. Those generated files must not move the
                     // source mutation boundary past the TestEvidence itself.
-                    if (family == null && workspaceChanged(call)) lastMutationOrdinal = ordinal;
+                    if (family == null && workspaceChanged(call)) {
+                        lastMutationOrdinal = ordinal;
+                        workspaceMutations.add(new WorkspaceMutationEvidence(
+                                "execute_command", call.id(), command.command(), true, ordinal));
+                    }
                 }
                 continue;
             }
-            if (terminal(call.status()) && workspaceChanged(call)) lastMutationOrdinal = ordinal;
+            if (terminal(call.status()) && workspaceChanged(call)) {
+                lastMutationOrdinal = ordinal;
+                workspaceMutations.add(new WorkspaceMutationEvidence(
+                        call.toolName(), call.id(), null, true, ordinal));
+            }
         }
         List<ArtifactEvidence> artifacts = artifacts(runId);
         return new RunEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests),
-                artifacts, lastMutationOrdinal);
+                artifacts, List.copyOf(workspaceMutations), lastMutationOrdinal);
     }
 
     private FileEvidence fileEvidence(ToolCallRecord call, int ordinal) {

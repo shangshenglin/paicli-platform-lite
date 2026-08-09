@@ -65,6 +65,11 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("mvn test; true")).isEmpty();
         assertThat(TestCommandClassifier.classify("pytest | tee test.log")).isEmpty();
         assertThat(TestCommandClassifier.classify("mvn test && echo done")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn test\ntrue")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn test & true")).isEmpty();
+        assertThat(TestCommandClassifier.classify("mvn test -DskipTests=true")).isEmpty();
+        assertThat(TestCommandClassifier.classify("pytest --collect-only")).isEmpty();
+        assertThat(TestCommandClassifier.classify("cargo test --no-run")).isEmpty();
         assertThat(TestCommandClassifier.classify("cd server && mvn test")).contains(TestFamily.MAVEN);
         assertThat(TestCommandClassifier.classify("cd server && mvn test && mvn test")).contains(TestFamily.MAVEN);
     }

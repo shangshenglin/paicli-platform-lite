@@ -15,13 +15,21 @@ public record RunEvidence(
         List<CommandEvidence> commandsExecuted,
         List<TestEvidence> tests,
         List<ArtifactEvidence> artifacts,
+        List<WorkspaceMutationEvidence> workspaceMutations,
         int lastMutationOrdinal
 ) {
+    public RunEvidence(List<FileEvidence> filesChanged, List<CommandEvidence> commandsExecuted,
+                       List<TestEvidence> tests, List<ArtifactEvidence> artifacts,
+                       int lastMutationOrdinal) {
+        this(filesChanged, commandsExecuted, tests, artifacts, List.of(), lastMutationOrdinal);
+    }
+
     public RunEvidence {
         filesChanged = filesChanged == null ? List.of() : List.copyOf(filesChanged);
         commandsExecuted = commandsExecuted == null ? List.of() : List.copyOf(commandsExecuted);
         tests = tests == null ? List.of() : List.copyOf(tests);
         artifacts = artifacts == null ? List.of() : List.copyOf(artifacts);
+        workspaceMutations = workspaceMutations == null ? List.of() : List.copyOf(workspaceMutations);
     }
 
     public List<String> changedFilePaths() {
@@ -30,7 +38,7 @@ public record RunEvidence(
 
     /** True when a real write or an explicit non-test command mutation was recorded. */
     public boolean hasWorkspaceMutationEvidence() {
-        return !filesChanged.isEmpty() || lastMutationOrdinal >= 0;
+        return !filesChanged.isEmpty() || !workspaceMutations.isEmpty() || lastMutationOrdinal >= 0;
     }
 
     /** Artifacts that represent business output, excluding tool-output externalization. */

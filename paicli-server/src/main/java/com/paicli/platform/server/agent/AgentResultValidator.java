@@ -41,9 +41,10 @@ public class AgentResultValidator {
 
         if (RunStatus.COMPLETED.name().equals(statusName)) {
             boolean filesChanged = !asList(value.get("files_changed")).isEmpty();
+            boolean workspaceMutations = !asList(value.get("workspace_mutations")).isEmpty();
             boolean artifacts = !asList(value.get("artifacts")).isEmpty();
             String summary = value.get("summary") == null ? "" : String.valueOf(value.get("summary")).trim();
-            if (!filesChanged && !artifacts && summary.isBlank()) {
+            if (!filesChanged && !workspaceMutations && !artifacts && summary.isBlank()) {
                 issues.add("COMPLETED without durable evidence: no changed file, artifact, or final summary");
             }
             String lower = summary.toLowerCase();
@@ -70,10 +71,13 @@ public class AgentResultValidator {
         ValidationResult base = validate(child, result, contract.doneCriteria());
         if (!base.valid()) return base;
         List<String> issues = new ArrayList<>(base.issues());
-        if (contract.requiresWorkspaceChange() && asList(result == null ? Map.of() : result.get("files_changed")).isEmpty()) {
-            issues.add("contract requires workspace change but files_changed is empty");
+        Map<String, Object> value = result == null ? Map.of() : result;
+        boolean filesChanged = !asList(value.get("files_changed")).isEmpty();
+        boolean workspaceMutations = !asList(value.get("workspace_mutations")).isEmpty();
+        if (contract.requiresWorkspaceChange() && !filesChanged && !workspaceMutations) {
+            issues.add("contract requires workspace change but files_changed and workspace_mutations are empty");
         }
-        if (contract.requiresTests() && !hasRequiredTestPass(result == null ? Map.of() : result, contract.requiredTestFamilies())) {
+        if (contract.requiresTests() && !hasRequiredTestPass(value, contract.requiredTestFamilies())) {
             issues.add("contract requires tests but no passing test evidence for required families");
         }
         return new ValidationResult(issues.isEmpty(), List.copyOf(issues), base.criteria());

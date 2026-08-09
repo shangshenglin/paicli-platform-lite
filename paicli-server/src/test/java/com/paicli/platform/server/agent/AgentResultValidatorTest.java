@@ -85,7 +85,28 @@ class AgentResultValidatorTest {
         var validation = validator.validate(child(), contract, result);
         assertThat(validation.valid()).isFalse();
         assertThat(validation.issues())
-                .contains("contract requires workspace change but files_changed is empty");
+                .contains("contract requires workspace change but files_changed and workspace_mutations are empty");
+    }
+
+    @Test
+    void contractRequiringMutationAcceptsCommandWorkspaceMutationEvidence() {
+        RunCompletionContractRecord contract = new RunCompletionContractRecord("child-1",
+                CompletionMode.MUTATION_REQUIRED, true, false, List.of(), List.of(), List.of(),
+                "test", "test", Instant.now(), Instant.now());
+        Map<String, Object> result = Map.of(
+                "status", "COMPLETED",
+                "summary", "命令已完成修改",
+                "files_changed", List.of(),
+                "workspace_mutations", List.of(Map.of(
+                        "source", "execute_command",
+                        "tool_call_id", "tool-1",
+                        "command", "python modify_config.py",
+                        "workspace_changed", true)),
+                "tests", List.of());
+
+        var validation = validator.validate(child(), contract, result);
+
+        assertThat(validation.valid()).isTrue();
     }
 
     @Test

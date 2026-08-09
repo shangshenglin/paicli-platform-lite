@@ -4,6 +4,12 @@
 
 ## 2026-08-09
 
+### Completion Evidence 二次复核：命令 mutation 证据统一与测试分类再收紧
+
+- 变更：新增 `WorkspaceMutationEvidence` 和 `RunEvidence.workspaceMutations`；`AgentResultService`、SQLite 终态 delegation envelope、`AgentResultValidator` 与 `RunVerificationService` 统一消费/传递 `workspace_mutations`，命令修改未知具体文件时不伪造 `files_changed`。`TestCommandClassifier` 拒绝换行、单独后台 `&`、`-DskipTests=true`、pytest `--collect-only` 和 cargo `--no-run`。
+- 思路：Child CompletionVerifier 与 Parent AgentResultValidator 必须基于同一份结构化证据判断 Completion Contract；测试证据继续采用宁可漏报、不可误报的保守边界。未改变数据库 Schema、REST 路径请求响应或产品站能力，OpenAPI 与产品站文档不适用。
+- 验证：新增并通过 21 项定向测试，覆盖分类器绕过、RunEvidence → AgentResultService → AgentResultValidator 端到端命令 mutation，以及 SQLite delegation envelope；随后执行全量 `clean test` 与 `clean package`。
+
 ### Completion Evidence 复核收尾：Deferred 批处理、mutation 边界与复合测试命令
 
 - 变更：将 `get_agent_result` 从只读工具集合和 `RunProcessor` 只读并行前缀中排除，保证会停放/唤醒父 Run 的调用先独立持久化；`RunEvidenceCollector` 不再把已识别测试命令的 workspace fingerprint 当作最后一次 mutation，非测试命令的显式 workspace mutation 可作为 `MUTATION_REQUIRED` 证据；`TestCommandClassifier` 拒绝 `||`、`;`、管道以及测试命令后的尾部命令，避免用复合命令最终的 0 退出码生成伪造 PASSED TestEvidence。

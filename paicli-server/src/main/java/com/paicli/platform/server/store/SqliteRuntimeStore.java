@@ -5207,6 +5207,7 @@ public class SqliteRuntimeStore {
                 "output_tokens", usage.outputTokens(), "total_tokens", usage.totalTokens()));
         ToolEvidence evidence = delegationToolEvidence(connection, delegation.childRunId());
         value.put("files_changed", evidence.filesChanged());
+        value.put("workspace_mutations", evidence.workspaceMutations());
         value.put("commands_executed", evidence.commandsExecuted());
         value.put("tests", evidence.tests());
         value.put("findings", List.of());
@@ -5263,14 +5264,24 @@ public class SqliteRuntimeStore {
         List<String> files = new ArrayList<>();
         List<String> commands = new ArrayList<>();
         List<String> tests = new ArrayList<>();
+        List<Map<String, Object>> workspaceMutations = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT tool_name,arguments,result,status FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
+                "SELECT id,tool_name,arguments,result,status,result_metadata_json FROM tool_calls "
+                        + "WHERE run_id=? ORDER BY created_at")) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String name = rs.getString("tool_name");
                     JsonNode args = readJson(rs.getString("arguments"));
-                    if ("write_file".equals(name)) addDistinct(files, jsonText(args, "path"));
+                    JsonNode metadata = readJson(rs.getString("result_metadata_json"));
+                    if ("write_file".equals(name)) {
+                        String path = jsonText(args, "path");
+                        addDistinct(files, path);
+                        if (metadata.path("changed").asBoolean(false)) {
+                            workspaceMutations.add(workspaceMutation(name, rs.getString("id"),
+                                    null, true));
+                        }
+                    }
                     if ("execute_command".equals(name)) {
                         String command = jsonText(args, "command");
                         addDistinct(commands, command);
@@ -5278,11 +5289,28 @@ public class SqliteRuntimeStore {
                             String result = rs.getString("result");
                             tests.add((result == null ? command : command + " => " + boundedText(result, 500)));
                         }
+                        boolean changed = metadata.path("workspaceChanged").asBoolean(
+                                metadata.path("workspace_changed").asBoolean(false));
+                        if (changed && com.paicli.platform.server.agent.TestCommandClassifier.classify(command).isEmpty()) {
+                            workspaceMutations.add(workspaceMutation(name, rs.getString("id"),
+                                    command, true));
+                        }
                     }
                 }
             }
         }
-        return new ToolEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests));
+        return new ToolEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests),
+                List.copyOf(workspaceMutations));
+    }
+
+    private static Map<String, Object> workspaceMutation(String source, String toolCallId,
+                                                         String command, boolean changed) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("source", source);
+        value.put("tool_call_id", toolCallId);
+        value.put("workspace_changed", changed);
+        if (command != null && !command.isBlank()) value.put("command", command);
+        return value;
     }
 
     private JsonNode readJson(String value) {
@@ -5637,7 +5665,8 @@ public class SqliteRuntimeStore {
                 .distinct().limit(100).toList();
     }
 
-    private record ToolEvidence(List<String> filesChanged, List<String> commandsExecuted, List<String> tests) { }
+    private record ToolEvidence(List<String> filesChanged, List<String> commandsExecuted,
+                                List<String> tests, List<Map<String, Object>> workspaceMutations) { }
 
     public record ModelTokenUsage(int inputTokens, int outputTokens) {
         public int totalTokens() { return inputTokens + outputTokens; }

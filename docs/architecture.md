@@ -268,3 +268,5 @@ Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定
 Run 在开始处理前建立持久化 Completion Contract，来源按 Delegation Envelope、绑定 `plan_steps.run_id` 的 Formal PlanStep、WorkingPlan 声明和根任务分类确定，后续 WorkingPlan 只能 strengthen。最终验证统一消费 `RunEvidenceCollector`：文件变更必须有 pre/post 哈希，`execute_command` 可用 workspace fingerprint 证明副作用，测试必须来自高置信度的真实测试 invocation。
 
 Deferred `get_agent_result` 的 ToolCall `WAITING_EXTERNAL` 与父 Run `WAITING_AGENT` 在同一个 SQLite 事务中提交；子 Run 终态解析保持幂等。业务交付和 AgentResult 只消费非 `tool_result` Artifact，预算停止也必须先通过 CompletionVerifier，否则 Run 失败并保留可审计的预算事件。
+
+`RunEvidence.workspaceMutations` 是文件路径未知时的统一变更证据：`AgentResultService` 与 SQLite 终态 delegation envelope 都输出 `workspace_mutations`，`AgentResultValidator` 与 `RunVerificationService` 使用相同语义；不得把命令修改伪造成 `files_changed`。测试分类对换行、单独 `&`、Maven skip、pytest collect-only 和 cargo `--no-run` 保守拒绝。

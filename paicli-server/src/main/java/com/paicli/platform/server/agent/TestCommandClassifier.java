@@ -60,10 +60,16 @@ public final class TestCommandClassifier {
         }
         if (executableLower.equals("jest")) return Optional.of(TestFamily.JEST);
         if (executableLower.equals("vitest")) return Optional.of(TestFamily.VITEST);
-        if (executableLower.equals("pytest")) return Optional.of(TestFamily.PYTEST);
+        if (executableLower.equals("pytest")) {
+            return args.stream().anyMatch(TestCommandClassifier::pytestNoRunArgument)
+                    ? Optional.empty() : Optional.of(TestFamily.PYTEST);
+        }
         if (executableLower.equals("go") && hasArgument(args, "test")) return Optional.of(TestFamily.GO_TEST);
         if (executableLower.equals("node") && hasArgument(args, "--test")) return Optional.of(TestFamily.NODE_TEST);
-        if (executableLower.equals("cargo") && hasArgument(args, "test")) return Optional.of(TestFamily.CARGO);
+        if (executableLower.equals("cargo") && hasArgument(args, "test")) {
+            return args.stream().anyMatch(arg -> arg.equalsIgnoreCase("--no-run"))
+                    ? Optional.empty() : Optional.of(TestFamily.CARGO);
+        }
         if (executableLower.equals("dotnet") && hasArgument(args, "test")) return Optional.of(TestFamily.DOTNET);
         if (executableLower.equals("junit")) return Optional.of(TestFamily.JUNIT);
         if (isShell(executableLower) && args.stream().anyMatch(TestCommandClassifier::testScript)) {
@@ -118,7 +124,14 @@ public final class TestCommandClassifier {
 
     private static boolean skipsTests(String argument) {
         String lower = argument.toLowerCase(Locale.ROOT);
-        return lower.equals("-dskiptests") || lower.equals("-dmaven.test.skip=true");
+        return lower.equals("-dskiptests") || lower.equals("-dskiptests=true")
+                || lower.equals("-dmaven.test.skip=true");
+    }
+
+    private static boolean pytestNoRunArgument(String argument) {
+        String lower = argument.toLowerCase(Locale.ROOT);
+        return lower.equals("--collect-only") || lower.equals("--co")
+                || lower.startsWith("--collect-only=");
     }
 
     private static boolean hasArgument(List<String> args, String expected) {
@@ -173,7 +186,14 @@ public final class TestCommandClassifier {
                 quote = quote == 0 ? c : 0;
                 continue;
             }
-            if (quote == 0 && (c == ';' || c == '|')) return true;
+            if (quote == 0 && (c == ';' || c == '|' || c == '\n' || c == '\r')) return true;
+            if (quote == 0 && c == '&') {
+                if (i + 1 < command.length() && command.charAt(i + 1) == '&') {
+                    i++;
+                    continue;
+                }
+                return true;
+            }
         }
         return false;
     }

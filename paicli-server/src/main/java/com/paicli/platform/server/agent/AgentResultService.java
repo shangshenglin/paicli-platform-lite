@@ -47,6 +47,8 @@ public class AgentResultService {
                 "path", file.path(),
                 "tool_call_id", file.toolCallId(),
                 "changed", file.changed())).toList());
+        value.put("workspace_mutations", evidence.workspaceMutations().stream()
+                .map(this::workspaceMutationValue).toList());
         value.put("commands_executed", evidence.commandsExecuted().stream().map(command -> Map.of(
                 "tool_call_id", command.toolCallId(),
                 "command", command.command(),
@@ -69,6 +71,8 @@ public class AgentResultService {
         if (!evidence.filesChanged().isEmpty()) {
             evidence.filesChanged().forEach(file -> evidenceRefs.add("file:" + file.path()));
         }
+        evidence.workspaceMutations().forEach(mutation ->
+                evidenceRefs.add("workspace_mutation:" + mutation.toolCallId()));
         evidence.tests().forEach(test -> evidenceRefs.add("test:" + test.family().name()));
         value.put("evidence", List.copyOf(evidenceRefs));
         value.put("usage", usage(child.id()));
@@ -79,6 +83,18 @@ public class AgentResultService {
                 : List.of(child.error() == null || child.error().isBlank()
                         ? child.status().name() : child.error()));
         value.put("memory_candidates", List.of());
+        return value;
+    }
+
+    private Map<String, Object> workspaceMutationValue(WorkspaceMutationEvidence mutation) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("source", mutation.source());
+        value.put("tool_call_id", mutation.toolCallId());
+        value.put("workspace_changed", mutation.workspaceChanged());
+        value.put("ordinal", mutation.ordinal());
+        if (mutation.command() != null && !mutation.command().isBlank()) {
+            value.put("command", mutation.command());
+        }
         return value;
     }
 

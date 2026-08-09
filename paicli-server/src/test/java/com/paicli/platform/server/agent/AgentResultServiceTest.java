@@ -73,4 +73,51 @@ class AgentResultServiceTest {
         assertThat(((Map<?, ?>) result.get("completion_contract")).get("mode"))
                 .isEqualTo("MUTATION_AND_TEST");
     }
+
+    @Test
+    void commandMutationEvidencePassesChildContractValidationWithoutFakeFilePath() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        PlanStore plans = new PlanStore(properties);
+        ObjectMapper mapper = new ObjectMapper();
+        RunEvidenceCollector collector = new RunEvidenceCollector(store, mapper);
+        CompletionContractService contracts = new CompletionContractService(store, plans, mapper);
+        AgentResultService service = new AgentResultService(store, collector, contracts);
+        AgentResultValidator validator = new AgentResultValidator();
+
+        var parentSession = store.createSession("command-parent", "project-command");
+        var parentRun = store.createRun(parentSession.id(), "delegate command mutation");
+        var parentTool = store.createToolCall(parentRun.id(), "provider-spawn", "spawn_agent", "{}", "spawn-command");
+        store.createOrGetDelegation(parentRun.id(), parentTool.id(), "Backend", "run mutation script",
+                null, null, null, null, mapper.writeValueAsString(Map.of("requires_workspace_change", true)));
+        var delegation = store.delegationsForRun(parentRun.id()).get(0);
+        var childRunId = delegation.childRunId();
+
+        store.markRunStatus(childRunId, com.paicli.platform.common.RunStatus.WAITING_TOOL);
+        var command = store.createToolCall(childRunId, "provider-command", "execute_command",
+                "{\"command\":\"python modify_config.py\"}", "child-command");
+        store.markToolRunning(command.id());
+        store.commitToolOutcome(delegation.childSessionId(), childRunId, command, true, "ok", null,
+                "{\"shell\":\"bash\",\"exitCode\":0,\"timedOut\":false,\"workspaceChanged\":true}",
+                "{\"shell\":\"bash\",\"exitCode\":0,\"workspaceChanged\":true}", 0);
+        store.markRunStatus(childRunId, com.paicli.platform.common.RunStatus.WAITING_MODEL);
+        store.appendMessage(delegation.childSessionId(), childRunId, "assistant", "脚本已修改配置并完成");
+        store.completeRun(childRunId);
+
+        assertThat(store.findDelegation(parentRun.id(), childRunId).orElseThrow().resultJson())
+                .contains("workspace_mutations");
+        var child = store.findRun(childRunId).orElseThrow();
+        Map<String, Object> result = service.build(delegation, child);
+        var validation = validator.validate(child, contracts.ensureForRun(childRunId), result);
+
+        assertThat(((List<?>) result.get("files_changed"))).isEmpty();
+        assertThat(((List<?>) result.get("workspace_mutations"))).singleElement().satisfies(item -> {
+            Map<?, ?> mutation = (Map<?, ?>) item;
+            assertThat(mutation.get("source")).isEqualTo("execute_command");
+            assertThat(mutation.get("command")).isEqualTo("python modify_config.py");
+        });
+        assertThat(validation.valid()).isTrue();
+    }
 }

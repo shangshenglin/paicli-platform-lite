@@ -312,6 +312,7 @@
 ### 2026-08-09 Completion Evidence 审查修复
 
 - [x] 收紧 Completion Contract 证据边界：`get_agent_result` 不进入只读并行批处理；测试生成物 fingerprint 不覆盖源码 mutation 边界；非测试命令 mutation 可作为工作区证据；不安全复合命令不生成测试通过证据。
+- [x] AgentResult/SQLite delegation envelope 输出 `workspace_mutations`，让命令级工作区变更在 Child CompletionVerifier 与 Parent AgentResultValidator 之间保持同一语义；分类器拒绝换行、后台 `&` 与 no-run/skip 测试参数。
 
 - [x] 修复 Docker Sandbox `write_file` 的 pre-write/post-write 证据顺序，并为 `execute_command` 增加 workspace fingerprint。
 - [x] 以 SQLite 原子事务提交 Deferred ToolCall 停放和父 Run `WAITING_AGENT`，补齐启动、竞争和重复解析的可恢复边界。
