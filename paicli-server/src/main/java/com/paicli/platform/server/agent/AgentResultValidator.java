@@ -46,13 +46,10 @@ public class AgentResultValidator {
             if (!filesChanged && !artifacts && summary.isBlank()) {
                 issues.add("COMPLETED without durable evidence: no changed file, artifact, or final summary");
             }
-            boolean tests = !asList(value.get("tests")).isEmpty();
-            boolean commands = !asList(value.get("commands_executed")).isEmpty();
             String lower = summary.toLowerCase();
-            boolean claimsTests = tests || commands
-                    || ((lower.contains("test") || lower.contains("\u6d4b\u8bd5"))
+            boolean claimsTests = ((lower.contains("test") || lower.contains("\u6d4b\u8bd5"))
                     && (lower.contains("pass") || lower.contains("\u901a\u8fc7")));
-            if (claimsTests && !tests && !commands) {
+            if (claimsTests && !hasPassedTestEvidence(value)) {
                 issues.add("test pass claimed without test evidence");
             }
         } else if (RunStatus.FAILED.name().equals(statusName)) {
@@ -100,6 +97,15 @@ public class AgentResultValidator {
             if (!Boolean.TRUE.equals(passedByFamily.get(family))) return false;
         }
         return true;
+    }
+
+    private static boolean hasPassedTestEvidence(Map<String, Object> value) {
+        for (Object test : asList(value.get("tests"))) {
+            if (test instanceof Map<?, ?> map && "PASSED".equals(String.valueOf(map.get("status")))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<CriterionResult> criterionStatuses(List<String> doneCriteria, Map<String, Object> value) {

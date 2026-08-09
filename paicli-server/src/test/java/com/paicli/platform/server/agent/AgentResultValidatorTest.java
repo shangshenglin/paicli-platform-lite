@@ -44,6 +44,35 @@ class AgentResultValidatorTest {
     }
 
     @Test
+    void ordinaryCommandsCannotSubstituteForPassedTestEvidence() {
+        Map<String, Object> result = Map.of(
+                "status", "COMPLETED",
+                "summary", "all tests passed",
+                "files_changed", List.of(Map.of("path", "src/A.java")),
+                "commands_executed", List.of(Map.of("command", "ls -la")),
+                "tests", List.of());
+
+        var validation = validator.validate(child(), result);
+
+        assertThat(validation.valid()).isFalse();
+        assertThat(validation.issues()).contains("test pass claimed without test evidence");
+    }
+
+    @Test
+    void failedTestEvidenceDoesNotSatisfyPassedClaim() {
+        Map<String, Object> result = Map.of(
+                "status", "COMPLETED",
+                "summary", "all tests passed",
+                "files_changed", List.of(Map.of("path", "src/A.java")),
+                "tests", List.of(Map.of("family", "MAVEN", "status", "FAILED")));
+
+        var validation = validator.validate(child(), result);
+
+        assertThat(validation.valid()).isFalse();
+        assertThat(validation.issues()).contains("test pass claimed without test evidence");
+    }
+
+    @Test
     void contractRequiringMutationRejectsEmptyFilesChanged() {
         RunCompletionContractRecord contract = new RunCompletionContractRecord("child-1",
                 CompletionMode.MUTATION_REQUIRED, true, false, List.of(), List.of(), List.of(),

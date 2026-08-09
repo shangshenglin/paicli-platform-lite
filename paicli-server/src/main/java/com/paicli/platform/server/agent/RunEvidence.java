@@ -28,6 +28,13 @@ public record RunEvidence(
         return filesChanged.stream().map(FileEvidence::path).distinct().toList();
     }
 
+    /** Artifacts that represent business output, excluding tool-output externalization. */
+    public List<ArtifactEvidence> businessArtifacts() {
+        return artifacts.stream()
+                .filter(artifact -> !"tool_result".equalsIgnoreCase(artifact.type()))
+                .toList();
+    }
+
     /** Latest status per test family; a passing family never covers another. */
     public Map<TestFamily, TestStatus> latestTestStatusByFamily() {
         Map<TestFamily, TestStatus> latest = new LinkedHashMap<>();

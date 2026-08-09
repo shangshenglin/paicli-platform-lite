@@ -52,7 +52,7 @@ public class DeliveryManifestService {
         }
         com.paicli.platform.server.agent.RunEvidence evidence = evidenceCollector.collect(runId);
         List<String> changedFiles = evidence.changedFilePaths();
-        List<String> artifacts = evidence.artifacts().stream()
+        List<String> artifacts = evidence.businessArtifacts().stream()
                 .map(com.paicli.platform.server.agent.ArtifactEvidence::relativePath).toList();
         List<String> testEvidence = evidence.tests().stream()
                 .map(test -> test.family().name() + "=" + test.status().name()).toList();

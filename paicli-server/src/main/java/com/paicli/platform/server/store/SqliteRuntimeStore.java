@@ -3073,6 +3073,62 @@ public class SqliteRuntimeStore {
         }
     }
 
+    /**
+     * Atomically parks a deferred tool call and its parent Run. Keeping these
+     * transitions in one SQLite transaction closes the window in which a child
+     * can become terminal after the tool is parked but before the parent is
+     * visible as WAITING_AGENT.
+     */
+    public boolean parkDeferredToolCallAndWaitParent(String toolCallId, String runId,
+                                                      String waitKind, String waitRef) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                int toolUpdated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,wait_kind=?,wait_ref=?,waiting_since=? "
+                                + "WHERE id=? AND run_id=? AND status=?")) {
+                    ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+                    ps.setString(2, waitKind);
+                    ps.setString(3, waitRef);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, toolCallId);
+                    ps.setString(6, runId);
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
+                    toolUpdated = ps.executeUpdate();
+                }
+                if (toolUpdated != 1) {
+                    connection.rollback();
+                    return false;
+                }
+                int runUpdated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status IN (?,?)")) {
+                    ps.setString(1, RunStatus.WAITING_AGENT.name());
+                    ps.setString(2, runId);
+                    ps.setString(3, RunStatus.QUEUED.name());
+                    ps.setString(4, RunStatus.WAITING_TOOL.name());
+                    runUpdated = ps.executeUpdate();
+                }
+                if (runUpdated != 1) {
+                    connection.rollback();
+                    return false;
+                }
+                insertEvent(connection, runId, "tool.deferred", "{\"toolCallId\":\""
+                        + escape(toolCallId) + "\",\"waitKind\":\"" + escape(waitKind)
+                        + "\",\"waitRef\":\"" + escape(waitRef) + "\"}");
+                insertEvent(connection, runId, "run.waiting_agent", "{\"status\":\"WAITING_AGENT\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("park deferred tool call and wait for agent", e);
+        }
+    }
+
     /** Tool calls parked on an external condition (e.g. a delegated child run). */
     public List<ToolCallRecord> waitingExternalToolCalls(String waitKind, String waitRef) {
         List<ToolCallRecord> values = new ArrayList<>();

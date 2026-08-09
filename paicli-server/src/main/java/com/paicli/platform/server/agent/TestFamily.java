@@ -16,6 +16,7 @@ public enum TestFamily {
     GO_TEST,
     NODE_TEST,
     CARGO,
+    DOTNET,
     JUNIT,
     SHELL_TEST,
     UNKNOWN

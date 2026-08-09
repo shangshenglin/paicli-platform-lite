@@ -261,3 +261,8 @@ Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真
 Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定映射到 `/bin/sh -lc`、`/bin/bash -lc` 或 `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command`，模型不能传解释器路径。Run 与 Agent Profile 持久化默认 Shell；RunProcessor 在同轮 ToolCall 原子落库前补齐缺省 Shell，因此审批参数、幂等键和恢复执行一致。
 
 命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。`execute_command` 在 ToolCall 原子持久化后按已落库的 `command` 分类：读取、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署等风险命令在任何容器调用前创建持久化 Approval。批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作；无法解析或缺少命令时按风险命令处理。服务初始化会重新分类历史未决命令，安全命令原 Approval 自动批准并重新排队，危险命令保持等待。全部 MCP 工具和 Provider 自行声明的危险工具仍强制审批。
+## Completion Contract 与证据闭环
+
+Run 在开始处理前建立持久化 Completion Contract，来源按 Delegation Envelope、绑定 `plan_steps.run_id` 的 Formal PlanStep、WorkingPlan 声明和根任务分类确定，后续 WorkingPlan 只能 strengthen。最终验证统一消费 `RunEvidenceCollector`：文件变更必须有 pre/post 哈希，`execute_command` 可用 workspace fingerprint 证明副作用，测试必须来自高置信度的真实测试 invocation。
+
+Deferred `get_agent_result` 的 ToolCall `WAITING_EXTERNAL` 与父 Run `WAITING_AGENT` 在同一个 SQLite 事务中提交；子 Run 终态解析保持幂等。业务交付和 AgentResult 只消费非 `tool_result` Artifact，预算停止也必须先通过 CompletionVerifier，否则 Run 失败并保留可审计的预算事件。

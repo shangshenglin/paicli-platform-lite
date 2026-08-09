@@ -142,6 +142,8 @@ public class CompletionContractService {
     }
 
     private Optional<PlanStore.PlanStep> planStepForRun(RunRecord run) {
+        Optional<PlanStore.PlanStep> boundStep = plans.findStepByRun(run.id());
+        if (boundStep.isPresent()) return boundStep;
         Optional<RunDelegationRecord> delegation = store.parentDelegationForRun(run.id());
         if (delegation.isPresent() && delegation.get().planStepId() != null
                 && !delegation.get().planStepId().isBlank()) {

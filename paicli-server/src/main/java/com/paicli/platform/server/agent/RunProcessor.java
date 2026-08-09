@@ -143,6 +143,7 @@ public class RunProcessor {
         String budgetReservationKey = null;
         if (run.status() == RunStatus.CANCELED) return;
         try {
+            if (runVerification != null) runVerification.ensureContract(run.id());
             var resumableTool = store.findResumableToolCall(run.id());
             if (resumableTool.isPresent()) {
                 handleTool(run, resumableTool.get());
@@ -374,6 +375,23 @@ public class RunProcessor {
                 + "Budget snapshot: " + budget.message().replace("run execution budget exceeded: ", "") + "\n\n"
                 + "No further model calls were made. Use the completed child run, artifacts, and previous tool "
                 + "results as the available partial result, or retry with a larger run budget.";
+        if (runVerification != null) {
+            RunVerificationService.VerificationResult verification = runVerification.verify(run, content);
+            if (verification.status() != RunVerificationService.Status.PASS) {
+                String error = "budget exceeded before completion contract was satisfied: "
+                        + String.join("; ", verification.failedCriteria());
+                store.failRun(run.id(), error);
+                store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+                store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
+                        "status", "FAILED", "message", error,
+                        "tokens", budget.tokens(), "maxTokens", budget.maxTokens())));
+                resolveDeferredChild(run.id());
+                store.requeueWaitingParentRuns(run.id());
+                toolRouter.release(run.id());
+                notify(run, "FAILED", error);
+                return true;
+            }
+        }
         boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(), content, "",
                 json(Map.of("status", "BUDGET_STOPPED",
                         "step", budget.step(), "maxSteps", budget.maxSteps(),
@@ -646,10 +664,9 @@ public class RunProcessor {
     private void parkForDeferredResult(RunRecord run, ToolCallRecord call, ToolResult result) {
         String waitKind = String.valueOf(result.metadata().getOrDefault("waitKind", ""));
         String waitRef = String.valueOf(result.metadata().getOrDefault("waitRef", ""));
-        store.markToolCallWaitingExternal(call.id(), waitKind, waitRef);
-        store.appendEvent(run.id(), "tool.deferred", json(Map.of(
-                "toolCallId", call.id(), "waitKind", waitKind, "waitRef", waitRef)));
-        store.waitForAgent(run.id());
+        if (!store.parkDeferredToolCallAndWaitParent(call.id(), run.id(), waitKind, waitRef)) {
+            return;
+        }
         // Lost-wakeup guard: if the child became terminal just before we parked, resolve now.
         if ("CHILD_RUN".equals(waitKind) && waitRef != null && !waitRef.isBlank()) {
             RunRecord child = store.findRun(waitRef).orElse(null);

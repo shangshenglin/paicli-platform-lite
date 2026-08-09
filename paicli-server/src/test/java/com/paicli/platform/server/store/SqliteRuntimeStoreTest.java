@@ -1297,6 +1297,24 @@ class SqliteRuntimeStoreTest {
                 .noneMatch(message -> "late comment".equals(message.content()))).isTrue();
     }
 
+    @Test
+    void deferredToolAndParentAreParkedInOneTransition() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("deferred-atomic");
+        var run = store.createRun(session.id(), "wait for child");
+        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+        var call = store.createToolCall(run.id(), "provider", "get_agent_result", "{}", "deferred-key");
+        store.markToolRunning(call.id());
+
+        assertThat(store.parkDeferredToolCallAndWaitParent(call.id(), run.id(), "CHILD_RUN", "child-1"))
+                .isTrue();
+        assertThat(store.findToolCall(call.id()).orElseThrow().status())
+                .isEqualTo(com.paicli.platform.common.ToolCallStatus.WAITING_EXTERNAL);
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.WAITING_AGENT);
+        assertThat(store.events(run.id(), 0)).extracting("type")
+                .contains("tool.deferred", "run.waiting_agent");
+    }
+
     private long countWhere(String table, String column, String value) throws Exception {
         String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
         try (Connection connection = DriverManager.getConnection(url);

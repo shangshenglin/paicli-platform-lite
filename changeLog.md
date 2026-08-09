@@ -17,6 +17,16 @@
 - 变更（Commit 9·文档与回归）：README、docs/architecture.md、docs/phases.md、docs/docker-sandbox.md、changeLog 同步；`.\mvnw.cmd clean test` 全量通过（paicli-common + paicli-server + paicli-sandbox-agent）。
 - 思路：Harness 从“行为驱动”升级为“任务要求驱动”——模型负责策略与代码生成，系统环境提供真实执行事实（ToolCall/ToolResult/Workspace/Artifact），CompletionVerifier 用机器可验证的合同 vs 证据决定是否完成；自然语言业务语义仍由 Parent Reviewer/人工/真实测试负责，不引入 Completion Judge LLM，不假装自动理解所有 done_criteria。
 - 验证：`.\mvnw.cmd clean test` 全量通过（含新增 TestCommandClassifierTest、RunEvidenceCollectorTest、CompletionRequirementClassifierTest、CompletionContractServiceTest、RunVerificationServiceTest、AgentResultValidatorTest、AgentResultServiceTest、DeferredAgentResultTest、LocalSandboxDriverTest/SqliteRuntimeStoreTest 扩展）；OpenAPI 无 REST 路径变更（get_agent_result 行为变化为 Server 内部协议，不改变请求/响应 schema），`paicli-site/README.md` 无产品可见能力变更，故二者本次不适用；`git diff --check` 通过。
+### Harness Loop v2 审查修复：真实变更证据、原子 Deferred 停放与严格完成门禁
+
+- 变更：修复 Docker Sandbox `write_file` 在写入后才计算 before hash 的问题；`execute_command` 持久化 workspace fingerprint，RunEvidence 只接受明确的变更证据，缺少 metadata 时不猜测 `changed=true`。
+- 变更：新增 `parkDeferredToolCallAndWaitParent` SQLite 原子操作，在同一事务内提交 ToolCall `WAITING_EXTERNAL`、父 Run `WAITING_AGENT` 和事件，消除 child 终态与 parent 停放之间的 Lost Wakeup 窗口。
+- 变更：Formal PlanStep 按绑定 `run_id` 参与 Contract 推导；WorkingPlan completion 更新触发 strengthen；预算停止先经过 CompletionVerifier，合同未满足时进入 FAILED。
+- 变更：测试命令按 shell operator boundary 与 executable/参数保守分类，补充 Gradle check、pnpm/yarn、dotnet test，并拒绝 `echo test`、`echo junit`、`test-data.sh` 等假阳性；AgentResult 不再允许普通 command 替代 PASSED TestEvidence。
+- 变更：RunEvidence 增加业务 Artifact 视图，`tool_result` 不再进入 AgentResult 或 DeliveryManifest 的业务交付清单；同步 README、架构、阶段、Docker Sandbox 和 Agent prompt 规则。
+- 思路：Completion Contract -> Real Evidence -> Deterministic Verification 保持单一闭环，恢复与交付路径复用同一证据源；数据库 schema、REST API/OpenAPI、配置和产品站能力未变，不适用对应文档同步。
+- 验证：完整 Maven 测试通过（common 3、server 281、sandbox-agent 4，BUILD SUCCESS）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 直接调用存在既有解析问题，测试使用同版本已缓存 Maven 二进制完成。
+
 ## 2026-08-08
 
 ### ExpertThread：同一专家在协作任务内的逻辑线程 + 模型执行期间新评论竞态保护

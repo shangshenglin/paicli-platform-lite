@@ -884,3 +884,9 @@ cd paicli-site
 npm install
 npm run dev
 ```
+
+## Completion Contract 与真实证据
+
+需要修改工作区或运行测试的 Run 会在启动时建立持久化 Completion Contract。最终完成必须由真实 ToolCall、Workspace、Artifact 和 TestEvidence 满足该合同；预算耗尽但合同未满足时，Run 会进入 `FAILED`，不会以 `COMPLETED` 表示部分结果。
+
+`RunEvidenceCollector` 是 AgentResult、Run 验证和协作交付清单的统一证据来源：`write_file` 使用写入前后 SHA-256，Sandbox `execute_command` 记录 workspace fingerprint，测试命令按可识别的 executable 与参数分类；`tool_result` 仅用于工具输出外置，不计入业务交付 Artifact。Deferred `get_agent_result` 会在 SQLite 事务中同时停放 ToolCall 和父 Run，避免 Lost Wakeup。

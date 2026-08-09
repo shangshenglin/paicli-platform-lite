@@ -25,10 +25,18 @@ public class WorkingPlanService {
     private static final List<String> ALLOWED_STATUSES = List.of("TODO", "IN_PROGRESS", "COMPLETED", "BLOCKED");
     private final SqliteRuntimeStore store;
     private final ObjectMapper mapper;
+    private final CompletionContractService completionContracts;
 
     public WorkingPlanService(SqliteRuntimeStore store, ObjectMapper mapper) {
+        this(store, mapper, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public WorkingPlanService(SqliteRuntimeStore store, ObjectMapper mapper,
+                              CompletionContractService completionContracts) {
         this.store = store;
         this.mapper = mapper;
+        this.completionContracts = completionContracts;
     }
 
     public Optional<WorkingPlanRecord> latest(String runId) {
@@ -70,6 +78,15 @@ public class WorkingPlanService {
         String itemsJson = write(normalized);
         String completionJson = completion == null ? null : write(normalizeCompletion(completion));
         WorkingPlanRecord plan = store.saveWorkingPlan(runId, normalizedObjective, itemsJson, "ACTIVE", completionJson);
+        if (completionContracts != null && completion != null && !completion.isEmpty()) {
+            Map<String, Object> normalizedCompletion = normalizeCompletion(completion);
+            completionContracts.strengthen(runId,
+                    Boolean.TRUE.equals(normalizedCompletion.get("requires_workspace_change")),
+                    Boolean.TRUE.equals(normalizedCompletion.get("requires_tests")),
+                    normalizedCompletion.get("required_test_families") instanceof List<?> families
+                            ? families.stream().map(String::valueOf).toList() : List.of(),
+                    "working_plan_completion", "working plan completion declaration");
+        }
         log.info("Working plan updated run={} revision={} items={} reason={}",
                 runId, plan.revision(), normalized.size(),
                 reason == null || reason.isBlank() ? "" : reason.trim());

@@ -31,6 +31,11 @@ public class RunVerificationService {
         this.completionContracts = completionContracts;
     }
 
+    /** Establishes the run contract before the first model/tool round. */
+    public RunCompletionContractRecord ensureContract(String runId) {
+        return completionContracts.ensureForRun(runId);
+    }
+
     public VerificationResult verify(RunRecord run, String finalAnswer) {
         RunCompletionContractRecord contract = completionContracts.ensureForRun(run.id());
         RunEvidence evidence = evidenceCollector.collect(run.id());
@@ -70,16 +75,16 @@ public class RunVerificationService {
 
         if (contract.requiresTests()) {
             List<String> families = contract.requiredTestFamilies().isEmpty()
-                    ? evidence.latestTestStatusByFamily().keySet().stream().map(Enum::name).toList()
+                    ? List.of()
                     : contract.requiredTestFamilies();
             Map<TestFamily, TestStatus> afterMutation = evidence.testStatusAfterLastMutation();
             if (families.isEmpty()) {
-                if (afterMutation.isEmpty()) {
+                if (evidence.latestTestStatusByFamily().containsValue(TestStatus.FAILED)) {
+                    failed.add("a test family's latest evidence is failed");
+                    missing.add("a passing latest result for every executed test family");
+                } else if (afterMutation.values().stream().noneMatch(status -> status == TestStatus.PASSED)) {
                     failed.add("task requires tests but no classified test command ran after the last mutation");
                     missing.add("a passing test report after the last mutation");
-                } else if (afterMutation.containsValue(TestStatus.FAILED)) {
-                    failed.add("a test family failed after the last mutation");
-                    missing.add("passing evidence for every executed test family after the last mutation");
                 } else {
                     passed.add("test evidence after last mutation");
                 }

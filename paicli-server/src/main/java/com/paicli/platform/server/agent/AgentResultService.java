@@ -57,7 +57,7 @@ public class AgentResultService {
                 "family", test.family().name(),
                 "command", test.command(),
                 "status", test.status().name())).toList());
-        value.put("artifacts", evidence.artifacts().stream().map(artifact -> Map.of(
+        value.put("artifacts", evidence.businessArtifacts().stream().map(artifact -> Map.of(
                 "id", artifact.id(),
                 "type", artifact.type(),
                 "name", artifact.name(),

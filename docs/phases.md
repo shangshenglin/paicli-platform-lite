@@ -309,3 +309,8 @@
 - 跨项目自治组织、复杂资源排班和无人工边界的自进化团队；Lite 当前提供单项目 AgentTeam、持久化协作任务和三层任务 Console
 - 默认 Lite 配置中的外部向量数据库
 - 音视频理解和历史原始图片重复注入
+### 2026-08-09 Completion Evidence 审查修复
+
+- [x] 修复 Docker Sandbox `write_file` 的 pre-write/post-write 证据顺序，并为 `execute_command` 增加 workspace fingerprint。
+- [x] 以 SQLite 原子事务提交 Deferred ToolCall 停放和父 Run `WAITING_AGENT`，补齐启动、竞争和重复解析的可恢复边界。
+- [x] 收紧测试命令分类、AgentResult 测试声明、业务 Artifact 过滤和预算停止门禁；WorkingPlan、Formal PlanStep 与 Run Contract 生命周期已接通。

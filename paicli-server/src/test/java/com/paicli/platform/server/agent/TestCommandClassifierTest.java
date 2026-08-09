@@ -56,5 +56,17 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("bash test.sh")).contains(TestFamily.SHELL_TEST);
         // check/status scripts never match the test token.
         assertThat(TestCommandClassifier.classify("bash check-status.sh")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./test-data.sh")).isEmpty();
+    }
+
+    @Test
+    void shellOperatorsAndAdditionalFamiliesAreClassifiedConservatively() {
+        assertThat(TestCommandClassifier.classify("mvn compile && echo test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("npm run build && echo test")).isEmpty();
+        assertThat(TestCommandClassifier.classify("echo junit")).isEmpty();
+        assertThat(TestCommandClassifier.classify("./gradlew check")).contains(TestFamily.GRADLE);
+        assertThat(TestCommandClassifier.classify("pnpm test")).contains(TestFamily.NPM);
+        assertThat(TestCommandClassifier.classify("yarn test")).contains(TestFamily.NPM);
+        assertThat(TestCommandClassifier.classify("dotnet test")).contains(TestFamily.DOTNET);
     }
 }

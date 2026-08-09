@@ -49,6 +49,8 @@ public class SandboxToolService {
             if ("execute_command".equals(request.name())) {
                 return executeCommand(request, start);
             }
+            String writeBefore = "write_file".equals(request.name())
+                    ? sha256IfExists(path(request, "path", null)) : null;
             String content = switch (request.name()) {
                 case "list_dir" -> listDir(path(request, "path", "."));
                 case "read_file" -> readFile(path(request, "path", null));
@@ -58,7 +60,8 @@ public class SandboxToolService {
             if ("write_file".equals(request.name())) {
                 Path target = path(request, "path", null);
                 return ToolResult.success(request.toolCallId(), content, elapsed(start),
-                        writeFileMetadata(target, argument(request, "path", null)));
+                        writeFileMetadata(target, argument(request, "path", null),
+                                writeBefore));
             }
             return ToolResult.success(request.toolCallId(), content, elapsed(start));
         } catch (Exception e) {
@@ -90,8 +93,8 @@ public class SandboxToolService {
         return "Wrote " + bytes.length + " bytes to " + workspace.relativize(target);
     }
 
-    private Map<String, Object> writeFileMetadata(Path target, String requestedRelative) throws Exception {
-        String before = Files.exists(target) ? sha256(target) : null;
+    private Map<String, Object> writeFileMetadata(Path target, String requestedRelative, String before)
+            throws Exception {
         String after = sha256(target);
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("path", requestedRelative.replace('\\', '/'));
@@ -114,6 +117,10 @@ public class SandboxToolService {
         }
     }
 
+    private static String sha256IfExists(Path target) {
+        return Files.exists(target) ? sha256(target) : null;
+    }
+
     private ToolResult executeCommand(ToolRequest request, long start) throws Exception {
         String command = argument(request, "command", null);
         if (command == null || command.isBlank()) throw new IllegalArgumentException("command is required");
@@ -130,6 +137,7 @@ public class SandboxToolService {
             throw new IllegalArgumentException("maxOutputBytes must be between 1024 and "
                     + MAX_COMMAND_OUTPUT_BYTES);
         }
+        String beforeWorkspaceSha256 = workspaceFingerprint();
         ProcessBuilder builder = new ProcessBuilder(shell.command(command)).directory(cwd.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
@@ -154,13 +162,15 @@ public class SandboxToolService {
             join(stderrDrainer);
             return ToolResult.failure(request.toolCallId(),
                     "Command timed out after " + timeoutSeconds + "s", elapsed(start),
-                    commandMetadata(shell, cwd, null, true, stdout, stderr));
+                    commandMetadata(shell, cwd, null, true, stdout, stderr,
+                            beforeWorkspaceSha256, workspaceFingerprint()));
         }
         join(stdoutDrainer);
         join(stderrDrainer);
         String content = commandOutput(process.exitValue(), shell, cwd, stdout, stderr);
         return ToolResult.success(request.toolCallId(), content, elapsed(start),
-                commandMetadata(shell, cwd, process.exitValue(), false, stdout, stderr));
+                commandMetadata(shell, cwd, process.exitValue(), false, stdout, stderr,
+                        beforeWorkspaceSha256, workspaceFingerprint()));
     }
 
     private static Thread drainer(java.io.InputStream input, OutputStream output, String name) {
@@ -266,7 +276,8 @@ public class SandboxToolService {
 
     private Map<String, Object> commandMetadata(CommandShell shell, Path cwd, Integer exitCode,
                                                 boolean timedOut, BoundedOutputBuffer stdout,
-                                                BoundedOutputBuffer stderr) {
+                                                BoundedOutputBuffer stderr, String beforeWorkspaceSha256,
+                                                String afterWorkspaceSha256) {
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("shell", shell.value());
         value.put("cwd", relativeCwd(cwd));
@@ -275,7 +286,33 @@ public class SandboxToolService {
         value.put("stdoutBytes", stdout.receivedBytes());
         value.put("stderrBytes", stderr.receivedBytes());
         value.put("outputTruncated", stdout.truncated() || stderr.truncated());
+        value.put("workspaceChanged", !beforeWorkspaceSha256.isBlank()
+                && !afterWorkspaceSha256.isBlank()
+                && !java.util.Objects.equals(beforeWorkspaceSha256, afterWorkspaceSha256));
+        value.put("beforeWorkspaceSha256", beforeWorkspaceSha256);
+        value.put("afterWorkspaceSha256", afterWorkspaceSha256);
         return Map.copyOf(value);
+    }
+
+    /** Content fingerprint used only to prove that execute_command changed the workspace. */
+    private String workspaceFingerprint() {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (var paths = Files.walk(workspace)) {
+                for (Path path : paths.filter(Files::isRegularFile)
+                        .sorted(Comparator.comparing(Path::toString)).toList()) {
+                    digest.update(workspace.relativize(path).toString().getBytes(StandardCharsets.UTF_8));
+                    try (var input = Files.newInputStream(path)) {
+                        byte[] buffer = new byte[8192];
+                        int read;
+                        while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+                    }
+                }
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private String relativeCwd(Path cwd) {
@@ -287,4 +324,3 @@ public class SandboxToolService {
         return (System.nanoTime() - start) / 1_000_000;
     }
 }
-

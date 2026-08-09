@@ -55,12 +55,14 @@ public class RunEvidenceCollector {
                     TestFamily family = TestCommandClassifier.classify(command.command()).orElse(null);
                     if (family != null) {
                         tests.add(new TestEvidence(call.id(), family, command.command(),
-                                command.exitCode() == null ? TestStatus.UNKNOWN
-                                        : (command.exitCode() == 0 ? TestStatus.PASSED : TestStatus.FAILED),
+                                testStatus(command),
                                 command.exitCode(), ordinal));
                     }
+                    if (workspaceChanged(call)) lastMutationOrdinal = ordinal;
                 }
+                continue;
             }
+            if (terminal(call.status()) && workspaceChanged(call)) lastMutationOrdinal = ordinal;
         }
         List<ArtifactEvidence> artifacts = artifacts(runId);
         return new RunEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests),
@@ -75,13 +77,15 @@ public class RunEvidenceCollector {
             path = text(arguments.get("path"));
         }
         if (path == null || path.isBlank()) return null;
-        boolean changed = metadata.containsKey("changed") ? Boolean.TRUE.equals(metadata.get("changed")) : true;
+        if (!metadata.containsKey("changed")) return null;
+        boolean changed = Boolean.TRUE.equals(metadata.get("changed"));
         if (!changed) return null;
         return new FileEvidence(normalizePath(path), "write_file", call.id(), true,
                 text(metadata.get("beforeSha256")), text(metadata.get("afterSha256")), ordinal);
     }
 
     private CommandEvidence commandEvidence(ToolCallRecord call, int ordinal) {
+        if (!terminal(call.status())) return null;
         Map<String, Object> arguments = arguments(call);
         String command = text(arguments.get("command"));
         if (command == null || command.isBlank()) return null;
@@ -95,6 +99,28 @@ public class RunEvidenceCollector {
         long durationMs = metadata.get("durationMs") instanceof Number value ? value.longValue() : 0L;
         return new CommandEvidence(call.id(), command, text(metadata.get("cwd")),
                 text(metadata.get("shell")), call.status().name(), exitCode, timedOut, error, durationMs, ordinal);
+    }
+
+    private static TestStatus testStatus(CommandEvidence command) {
+        if ("COMPLETED".equals(command.status()) && command.exitCode() != null
+                && command.exitCode() == 0 && !command.timedOut()) return TestStatus.PASSED;
+        if ("COMPLETED".equals(command.status()) || "FAILED".equals(command.status())) {
+            return TestStatus.FAILED;
+        }
+        return TestStatus.UNKNOWN;
+    }
+
+    private static boolean terminal(ToolCallStatus status) {
+        return status == ToolCallStatus.COMPLETED || status == ToolCallStatus.FAILED;
+    }
+
+    /** Providers and sandbox commands may explicitly report a workspace diff. */
+    private boolean workspaceChanged(ToolCallRecord call) {
+        Map<String, Object> metadata = metadata(call);
+        Object value = metadata.get("workspaceChanged");
+        if (value == null) value = metadata.get("workspace_changed");
+        if (value == null && !"write_file".equals(call.toolName())) value = metadata.get("changed");
+        return Boolean.TRUE.equals(value);
     }
 
     private List<ArtifactEvidence> artifacts(String runId) {
