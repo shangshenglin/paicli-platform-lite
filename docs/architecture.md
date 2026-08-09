@@ -163,7 +163,7 @@ ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计�
 
 - `run_working_plans` 每 Run 单行（迁移 35），`update_working_plan` 以 upsert + revision 自增落库；主 Agent 用 objective + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目维护，`evidenceRefs` 可选引用 ToolCall/Artifact。
 - `ContextManager` 每轮只注入最新修订（`<working_plan>` 块，位于 Run 动态上下文内并计入预算），不注入全部历史；Worker 重启后从最新 revision 恢复。
-- 简单问答不创建计划：工具不在普通路径自动触发，只有模型调用 `update_working_plan` 才落库；该工具加入核心上下文工具，专家 Profile 走 `tool_search` 激活。
+- 简单问答不创建计划：工具不在普通路径自动触发，只有模型调用 `update_working_plan` 才落库；该工具加入核心上下文工具，且在 Agent Profile 业务 Tool allowlist 非空时作为唯一额外常驻的 WorkingPlan Harness 工具直接保留；其他未授权基础工具仍不会因此进入 allowlist。
 - 与 Formal Plan 的分界：Formal Plan 仍保留多步依赖、跨时长、并行、人工节点、失败回流与严格验收；WorkingPlan 不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。
 
 语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答）。协作任务复唤醒的 Leader Run 同样遵守。

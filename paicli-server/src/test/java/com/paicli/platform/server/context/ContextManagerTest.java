@@ -6,6 +6,8 @@ import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.agent.WorkingPlanService;
+import com.paicli.platform.server.agent.WorkingPlanToolProvider;
 import com.paicli.platform.server.model.ModelToolDefinition;
 import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.prompt.PromptAssembler;
@@ -77,7 +79,7 @@ class ContextManagerTest {
         SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
         store.initialize();
         ObjectMapper mapper = new ObjectMapper();
-        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), planToolCatalog(),
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), workingPlanToolCatalog(store, mapper),
                 new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
         var session = store.createSession("agent", "alpha");
         var run = store.createRun(session.id(), "review this code");
@@ -94,12 +96,70 @@ class ContextManagerTest {
                 .anyMatch(value -> value.contains("summary, risks"));
         assertThat(request.tools()).extracting("name")
                 .contains("read_file")
+                .contains("update_working_plan")
                 .containsAll(PlanToolProvider.PROFILE_PLAN_TOOLS)
                 .doesNotContain("write_file", "execute_command");
     }
 
-    private static ToolCatalog planToolCatalog() {
-        ServerToolProvider planTools = new ServerToolProvider() {
+    @Test
+    void exposesWorkingPlanWithoutAgentToolAllowList() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), workingPlanToolCatalog(store, mapper),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("agent-no-allowlist", "alpha");
+        var run = store.createRun(session.id(), "answer directly");
+
+        var request = manager.prepare(session.id(), run.id()).request();
+
+        assertThat(request.tools()).extracting("name").contains("update_working_plan");
+    }
+
+    @Test
+    void allowListAddsOnlyWorkingPlanHarnessToolAmongCoreTools() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), workingPlanToolCatalog(store, mapper),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("agent-core-scope", "alpha");
+        var run = store.createRun(session.id(), "inspect files");
+        var agent = new ProductivityStore.AgentProfile("agent_2", "alpha", "Scoped Agent",
+                "", "", null, "", "", "bash", "[\"read_file\",\"write_file\",\"execute_command\"]",
+                "[]", "", "", "", "PROJECT", "INHERIT", "scoped", 1, true, Instant.now(), Instant.now());
+
+        var request = manager.prepare(session.id(), run.id(), 128_000, 4_096, agent).request();
+
+        assertThat(request.tools()).extracting("name")
+                .contains("read_file", "write_file", "execute_command", "tool_search", "update_working_plan")
+                .doesNotContain("list_dir", "read_artifact");
+    }
+
+    @Test
+    void systemPromptExplainsWorkingPlanTriggersAndReplanning() {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+
+        String prompt = new PromptAssembler(platform).systemPrompt();
+
+        assertThat(prompt)
+                .contains("简单、单步、只读或可以直接回答的任务，不需要创建 WorkingPlan")
+                .contains("连续多个 Tool Call")
+                .contains("调查/分析 → 修改 → 验证")
+                .contains("evidenceRefs")
+                .contains("Tool 失败、验证失败、用户补充要求或执行方向发生变化时，先更新 WorkingPlan")
+                .contains("不要为了简单任务机械创建 WorkingPlan");
+    }
+
+    private static ToolCatalog workingPlanToolCatalog(SqliteRuntimeStore store, ObjectMapper mapper) {
+        ServerToolProvider workingPlan = new WorkingPlanToolProvider(new WorkingPlanService(store, mapper), mapper);
+        ServerToolProvider plan = new ServerToolProvider() {
             @Override public String id() { return "plan-test"; }
             @Override public List<ModelToolDefinition> definitions() {
                 return PlanToolProvider.PROFILE_PLAN_TOOLS.stream()
@@ -111,7 +171,7 @@ class ContextManagerTest {
             }
             @Override public ToolResult execute(ToolRequest request) { return null; }
         };
-        return new ToolCatalog(List.of(planTools));
+        return new ToolCatalog(List.of(plan, workingPlan));
     }
 
     @Test
