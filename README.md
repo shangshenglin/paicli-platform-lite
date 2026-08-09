@@ -6,6 +6,8 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 
 外部 Harness 的下一步不再只是压缩单次 Prompt，而是以任务为单位控制模型调用、事件合并、Agent 交接、模型分层与成本质量评测；本机“推箱子”协作任务的真实用量复盘和可落地优化顺序见 [外部 Harness Token 成本优化方案](docs/harness-token-optimization.md)。
 
+Completion Contract 的文件证据必须记录 Sandbox 安全解析后的 workspace-relative canonical target，而不是模型提交的原始字符串；因此 `src/../README.md` 会记录为 `README.md`，symlink 别名会记录为最终真实目标。Plan 与 `spawn_agent` 的 `resource_read_set/resource_write_set` 复用同一套路径规则，拒绝绝对路径和越界 `..`，并规范化 `\\`、重复分隔符与 `./`。测试分类器只把 `help`、`--help/-h`、`--version` 作为通用 CLI 元命令，`-v/-V` 由具体测试族作为 verbose 参数处理。
+
 ## 项目解决什么问题
 
 普通 Agent 原型通常是“拼 Prompt → 调模型 → 执行工具 → 把结果再发给模型”。PaiCLI Platform Lite 重点补齐模型 API 之外的工程问题：

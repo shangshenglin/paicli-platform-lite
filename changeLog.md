@@ -4,6 +4,13 @@
 
 ## 2026-08-09
 
+### Completion Evidence 增量修复：canonical write path 与测试 verbose 参数
+
+- 变更：新增跨模块 `WorkspacePathNormalizer`，PlanParser、DelegationToolProvider、SQLite delegation resource set 和 writeScope matcher 统一拒绝绝对路径/越界 traversal，并规范化 `\\`、重复分隔符和 `./`；`write_file` 的 Local 与 Docker/Sandbox metadata 改为记录安全解析后的最终 workspace-relative canonical target，包含 symlink 解析后的真实路径。RunEvidenceDecoder 同时对历史 metadata 做最终路径校验，避免旧原始路径重新绕过 scope。
+- 变更（测试分类）：通用 CLI 元命令只拒绝 `help`、`--help/-h`、`--version`；`-v/-V` 不再被当作跨工具 version flag，pytest/Go/Cargo/.NET 的真实测试命令可保留 verbose 参数。
+- 思路：Completion Contract 的 scope 必须约束实际写入目标，而不是模型提交的原始字符串；路径安全解析与证据记录必须在 Sandbox 边界完成，Server 只消费 canonical evidence。resource set 是同一 scope 语义的声明入口，因此共享相同的纯字符串规范化规则；未改变数据库 Schema、REST/OpenAPI、配置或产品站展示，相关专门文档不适用。
+- 验证：定向 reactor 测试 85 项通过，0 failures，1 个 symlink 用例因当前 Windows 测试环境不允许创建符号链接而跳过；随后全量 `test` 明确 `BUILD SUCCESS`，common 3 + server 303 + sandbox-agent 5 = 311 项，0 failures/errors、2 skipped。`clean test` 与 `clean package` 均完成测试/JAR 产出，但外层 120 秒命令时限截断最终退出码；随后 `package -DskipTests` 明确 `BUILD SUCCESS`，三模块 JAR/repackage 成功。`git diff --check` 通过。
+
 ### Completion Evidence merge-readiness：writeScope 执行与命令路径归属
 
 - 变更：Docker Sandbox 的 `execute_command` metadata 新增 `changedPaths/changedPathsTruncated`，以命令前后 workspace snapshot 的内容哈希归属新增、修改和删除路径。`RunEvidenceDecoder` 只在高置信度直接写入命令、未截断的非生成物 changed paths 和 workspace fingerprint 同时成立时创建 command mutation；`rm/cp/mv/touch` 等泛文件操作不再单独形成 mutation evidence。`RunVerificationService` 与 Parent `AgentResultValidator` 执行 `CompletionContract.writeScope`：scope 非空时必须存在可归属路径，且全部路径位于文件或目录（含 `/**`）scope 内；无路径、截断或 scope 外路径均拒绝。AgentResult、SQLite terminal envelope 和 DeliveryManifest 同步输出 changed paths。

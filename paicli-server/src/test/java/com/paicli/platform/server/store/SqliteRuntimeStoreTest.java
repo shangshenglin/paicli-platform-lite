@@ -543,6 +543,32 @@ class SqliteRuntimeStoreTest {
     }
 
     @Test
+    void canonicalizesDelegationResourcePathsBeforePersistence() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("resource canonicalization", "project-a");
+        var parent = store.createRun(session.id(), "coordinate");
+        var tool = store.createToolCall(parent.id(), "spawn-canonical", "spawn_agent", "{}",
+                "spawn-canonical-" + parent.id());
+
+        var delegation = store.createOrGetDelegation(parent.id(), tool.id(), "writer", "write files",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of(),
+                        List.of("src/../README.md", "src//App.java"), "BLOCK_GRAPH", "workspace/root"));
+
+        assertThat(store.delegationResources(delegation.id()).get("write"))
+                .containsExactly("README.md", "src/App.java");
+
+        var invalidTool = store.createToolCall(parent.id(), "spawn-invalid", "spawn_agent", "{}",
+                "spawn-invalid-" + parent.id());
+        assertThatThrownBy(() -> store.createOrGetDelegation(parent.id(), invalidTool.id(), "invalid", "invalid",
+                null, null, null, null, null, null, "{}",
+                new SqliteRuntimeStore.DelegationOptions(List.of(), List.of(), List.of("../../README.md"),
+                        "BLOCK_GRAPH", "workspace/root")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("escapes workspace");
+    }
+
+    @Test
     void resumesLeaderWhenAwaitedDelegatedAgentBecomesTerminal() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("parent", "project-a");

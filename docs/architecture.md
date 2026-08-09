@@ -4,6 +4,8 @@
 
 平台由一个 Spring Boot Server、一个 SQLite 数据库和可选的 Docker Sandbox 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界。
 
+Completion Evidence 的路径语义由 Sandbox 边界确定：`write_file` metadata 记录安全解析后的最终 workspace-relative canonical target，Server 不再信任原始 `path` 字符串。Plan/delegation resource set 与 writeScope 使用统一的相对路径规范化，拒绝 absolute/traversal 输入；测试命令的 `-v/-V` 保留给具体测试族，不作为通用 version flag。
+
 ```text
 客户端
   -> REST / SSE

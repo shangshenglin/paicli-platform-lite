@@ -63,8 +63,7 @@ public class SandboxToolService {
             if ("write_file".equals(request.name())) {
                 Path target = path(request, "path", null);
                 return ToolResult.success(request.toolCallId(), content, elapsed(start),
-                        writeFileMetadata(target, argument(request, "path", null),
-                                writeBefore));
+                        writeFileMetadata(target, writeBefore));
             }
             return ToolResult.success(request.toolCallId(), content, elapsed(start));
         } catch (Exception e) {
@@ -96,11 +95,11 @@ public class SandboxToolService {
         return "Wrote " + bytes.length + " bytes to " + workspace.relativize(target);
     }
 
-    private Map<String, Object> writeFileMetadata(Path target, String requestedRelative, String before)
+    private Map<String, Object> writeFileMetadata(Path target, String before)
             throws Exception {
         String after = sha256(target);
         Map<String, Object> value = new LinkedHashMap<>();
-        value.put("path", requestedRelative.replace('\\', '/'));
+        value.put("path", workspace.relativize(target).toString().replace('\\', '/'));
         value.put("changed", !java.util.Objects.equals(before, after));
         value.put("beforeSha256", before == null ? "" : before);
         value.put("afterSha256", after == null ? "" : after);

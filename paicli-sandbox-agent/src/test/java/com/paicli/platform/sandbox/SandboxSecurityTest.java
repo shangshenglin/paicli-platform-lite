@@ -2,9 +2,12 @@ package com.paicli.platform.sandbox;
 
 import com.paicli.platform.common.ToolRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
@@ -63,5 +66,29 @@ class SandboxSecurityTest {
 
         assertThat(service.execute(first).metadata()).containsEntry("changed", true);
         assertThat(service.execute(second).metadata()).containsEntry("changed", true);
+    }
+
+    @Test
+    void writeFileEvidenceUsesCanonicalPathAfterTraversalAndSymlinkResolution() throws Exception {
+        SandboxAgentProperties properties = new SandboxAgentProperties(workspace, "sandbox-secret", 10);
+        SandboxToolService service = new SandboxToolService(properties);
+        service.initialize();
+
+        var traversal = service.execute(new ToolRequest("tool-write-traversal", "run-1", "write_file",
+                Map.of("path", "src/../README.md", "content", "readme"), "key-write-traversal"));
+        assertThat(traversal.metadata()).containsEntry("path", "README.md");
+
+        Files.createDirectories(workspace.resolve("config"));
+        Files.createDirectories(workspace.resolve("src"));
+        try {
+            Files.createSymbolicLink(workspace.resolve("src/link"), Path.of("..", "config"));
+        } catch (UnsupportedOperationException | IOException e) {
+            Assumptions.assumeTrue(false, "symbolic links unavailable: " + e.getMessage());
+        }
+        var symlink = service.execute(new ToolRequest("tool-write-symlink", "run-1", "write_file",
+                Map.of("path", "src/link/app.yml", "content", "enabled: true"), "key-write-symlink"));
+
+        assertThat(symlink.metadata()).containsEntry("path", "config/app.yml");
+        assertThat(workspace.resolve("config/app.yml")).hasContent("enabled: true");
     }
 }

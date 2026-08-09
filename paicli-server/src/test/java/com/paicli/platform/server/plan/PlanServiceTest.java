@@ -58,6 +58,39 @@ class PlanServiceTest {
     }
 
     @Test
+    void canonicalizesPlanResourceWritePaths() {
+        String plan = """
+                {
+                  "objective": "normalize resources",
+                  "steps": [
+                    {"client_id":"write","title":"Write","type":"FILE_WRITE","execution_mode":"REACT",
+                     "dependencies":[],"resource_write_set":["src/../README.md","src//App.java"]}
+                  ]
+                }
+                """;
+
+        var parsed = new PlanParser(mapper).parse("normalize resources", plan);
+
+        assertThat(parsed.steps()).singleElement().satisfies(step ->
+                assertThat(step.resourceWriteSetJson()).contains("README.md", "src/App.java")
+                        .doesNotContain(".."));
+    }
+
+    @Test
+    void rejectsPlanResourcePathThatEscapesWorkspace() {
+        String plan = """
+                {"objective":"invalid resource","steps":[
+                  {"client_id":"write","title":"Write","type":"FILE_WRITE","execution_mode":"REACT",
+                   "dependencies":[],"resource_write_set":["../../README.md"]}
+                ]}
+                """;
+
+        assertThatThrownBy(() -> new PlanParser(mapper).parse("invalid resource", plan))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("escapes workspace");
+    }
+
+    @Test
     void regeneratesModelPlanOnceAfterDependencyValidationFailure() throws Exception {
         SqliteRuntimeStore runtime = runtime();
         AtomicInteger calls = new AtomicInteger();

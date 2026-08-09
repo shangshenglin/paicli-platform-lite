@@ -2,6 +2,7 @@ package com.paicli.platform.server.plan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.WorkspacePathNormalizer;
 import com.paicli.platform.server.store.PlanStore;
 import org.springframework.stereotype.Component;
 
@@ -59,8 +60,8 @@ public class PlanParser {
                     if (!EXECUTION_MODES.contains(mode)) errors.add(clientId + " has unsupported execution_mode: " + mode);
                     List<String> criteria = stringList(node.path("done_criteria"), 20, 500);
                     List<String> deps = stringList(node.path("dependencies"), 20, 120);
-                    List<String> readSet = stringList(firstArray(node, "resource_read_set", "read_set"), 50, 240);
-                    List<String> writeSet = stringList(firstArray(node, "resource_write_set", "write_set"), 50, 240);
+                    List<String> readSet = resourceList(firstArray(node, "resource_read_set", "read_set"), 50, 240);
+                    List<String> writeSet = resourceList(firstArray(node, "resource_write_set", "write_set"), 50, 240);
                     String isolation = text(node.path("isolation_strategy").asText("SHARED_SESSION"),
                             "SHARED_SESSION", 40).toUpperCase();
                     int maxParallelism = Math.max(1, Math.min(node.path("max_parallelism").asInt(1), 16));
@@ -188,6 +189,13 @@ public class PlanParser {
             if (!value.isBlank()) values.add(value.length() > maxChars ? value.substring(0, maxChars) : value);
         }
         return values;
+    }
+
+    private static List<String> resourceList(JsonNode node, int maxItems, int maxChars) {
+        return stringList(node, maxItems, maxChars).stream()
+                .map(WorkspacePathNormalizer::normalizeRelative)
+                .filter(value -> !value.isBlank())
+                .toList();
     }
 
     private static JsonNode firstArray(JsonNode node, String first, String second) {

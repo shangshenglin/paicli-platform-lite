@@ -1,5 +1,7 @@
 # 交付阶段
 
+当前 Completion Evidence 已补齐 canonical write path：Local 与 Docker/Sandbox `write_file` 记录最终解析目标，Plan/delegation resource set 统一拒绝绝对路径和越界 traversal；测试分类器按测试族保留 `-v/-V` verbose 参数。
+
 ## 2026-08-09 Harness Loop v2 · PR10：完成合同、执行证据与 Deferred get_agent_result
 
 - 迁移 39：`run_completion_contracts`（完成合同）、`tool_calls.result_metadata_json`（结构化工具证据）、`tool_calls.wait_kind/wait_ref/waiting_since`（Deferred 外部工具调用）。

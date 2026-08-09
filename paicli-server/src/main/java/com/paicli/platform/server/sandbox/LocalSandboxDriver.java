@@ -67,7 +67,7 @@ public class LocalSandboxDriver implements SandboxDriver {
                     String before = Files.exists(target) ? sha256(target) : null;
                     content = writeFile(target, String.valueOf(request.arguments()
                             .getOrDefault("content", "")));
-                    metadata.putAll(writeMetadata(target, relative, before));
+                    metadata.putAll(writeMetadata(runWorkspace, target, before));
                 }
                 default -> throw new IllegalArgumentException(
                         "Tool is not enabled in the Phase 1 local executor: " + request.name());
@@ -126,10 +126,10 @@ public class LocalSandboxDriver implements SandboxDriver {
     }
 
     /** Structured evidence for a completed write_file call. */
-    private static Map<String, Object> writeMetadata(Path target, String requestedRelative, String before) {
+    private static Map<String, Object> writeMetadata(Path runWorkspace, Path target, String before) {
         String after = sha256(target);
         Map<String, Object> value = new LinkedHashMap<>();
-        value.put("path", requestedRelative.replace('\\', '/'));
+        value.put("path", runWorkspace.relativize(target).toString().replace('\\', '/'));
         value.put("changed", !Objects.equals(before, after));
         value.put("beforeSha256", before == null ? "" : before);
         value.put("afterSha256", after == null ? "" : after);

@@ -4,6 +4,8 @@
 
 Docker 模式是企业级 MicroVM 池的轻量替代，可改善进程、文件系统和资源隔离，但不等同于面向敌对代码的强化执行服务。应持续更新 Docker Desktop 和基础镜像，并且绝不能把 Docker Socket 挂载进 Sandbox。
 
+`write_file` 的 metadata `path` 必须来自安全解析后的最终 target 相对 workspace 的 canonical 路径，不能保留原始 `src/../...` 或 symlink 别名；这样 Completion Contract 的 `writeScope` 约束的是实际写入目标。通用 CLI 元命令只包括 `help`、`--help/-h`、`--version`，`-v/-V` 由测试族按 verbose 参数解释。
+
 ## 生命周期
 
 ```text

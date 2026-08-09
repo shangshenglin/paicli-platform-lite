@@ -2,6 +2,7 @@ package com.paicli.platform.server.agent;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.WorkspacePathNormalizer;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.WorkspaceMode;
 import com.paicli.platform.common.ToolRequest;
@@ -143,11 +144,11 @@ public class DelegationToolProvider implements ServerToolProvider {
                 profile == null ? null : profile.outputSchema(),
                 profile == null ? null : profile.collaborationRole());
         String envelopeJson = writeJson(envelope);
-        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
-        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
+        List<String> readSet = resourceListArg(request.arguments().get("resource_read_set"));
+        List<String> writeSet = resourceListArg(request.arguments().get("resource_write_set"));
         if (planStep != null) {
-            if (readSet.isEmpty()) readSet = jsonList(planStep.resourceReadSetJson());
-            if (writeSet.isEmpty()) writeSet = jsonList(planStep.resourceWriteSetJson());
+            if (readSet.isEmpty()) readSet = jsonResourceList(planStep.resourceReadSetJson());
+            if (writeSet.isEmpty()) writeSet = jsonResourceList(planStep.resourceWriteSetJson());
         }
         String workspaceRef = stringArg(request.arguments(), "workspace_ref");
         if (workspaceRef.isBlank() && planStep != null) workspaceRef = nullToBlank(planStep.workspaceRef());
@@ -368,8 +369,8 @@ public class DelegationToolProvider implements ServerToolProvider {
     private Map<String, Object> delegationEnvelope(ToolRequest request, String projectKey, PlanStore.PlanStep step,
                                                    String profileOutputSchema, String collaborationRole) {
         List<String> doneCriteria = listArg(request.arguments().get("done_criteria"));
-        List<String> readSet = listArg(request.arguments().get("resource_read_set"));
-        List<String> writeSet = listArg(request.arguments().get("resource_write_set"));
+        List<String> readSet = resourceListArg(request.arguments().get("resource_read_set"));
+        List<String> writeSet = resourceListArg(request.arguments().get("resource_write_set"));
         String workspaceRef = stringArg(request.arguments(), "workspace_ref");
         if (workspaceRef.isBlank() && step != null) workspaceRef = nullToBlank(step.workspaceRef());
         String expectedSchema = stringArg(request.arguments(), "expected_output_schema");
@@ -402,9 +403,9 @@ public class DelegationToolProvider implements ServerToolProvider {
         value.put("plan_step_type", step == null ? "" : step.type());
         value.put("execution_mode", step == null ? "" : step.executionMode());
         value.put("resource_read_set", readSet.isEmpty() && step != null
-                ? jsonList(step.resourceReadSetJson()) : readSet);
+                ? jsonResourceList(step.resourceReadSetJson()) : readSet);
         value.put("resource_write_set", writeSet.isEmpty() && step != null
-                ? jsonList(step.resourceWriteSetJson()) : writeSet);
+                ? jsonResourceList(step.resourceWriteSetJson()) : writeSet);
         return value;
     }
 
@@ -464,6 +465,16 @@ public class DelegationToolProvider implements ServerToolProvider {
         } catch (Exception ignored) {
             return List.of();
         }
+    }
+
+    private List<String> jsonResourceList(String value) {
+        return jsonList(value).stream().map(WorkspacePathNormalizer::normalizeRelative)
+                .filter(item -> !item.isBlank()).toList();
+    }
+
+    private static List<String> resourceListArg(Object value) {
+        return listArg(value).stream().map(WorkspacePathNormalizer::normalizeRelative)
+                .filter(item -> !item.isBlank()).toList();
     }
 
     private static List<String> listArg(Object value) {

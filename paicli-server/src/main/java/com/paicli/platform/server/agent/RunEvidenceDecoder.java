@@ -3,6 +3,7 @@ package com.paicli.platform.server.agent;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.platform.common.WorkspacePathNormalizer;
 import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
@@ -191,9 +192,11 @@ public final class RunEvidenceDecoder {
     }
 
     private static String normalizePath(String path) {
-        String normalized = path.replace('\\', '/');
-        while (normalized.startsWith("./")) normalized = normalized.substring(2);
-        return normalized;
+        try {
+            return WorkspacePathNormalizer.normalizeRelative(path);
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
     }
 
     public record ToolCall(String id, String toolName, String arguments, ToolCallStatus status,

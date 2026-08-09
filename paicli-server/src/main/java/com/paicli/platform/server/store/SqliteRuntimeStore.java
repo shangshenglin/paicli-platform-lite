@@ -1,5 +1,6 @@
 package com.paicli.platform.server.store;
 
+import com.paicli.platform.common.WorkspacePathNormalizer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
@@ -5630,7 +5631,7 @@ public class SqliteRuntimeStore {
     private static List<String> normalizeResourceList(List<String> values) {
         if (values == null) return List.of();
         return values.stream().filter(value -> value != null && !value.isBlank())
-                .map(value -> value.trim().replace('\\', '/').toLowerCase())
+                .map(WorkspacePathNormalizer::normalizeRelative)
                 .distinct().limit(100).toList();
     }
 

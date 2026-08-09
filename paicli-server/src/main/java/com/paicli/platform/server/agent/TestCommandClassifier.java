@@ -209,10 +209,9 @@ public final class TestCommandClassifier {
         if (args.isEmpty()) return false;
         String first = args.get(0).toLowerCase(Locale.ROOT);
         if (first.equals("help") || first.equals("--help") || first.equals("-h")
-                || first.equals("--version") || first.equals("-v")) return true;
+                || first.equals("--version")) return true;
         return args.stream().anyMatch(argument -> argument.equalsIgnoreCase("--help")
-                || argument.equalsIgnoreCase("-h") || argument.equalsIgnoreCase("--version")
-                || argument.equalsIgnoreCase("-v"));
+                || argument.equalsIgnoreCase("-h") || argument.equalsIgnoreCase("--version"));
     }
 
     private static boolean subcommand(List<String> args, String expected) {

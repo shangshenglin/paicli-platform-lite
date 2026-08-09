@@ -3,8 +3,10 @@ package com.paicli.platform.server.sandbox;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.server.config.PlatformProperties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
@@ -75,6 +77,38 @@ class LocalSandboxDriverTest {
         assertThat(changedContent.metadata().get("changed")).isEqualTo(Boolean.TRUE);
         assertThat(changedContent.metadata().get("beforeSha256"))
                 .isNotEqualTo(changedContent.metadata().get("afterSha256"));
+    }
+
+    @Test
+    void writeFileEvidenceUsesResolvedWorkspaceRelativePath() throws Exception {
+        LocalSandboxDriver driver = driver();
+
+        var result = driver.execute(new ToolRequest("tool-canonical", "run_1", "write_file",
+                Map.of("path", "src/../README.md", "content", "readme"), "key-canonical"));
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.metadata().get("path")).isEqualTo("README.md");
+        assertThat(tempDir.resolve("workspaces/run_1/README.md")).hasContent("readme");
+    }
+
+    @Test
+    void writeFileEvidenceUsesSymlinkResolvedWorkspaceRelativePath() throws Exception {
+        Path runWorkspace = tempDir.resolve("workspaces/run_1");
+        Files.createDirectories(runWorkspace.resolve("config"));
+        Files.createDirectories(runWorkspace.resolve("src"));
+        try {
+            Files.createSymbolicLink(runWorkspace.resolve("src/link"), Path.of("..", "config"));
+        } catch (UnsupportedOperationException | IOException e) {
+            Assumptions.assumeTrue(false, "symbolic links unavailable: " + e.getMessage());
+        }
+
+        LocalSandboxDriver driver = driver();
+        var result = driver.execute(new ToolRequest("tool-symlink", "run_1", "write_file",
+                Map.of("path", "src/link/app.yml", "content", "enabled: true"), "key-symlink"));
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.metadata().get("path")).isEqualTo("config/app.yml");
+        assertThat(runWorkspace.resolve("config/app.yml")).hasContent("enabled: true");
     }
 
     private LocalSandboxDriver driver() throws Exception {

@@ -36,10 +36,13 @@ class TestCommandClassifierTest {
         assertThat(TestCommandClassifier.classify("vitest run")).contains(TestFamily.VITEST);
         assertThat(TestCommandClassifier.classify("pytest tests/")).contains(TestFamily.PYTEST);
         assertThat(TestCommandClassifier.classify("go test ./...")).contains(TestFamily.GO_TEST);
+        assertThat(TestCommandClassifier.classify("go test -v ./...")).contains(TestFamily.GO_TEST);
         assertThat(TestCommandClassifier.classify("node --test")).contains(TestFamily.NODE_TEST);
-        assertThat(TestCommandClassifier.classify("cargo test")).contains(TestFamily.CARGO);
+        assertThat(TestCommandClassifier.classify("cargo test -v")).contains(TestFamily.CARGO);
         assertThat(TestCommandClassifier.classify("./gradlew test")).contains(TestFamily.GRADLE);
         assertThat(TestCommandClassifier.classify("gradle test")).contains(TestFamily.GRADLE);
+        assertThat(TestCommandClassifier.classify("pytest -v tests/")).contains(TestFamily.PYTEST);
+        assertThat(TestCommandClassifier.classify("dotnet test -v normal")).contains(TestFamily.DOTNET);
     }
 
     @Test
