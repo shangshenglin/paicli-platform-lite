@@ -28,6 +28,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 执行安全 | Local/Docker Sandbox、危险工具审批、持久化审批策略、路径/资源/密钥边界、JSONL 审计 |
 | 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、结构化工作记忆、Context Manifest、统一 Token 预算、按需工具 Schema、Artifact、项目规则 |
 | Plan / Graph Runtime | 持久化 Plan/Step/类型化 Edge、确定性条件分支、有限失败回流、PlanState 快照、Human Node 决策、DAG 校验、Step 调度复用普通 ReAct Run、Validation Gate 与受控并行 |
+| PRD Analysis Agent | `map_prd → dispatch → merge → probe → clarify → handoff` 固定质量阶段、节点级并行 Function Calling、事务化结构提交、机械验证、人工澄清与交付清单 |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 协作工作层 | 增强 AgentTeam、结构化 Route Decision、持久化 CollaborationTask、评论/提及/时间线、Task-Run 关联、阶段屏障与 Leader 唤醒 |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
@@ -657,6 +658,48 @@ Plan Runtime 已从“持久化计划对象”推进到类型化 Graph 执行闭
 
 更完整的 Plan、Multi-Agent、Agent Harness、调度恢复和验证闭环说明见 [技术架构与面试指南](PaiCLI%20Platform%20Lite%20技术架构与面试指南.md) 的“Plan 与类型化 Graph Runtime”“Step 调度、租约、资源冲突、隔离与 Validation Gate”章节。
 
+### PRD Analysis Agent
+
+PRD Analysis Agent 是独立的可恢复分析管线，不会把开放式 PRD 理解硬编码成普通 DAG。Runtime 只固定质量阶段和转换表：
+
+```text
+map_prd → dispatch → merge → probe → clarify → handoff
+                     ↑       │
+                     └ FIXABLE
+probe --AMBIGUOUS--> clarify --全部解决--> probe
+```
+
+`map_prd` 按 Markdown 标题、层级和行号确定性切分节点；`dispatch` 按依赖层最多并行 8 个隔离的节点请求。模型只看到当前节点、数据源摘要和直接依赖摘要，并通过 `submit_node_result` Function Calling 提交实体、规则、流程、条件矩阵、假设检查与预测报告。动作参数先写入 `prd_analysis_actions`，再由事务分配全局 `E/R/F` ID、重写局部引用并提交节点结果；Worker 重启会复用同一幂等动作。`merge` 生成全局设计索引，`probe` 只做重复项、条件矩阵、孤立字段等机械检查，歧义问题持久化等待用户回答，Handoff Gate 只在节点完成、P0 清零、Probe 通过和索引有效时生成交付清单。
+
+创建最小任务：
+
+```http
+POST /v1/prd-analyses
+Content-Type: application/json
+
+{
+  "projectKey": "default",
+  "title": "订单系统 PRD",
+  "prdText": "# 订单系统\n## 支付\n支付后才能发货",
+  "sourceContract": {"fields": [{"name": "order_id"}]},
+  "maxParallel": 8
+}
+```
+
+接口清单：
+
+```text
+POST / GET                  /v1/prd-analyses
+GET                         /v1/prd-analyses/skills
+GET                         /v1/prd-analyses/{jobId}
+GET                         /v1/prd-analyses/{jobId}/nodes|items|actions|clarifications|events|artifacts
+GET                         /v1/prd-analyses/{jobId}/artifacts/{name}
+POST                        /v1/prd-analyses/{jobId}/clarifications/{questionId}/resolve
+POST                        /v1/prd-analyses/{jobId}/retry|cancel
+```
+
+产物位于受控 `data/prd-analysis/{jobId}/output/`，包括 `domain_analysis.md`、`node_schedule.json`、`glossary.json`、`design_outline.json`、`condition_matrices.json`、`prediction_reports.json`、`design_index.json`、`probe_report.json`、`state.json`、`strategy_journal.jsonl`、`source_contract.json` 和 `handoff_manifest.json`。Demo 模型下使用可复现的保守提取降级，便于离线验收；真实模型下使用同一持久化状态机和门禁。
+
 ### Approval、附件与 Artifact
 
 ```text
@@ -800,10 +843,11 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 |---|---|
 | `PAICLI_SERVER_ADDRESS`、`PAICLI_API_KEY`、`PAICLI_SECURITY_*` | 回环监听默认值、REST、Actuator、OpenAPI 认证和生产启动门禁 |
 | `PAICLI_MODEL_*` | Provider、端点、模型、Key、上下文/输出、思考、重试、流空闲超时、熔断、限流、Fallback、Run/工具预算和相同工具参数循环上限 |
-| `PAICLI_WEB_*` | 可选 SearXNG 搜索和 Server 侧 Web 工具 |
+| `PAICLI_WEB_*` | 可选 SearXNG 搜索和 Server 侧 Web 工具；默认关闭，启用时必须同时配置搜索 URL |
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
+| `PAICLI_PRD_ANALYSIS_WORKER_DELAY_MS` | PRD Analysis 持久化队列轮询间隔，默认 750ms；单批节点并行度由创建请求限制为 1–8 |
 | `paicli.docker.command-timeout-seconds` | Docker 命令请求的最大超时，同时注入 Sandbox Agent 作为请求级 `timeoutSeconds` 上限；默认 90 秒 |
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
@@ -825,8 +869,9 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
 - ContextManager、Context Manifest、稳定缓存前缀、统一预算、结构化摘要、按需工具 Schema、Memory 来源冻结/反馈、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–34、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–40、CollaborationTask/Trigger/阶段屏障/任务工作区、PRD Analysis Job/Action/Clarification 恢复、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
+- PRD Analysis 的确定性节点映射、转换表拒绝越级、并行节点结构提交、全局 ID 重编号、Action 先持久化再执行、重启恢复、澄清回路、Probe 与 Handoff 产物。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
 - Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 7 套件/28 Case Starter Pack 完整性和幂等安装。
 

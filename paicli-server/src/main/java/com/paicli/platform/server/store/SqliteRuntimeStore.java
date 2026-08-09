@@ -679,6 +679,52 @@ public class SqliteRuntimeStore {
                     "UNIQUE(run_id, step_id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_agent_feedback_agent " +
                     "ON agent_feedback(project_key,agent_profile_id,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_jobs (" +
+                    "id TEXT PRIMARY KEY, project_key TEXT NOT NULL, title TEXT NOT NULL, " +
+                    "status TEXT NOT NULL, stage TEXT NOT NULL, prd_text TEXT NOT NULL, " +
+                    "source_contract_json TEXT NOT NULL DEFAULT '{}', config_json TEXT NOT NULL DEFAULT '{}', " +
+                    "artifact_dir TEXT NOT NULL, progress_version INTEGER NOT NULL DEFAULT 0, " +
+                    "repair_count INTEGER NOT NULL DEFAULT 0, error TEXT, claimed_by TEXT, lease_expires_at TEXT, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_jobs_queue " +
+                    "ON prd_analysis_jobs(status,updated_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_nodes (" +
+                    "id TEXT PRIMARY KEY, job_id TEXT NOT NULL, node_key TEXT NOT NULL, ordinal INTEGER NOT NULL, " +
+                    "heading TEXT NOT NULL, heading_level INTEGER NOT NULL, start_line INTEGER NOT NULL, " +
+                    "end_line INTEGER NOT NULL, content TEXT NOT NULL, dependencies_json TEXT NOT NULL DEFAULT '[]', " +
+                    "tags_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, analysis_json TEXT NOT NULL DEFAULT '{}', " +
+                    "error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "UNIQUE(job_id,node_key), FOREIGN KEY(job_id) REFERENCES prd_analysis_jobs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_nodes_job " +
+                    "ON prd_analysis_nodes(job_id,ordinal)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_items (" +
+                    "job_id TEXT NOT NULL, item_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT NOT NULL, " +
+                    "name TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                    "PRIMARY KEY(job_id,item_id), FOREIGN KEY(job_id) REFERENCES prd_analysis_jobs(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_items_node " +
+                    "ON prd_analysis_items(node_id,kind,item_id)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_actions (" +
+                    "id TEXT PRIMARY KEY, job_id TEXT NOT NULL, node_id TEXT NOT NULL, provider_call_id TEXT NOT NULL, " +
+                    "name TEXT NOT NULL, arguments_json TEXT NOT NULL, status TEXT NOT NULL, result_json TEXT, " +
+                    "error TEXT, idempotency_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, finished_at TEXT, " +
+                    "FOREIGN KEY(job_id) REFERENCES prd_analysis_jobs(id) ON DELETE CASCADE, " +
+                    "FOREIGN KEY(node_id) REFERENCES prd_analysis_nodes(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_actions_node " +
+                    "ON prd_analysis_actions(node_id,status,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_clarifications (" +
+                    "id TEXT PRIMARY KEY, job_id TEXT NOT NULL, source TEXT NOT NULL, severity TEXT NOT NULL, " +
+                    "category TEXT NOT NULL, question TEXT NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL, " +
+                    "answer TEXT, created_at TEXT NOT NULL, resolved_at TEXT, " +
+                    "UNIQUE(job_id,fingerprint), FOREIGN KEY(job_id) REFERENCES prd_analysis_jobs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_clarifications_job " +
+                    "ON prd_analysis_clarifications(job_id,status,created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS prd_analysis_events (" +
+                    "job_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, PRIMARY KEY(job_id,sequence), " +
+                    "FOREIGN KEY(job_id) REFERENCES prd_analysis_jobs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_prd_analysis_events_job " +
+                    "ON prd_analysis_events(job_id,sequence)");
             statement.execute("UPDATE tool_calls SET status='REQUESTED', retry_count=retry_count+1 " +
                     "WHERE status='RUNNING' AND effect IN ('READ_ONLY','IDEMPOTENT_WRITE')");
             statement.execute("UPDATE tool_calls SET status='UNKNOWN', " +
@@ -703,6 +749,8 @@ public class SqliteRuntimeStore {
                     + "JOIN runs ON runs.id=link.run_id WHERE runs.status NOT IN ('COMPLETED','FAILED','CANCELED'))");
             statement.execute("UPDATE memory_extractions SET status='PENDING', updated_at='" +
                     Instant.now() + "' WHERE status='RUNNING'");
+            statement.execute("UPDATE prd_analysis_jobs SET status='QUEUED',claimed_by=NULL,lease_expires_at=NULL," +
+                    "updated_at='" + Instant.now() + "' WHERE status='RUNNING'");
         }
         reconcileCollaborationTaskWorkspaces();
         recoverInterruptedRuns();

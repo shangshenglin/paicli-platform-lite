@@ -1306,7 +1306,7 @@ sequenceDiagram
 
 `agent_profiles` 保存专家指令、模型方案、工具和 Skill 白名单、输出契约、协作角色、Workspace 范围及审批策略。父 Run 取消时级联取消后代；父 Agent 通过 `get_agent_result` 拉取结果，不让 Worker 长时间同步阻塞。
 
-当前结构化结果包含子 Run 状态、摘要、Artifact、Token、失败分类和证据；部分 `files_changed`、`commands_executed`、`tests` 字段还需要继续从工具事件自动归集。
+当前结构化结果包含子 Run 状态、摘要、Artifact、Token、失败分类和统一证据。`AgentResultService` 已从 ToolCall/ToolResult 自动归集 `files_changed`、`commands_executed`、`tests`、业务 Artifact、Completion Contract 与 workspace mutation；当命令只证明工作区发生变化、但无法可靠定位文件时，只输出 `workspace_mutations`，绝不伪造 `files_changed`。
 
 #### spawn_agent 为什么也必须审批和幂等
 
@@ -1319,7 +1319,7 @@ sequenceDiagram
 - collaboration policy 限制允许的专家、最大深度、每个父 Run 子数量和整棵树数量。
 - 非 Leader Profile 默认不能继续 `spawn_agent`，避免无限递归团队。
 - child Run 进入普通公平队列，不由父线程同步执行。
-- 父 Run 等待子结果时会让出 Worker；子 Run 终态后重新排队父 Run。
+- 父 Run 等待子结果时会让出 Worker：未终态 child 会把原 `get_agent_result` ToolCall 持久化为 `WAITING_EXTERNAL`，parent 进入 `WAITING_AGENT`；child 终态后由 deferred resolver 原子写回同一 ToolCall、追加工具消息并重新排队 parent，不轮询也不伪造最终结果。
 - 父 Run 取消会级联取消后代；`cancel_agent` 仍是需审批工具。
 
 这些约束解决的不是模型“会不会合作”，而是 Runtime 如何控制递归、资源和恢复。
@@ -1347,7 +1347,7 @@ Profile 不只是一个角色名称，它会影响：
 2. 让恢复后仍能取得同一个结果。
 3. 为 PlanValidator 和最终汇总提供证据入口。
 
-当前 Artifact、Token、状态和失败分类已落地；文件变更、命令和测试的自动归集还需要继续从 ToolCall/Event 生成，不能把预留字段说成已经完全自动化。
+证据归集使用结构化 ToolResult metadata，而非解析 stdout：`write_file` 记录路径、是否变化、前后 SHA-256 和写入字节数；命令记录退出码、超时、shell、cwd 与耗时。测试命令经保守分类，只有最后一次真实 mutation 之后、对应测试族实际通过的测试才可作为 `PASSED` TestEvidence；普通命令和复合 shell 命令的尾部成功不能冒充测试通过。
 
 #### Plan 与委派的衔接
 
@@ -1392,6 +1392,22 @@ Multi-Agent delegation 解决“一次父 Run 如何派生子 Run”，但不能
 Team 根任务进入 `IN_REVIEW` 还需要两个条件：至少一个阶段已交付，并且 Leader 在最后阶段交付之后发布结论评论。只有用户执行 `ACCEPT` 后根任务才进入 `DONE`，此时 Console 才展示最终交付；进行中、阻塞、验收中和取消状态只显示过程文件，不能提前宣称完成。
 
 同一根任务使用稳定 task workspace owner。Leader 的多次唤醒 Run、默认阶段 Run 和委派后代即使位于新 Session，也挂载同一目录，从根因上解决“子任务写了文件但后续 Leader 看不见，继而重复派发”的循环。显式 `workspace_ref` 仍保留独立目录语义；迁移 34 会按 Run 创建顺序归并历史目录，冲突旧版本保存在 `.paicli/workspace-history`，文件归并成功后才更新数据库 owner。
+
+#### ExpertThread 与运行中评论的竞态处理
+
+同一专家在同一根任务中的连续工作由 `ExpertThread` 表示，而不是复活旧 Run。唯一键是 `root_task_id + agent_profile_id + thread_role`：终态 Run 后续再执行时创建新的 Session/Run 并以事务方式挂到原线程。真正 Team Leader 使用 `LEADER`（任务级 `TaskDigest`）；团队专家和单 Agent 的被指派 Agent 使用 `EXPERT`，其新 Run 仅获得 `<expert_thread_resume>` 紧凑摘要。
+
+摘要只带该专家可审计的阶段归属、该 Run 的 Delivery Manifest 文件、Artifact/测试引用、阻塞和最新人工指令；不带完整历史、ToolResult 正文、Artifact 正文或 reasoning，也不会把共享工作区中其他专家的文件误归属过来。Run 删除时同步移除线程绑定并重选 `latest_run_id`，避免后续摘要引用已删除内容。
+
+模型生成最终回答期间若收到新评论，系统以 `PreparedContext.maxMessageSequence` 与提交时的 active sequence 在同一 SQLite 事务中比较：有新输入时不完成，旧回答作为 `archived=1` 审计消息保存并重新入队。上下文、摘要、`get_agent_result` 和 Memory 提取均只消费 `archived=0` 的 active 消息；评论在投递时也会事务内复查 Run 活跃性，若已终态则回退创建新的幂等 Trigger/Run。
+
+### 16.8 PRD Analysis Agent：固定质量流程与并行节点 Harness
+
+PRD Analysis Agent 不把开放式分析压成固定细节 Workflow，而只固定 `map_prd → dispatch → merge → probe → clarify → handoff` 六个质量阶段。Markdown 标题/层级/行号由 Runtime 确定性切分，节点按父级依赖分批、最多 8 路并行；每个节点拥有独立模型请求，只接收本节点、数据源摘要和直接依赖摘要。
+
+模型通过 `submit_node_result` Function Calling 提交实体、规则、流程、条件矩阵、假设和预测对账。Runtime 先把参数写入带唯一幂等键的 `prd_analysis_actions`，再在事务内分配全局 E/R/F ID、重写局部引用并完成节点；重启时复用首次参数。Probe 只做重复项、条件矩阵、孤立字段等机械检查，语义歧义持久化等待人工回答；Handoff Gate 要求全部节点完成、P0 清零、Probe 通过和设计索引有效。
+
+面试表述：*“模型负责理解节点，Runtime 负责切分、调度、持久化、验证和交付门禁；并行结果不直接写同一文件，而是结构化提交后统一编号、原子渲染。”*
 
 ## 17. Plan 与类型化 Graph Runtime
 
@@ -2213,7 +2229,7 @@ WAL 改善并发，不会把 SQLite 变成多节点数据库。高写入规模�
 
 #### 迁移策略和兼容
 
-当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。当前迁移版本为 1–34：1–27 覆盖基础 Runtime、Plan/Graph、专家团队、Delegation Graph、Memory/RAG、Context Harness 和多 Shell；28 增强 AgentTeam 路由、有效并发和协作评测；29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision；30 增加幂等事件触发和阶段屏障；31 在协作 Run 树执行团队有效并发；32 关闭终态 Run 遗留审批；33 修复仍有活跃阶段 Run 却错误进入 `IN_REVIEW` 的历史任务；34 归并根任务工作区并启用交付证据门禁。
+当前 Schema 通过 `CREATE TABLE IF NOT EXISTS`、`ensureColumn()` 和幂等数据修复推进，并在 `schema_migrations` 记录版本。当前迁移版本为 1–40：1–27 覆盖基础 Runtime、Plan/Graph、专家团队、Delegation Graph、Memory/RAG、Context Harness 和多 Shell；28 增强 AgentTeam 路由、有效并发和协作评测；29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision；30 增加幂等事件触发和阶段屏障；31 在协作 Run 树执行团队有效并发；32 关闭终态 Run 遗留审批；33 修复仍有活跃阶段 Run 却错误进入 `IN_REVIEW` 的历史任务；34 归并根任务工作区并启用交付证据门禁；35 增加轻量 WorkingPlan；36 增加持久化 Run 反思；37 增加任务摘要、Delivery Manifest 和验收快照；38 增加 ExpertThread 及线程—Run 绑定；39 增加 Completion Contract、结构化工具证据与 deferred 外部等待恢复状态；40 增加 PRD Analysis Job/Node/Action/Item/Clarification/Event。
 
 例如旧 `plan_edges` 会兼容为 `DEPENDENCY + ON_SUCCESS`；旧 Baseline Token 口径保留 `TOTAL` 标志，避免升级后把历史数据错误解释为 output Token。
 
@@ -2862,3 +2878,12 @@ Harness 负责：Observe + Evaluate + 状态持久化 + 安全边界
 1. **验证成本**：CompletionVerifier 用确定性规则（工作区文件变化、测试命令结果）而不是关键词重叠判断完成，避免“回答里出现相关词就算完成”；代价是写任务必须真的产生证据。
 2. **反思成本**：反思只由失败触发，且先用确定性规则分类（TEST_FAILURE/TOOL_ERROR/DUPLICATE_CALL/VERIFICATION_FAILURE），避免每轮多一次模型调用。
 3. **并行安全**：只读并行 + 写串行 + 审批屏障 + 工作区冲突检测，让“更快”不牺牲“可恢复、可审计、不互相覆盖”。
+
+### G. 2026-08-09：Completion Contract、真实证据与连续协作
+
+- `WorkingPlan` 是 Run 内的轻量工作清单，不是 Formal Plan：仅在多步、失败恢复、补充要求或方向变化时由模型更新；简单问答/单步任务不强制创建。业务 Tool allowlist 非空时仍只额外保留 `update_working_plan`，不放开其他核心工具。
+- `CompletionContractService` 从委派信封、PlanStep、保守任务分类和可信 WorkingPlan completion 推导 `TEXT_ONLY`、`MUTATION_REQUIRED`、`TEST_REQUIRED`、`MUTATION_AND_TEST`。合同只可加强；`RunVerificationService` 以合同和 `RunEvidence` 判定完成，要求测试时必须是最后一次真实变更后的对应测试族通过。
+- 结构化 metadata 取代 stdout 猜测：写文件保存变化标识、前后 hash 和字节数，命令保存退出码、超时、shell、cwd 与耗时。测试分类器拒绝编译、伪测试、跳过/仅收集/仅编译以及复合命令产生的假阳性。
+- `AgentResultService`、`AgentResultValidator`、`DeliveryManifestService` 消费同一证据源。委派时的 `done_criteria` 在 `get_agent_result` 中按项返回：显式且非空 `criterion_evidence` 才是 `EVIDENCED`，否则 `UNVERIFIED`；绝不通过摘要关键词伪造业务验收。
+
+面试表述：*“模型可提出计划和结论，但完成必须满足服务端持久化的合同，并由工具、工作区、测试和 Artifact 形成的真实证据验证；同一专家的续作只接收可审计的紧凑摘要，旧回答不会混入下一轮决策。”*

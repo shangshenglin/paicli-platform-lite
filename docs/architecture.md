@@ -94,6 +94,16 @@ Planner 调用现有 `ModelClient` 生成结构化 JSON。Server 会清理 Markd
 
 本阶段已提供 `/v1/plans`、`/v1/plans/generate`、`/v1/plans/{id}/approve|start|dispatch|cancel|replan`、`/v1/plans/{id}/steps|events|jobs|validation-checks`、`/v1/plans/{id}/dag/batches`、`/v1/plan-steps/{id}/retry|skip` 和 `/v1/async-jobs`。Read-only DAG 仍提供批次分析；执行侧已经具备资源读写集冲突控制、内部 Session 隔离和 workspace 引用，Lite 版暂不自动执行真实 Git worktree merge。
 
+## PRD Analysis Agent
+
+PRD Analysis 是普通 ReAct Run 之外的专项 Harness，但继续复用同一个 `ModelClient`、SQLite、受控数据根和单机 Worker。它固定的是质量阶段，不是阶段内部的语义结论：`MAP_PRD → DISPATCH → MERGE → PROBE → CLARIFY → HANDOFF` 由 `PrdAnalysisStateMachine` 转换表裁决，非法越级没有代码路径；`PROBE/FIXABLE → MERGE` 与 `CLARIFY/RESOLVED → PROBE` 是受控回路。每个阶段完成后 Job 先落库为 `QUEUED + nextStage`，下次 Worker 领取再执行；进程中断时 `RUNNING` Job 回到原阶段 `QUEUED`，不会从头猜测。
+
+迁移 40 增加六组持久化事实：`prd_analysis_jobs` 保存输入、配置、阶段、状态和受控产物目录；`prd_analysis_nodes` 保存确定性标题/行号边界、依赖和子代理结果；`prd_analysis_actions` 保存模型 Function Calling 参数、幂等键和执行状态；`prd_analysis_items` 保存事务内分配的全局实体/规则/流程 ID；`prd_analysis_clarifications` 与 `prd_analysis_events` 保存人工回路和时间线。节点结构动作遵循“先持久化、后执行”：同一 `job + node + submit_node_result` 幂等键只保留首次参数，提交事务分配全局 `E/R/F` 序号、重写局部引用、写节点结果/条目、完成 Action 并追加事件；崩溃后优先复用 `REQUESTED` Action，不重新请求模型生成参数。
+
+`PrdNodeMapper` 以 Markdown 标题层级和行号确定性切分，父标题成为直接依赖。Dispatch 只选择依赖已完成的节点，同批最多 8 个；每个节点建立独立模型请求，只注入节点原文、数据源契约摘要和直接依赖摘要，主 Job 只消费实体/规则/问题计数与磁盘产物。模型只暴露当前 Skill 的 `submit_node_result` Schema；六个 Skill 指令和 allowlist 位于 `resources/prd-analysis-skills/`，固定框架进 system prompt，动态状态进入结构化节点上下文。Demo Provider 无结构化返回时使用可追溯、保守的离线提取，确保状态机、恢复和 API 可在没有模型 Key 时验收。
+
+Merge 原子渲染 `domain_analysis.md`、条件矩阵、预测报告和去重后的 `design_index.json`。Probe 不做开放式语义判断，只检查重复项、规则矩阵、未决问题和数据源孤立字段；`AMBIGUOUS` 生成带 fingerprint 的问题并进入 `AWAITING_USER`，回答绑定问题 ID，全部解决后重新 Probe。Handoff Gate 要求所有节点完成、无开放 P0、Probe 通过且设计索引可读取，之后生成 `handoff_manifest.json`。所有产物仅能从 `data/prd-analysis/{jobId}/output` 的固定白名单读取，API 不能用任意路径下载宿主机文件。
+
 ## Plan 与 Multi-Agent 协同
 
 Plan 负责“任务如何拆、依赖如何排、每步如何验收”；Multi-Agent 负责“某个步骤是否需要委派给专家 Run”。二者之间通过持久化字段衔接，而不是靠对话文本约定。

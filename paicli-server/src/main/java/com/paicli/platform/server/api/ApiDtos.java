@@ -6,6 +6,9 @@ import jakarta.validation.constraints.Size;
 import com.paicli.platform.common.ApprovalStatus;
 import java.util.List;
 import java.util.Map;
+import com.fasterxml.jackson.databind.JsonNode;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 
 final class ApiDtos {
     private ApiDtos() { }
@@ -137,6 +140,13 @@ final class ApiDtos {
 
     record ImportSkillRequest(@NotBlank String projectKey, @NotBlank String gitUrl,
                               String name, String ref, Boolean global) { }
+
+    record CreatePrdAnalysisRequest(@NotBlank String projectKey, @NotBlank String title,
+                                    @NotBlank @Size(max = 2_000_000) String prdText,
+                                    JsonNode sourceContract,
+                                    @Min(1) @Max(8) Integer maxParallel) { }
+
+    record ResolvePrdClarificationRequest(@NotBlank @Size(max = 8_000) String answer) { }
 
     record ErrorResponse(String error, String message) { }
 }
