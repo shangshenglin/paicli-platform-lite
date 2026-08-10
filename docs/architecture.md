@@ -91,7 +91,7 @@ Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService（`/star
 
 关键边界：
 
-- **DB 是事实来源**：状态推进只依据 SQLite（`prd_analysis_runs` 绑定 + Run 终态重新计算），Worker 轮询恢复，不依赖 terminal Event。
+- **DB 是事实来源**：状态推进只依据 SQLite（`prd_analysis_runs` 绑定 + Run 终态重新计算），Worker 轮询恢复，不依赖 terminal Event；ANALYZING 每轮先刷新全部既有 Node Run，再按刷新后的持久化状态计算 READY，避免依赖节点本轮完成却被误判 dependency deadlock。
 - **删除边界**：仅无活跃 Run 的 PRD task 可以永久删除；先删除已打包 Artifact，再由 task 外键级联清理 source/chunk/node/finding/question/check/run binding，活跃任务必须先取消。
 - **计划不编排流程**：Plan 只用于「分析完成后的实施计划交接」（`PrdAnalysisPlanHandoffService` 复用 PlanService），不承担 PRD 内部阶段编排。
 - **后端绑定权限**：`prd_*` 工具从当前 RunId 反查 `prd_analysis_runs` 的 purpose/task/node 绑定，Mapper/Node/Reconciler 不能越权。

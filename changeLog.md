@@ -2,6 +2,12 @@
 
 ## 2026-08-10
 
+### PRD Analysis Agent：同轮依赖完成的误死锁修复
+
+- 变更：ANALYZING 改为先刷新所有既有 Node Run，再从 SQLite 重新读取节点并统一计算 READY；依赖节点在同一次 `advance()` 后半段完成时，其后继节点会在该轮被调度，不再沿用遍历早期的未就绪快照并错误标记 dependency graph deadlock。
+- 思路：真实「营运设备上门维修流程」任务中，`objects` 节点排在其依赖 `core-flow` 之前；旧实现先检查 `objects`、后完成 `core-flow`，随后直接执行无进展判定，导致 14/15 节点完成仍 FAILED。死锁判断必须建立在同轮 Run 刷新后的 DB 状态上。
+- 验证：新增 Coordinator 回归，覆盖后继节点先于依赖节点排序、依赖在同轮完成后仍会调度后继节点；`mvn test -pl paicli-server -am -Dtest=PrdAnalysisCoordinatorTest` 通过 7 项，`git diff --check` 通过。API、配置、Sandbox、阶段范围与产品站不适用；README 和架构说明已同步。
+
 ### PRD Analysis Agent：任务删除
 
 - 变更：新增 `DELETE /v1/prd-analysis/tasks/{taskId}`；后端会拒绝仍有活跃 Run 的任务，先删除该任务已打包的 Artifact，再通过 SQLite 外键级联清理 task/source/chunk/node/dependency/finding/evidence/question/check/run binding。Console 列表与详情为 DRAFT、FAILED、CANCELED、COMPLETED 任务提供带不可恢复提示的删除按钮。

@@ -107,7 +107,6 @@ public class PrdAnalysisCoordinator {
             return;
         }
         int running = 0;
-        java.util.Set<String> readyIds = new java.util.HashSet<>();
         for (PrdAnalysisStore.PrdNode node : nodes) {
             PrdAnalysisStore.PrdRunBinding binding = store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id())
                     .orElse(null);
@@ -139,17 +138,27 @@ public class PrdAnalysisCoordinator {
                 }
                 running++;
             } else {
-                if ("COMPLETED".equals(node.status())) continue;
-                if (store.nodeReady(task.id(), node.id())) {
-                    store.updateNodeStatus(node.id(), "READY");
-                    readyIds.add(node.id());
-                }
+                // Readiness is evaluated after all existing bindings have been refreshed.
+            }
+        }
+        // Refreshing an earlier dependency can make a node listed before it ready in this same advance.
+        // Re-read durable node state before scheduling so the deadlock check never uses that stale snapshot.
+        List<PrdAnalysisStore.PrdNode> currentNodes = store.nodes(task.id());
+        java.util.Set<String> readyIds = new java.util.HashSet<>();
+        for (PrdAnalysisStore.PrdNode node : currentNodes) {
+            if ("COMPLETED".equals(node.status())
+                    || store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id()).isPresent()) {
+                continue;
+            }
+            if (store.nodeReady(task.id(), node.id())) {
+                store.updateNodeStatus(node.id(), "READY");
+                readyIds.add(node.id());
             }
         }
         int scheduled = 0;
         int slots = Math.max(0, task.maxParallelism() - running);
         if (slots > 0) {
-            for (PrdAnalysisStore.PrdNode node : nodes) {
+            for (PrdAnalysisStore.PrdNode node : currentNodes) {
                 if (slots <= 0) break;
                 if (readyIds.contains(node.id()) || "READY".equals(node.status())) {
                     boolean bound = store.latestRunBinding(task.id(), "NODE_ANALYSIS", node.id()).isPresent();

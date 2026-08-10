@@ -527,7 +527,7 @@ Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终
 - **复用而非重建**：Mapper / Node Analyst / Reconciler 都是普通内部 Session + 普通 Run，走现有 RunProcessor / ContextManager / ToolCall / Budget / Artifact / Recovery；未新增第二套 AgentLoop / Subagent Runtime。大 Tool Result 被物化为 Artifact 后，三个 PRD Profile 都允许使用 `read_artifact` 继续读取。
 - **结构化工具提交**：`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation` 粗粒度、幂等（run+toolCallId 去重）、事务提交；finding/evidence/question 的 ID 全部由 Server 生成，Markdown 不是事实来源。
 - **后端权限**：11 个 `prd_*` 工具按 `prd_analysis_runs` 绑定校验角色（Mapper/Node/Reconciler）与 nodeId，禁止越权读取或提交。
-- **确定性调度**：节点依赖满足才 READY，受 `maxParallelism` 与全局上限约束；全部节点完成后 barrier 只创建一次 Reconciler Run。
+- **确定性调度**：节点依赖满足才 READY，受 `maxParallelism` 与全局上限约束；每轮先刷新所有既有 Node Run，再统一计算 READY，避免本轮后半段完成的依赖触发误判死锁；全部节点完成后 barrier 只创建一次 Reconciler Run。
 - **确定性校验**：`PrdAnalysisValidator` 为纯 Java 的 8 项检查；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（字段缺失、规则互斥）进入 WAITING_USER。用户回答后若 Reconciler 没有将 Blocking 问题置为 RESOLVED，也最多再执行 2 轮，随后明确失败，避免无限模型循环。
 - **产物与交接**：`analysis.md` / `domain_model.json` / `traceability_matrix.json` / `validation_report.json` / `questions.json` 写入 Artifact Store；基于完成结果可复用 PlanService 生成实施 Plan。
 - **Skill 与工具隔离**：3 个内置 PRD Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`）启动种子到 data/skills；仅三个 `templateKey=system.prd` Profile 将其 `skillNamesJson` 作为 required skill 全文注入 system 前缀，普通 Profile 的 skill 列表仍只是按需可加载索引。PRD Profile 不会隐式扩展 Plan、协作或 WorkingPlan 工具，只能看到其显式白名单，且 Node 的 `prd_search_sources` 也受后端 Run binding 校验。

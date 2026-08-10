@@ -158,6 +158,47 @@ class PrdAnalysisCoordinatorTest {
     }
 
     @Test
+    void schedulesNodeWhoseDependencyCompletesLaterInTheSameAdvance() throws Exception {
+        Harness harness = harness();
+        var task = harness.store.createTask("project-a", "T", "USER", 2, "session-1");
+        harness.skills.ensureProfiles("project-a");
+        var source = harness.store.insertSource(task.id(), "a1", "PRD", "prd.md", "h", "COMPLETED", null);
+        harness.store.insertChunks(source.id(), List.of(
+                new PrdAnalysisStore.ChunkDraft(0, null, 0, 30, "Order creation flow.", "c")));
+        harness.store.updateTaskStatus(task.id(), "MAPPING", null);
+        harness.coordinator.advance(task.id());
+        var map = harness.store.latestRunBinding(task.id(), "MAP", null).orElseThrow();
+        harness.store.submitMap(task.id(), map.id(), "tc-map", mapper.writeValueAsString(Map.of(
+                "nodes", List.of(
+                        Map.of("clientKey", "dependent", "title", "Dependent", "sourceId", source.id(),
+                                "startChunkOrdinal", 0, "endChunkOrdinal", 0),
+                        Map.of("clientKey", "dependency", "title", "Dependency", "sourceId", source.id(),
+                                "startChunkOrdinal", 0, "endChunkOrdinal", 0)),
+                "dependencies", List.of(Map.of("fromClientKey", "dependency", "toClientKey", "dependent")))));
+        harness.runtime.completeRun(map.runId());
+        harness.coordinator.advance(task.id()); // -> ANALYZING
+        harness.coordinator.advance(task.id()); // dispatch dependency only
+
+        var dependency = harness.store.nodes(task.id()).stream()
+                .filter(node -> node.clientKey().equals("dependency")).findFirst().orElseThrow();
+        var dependent = harness.store.nodes(task.id()).stream()
+                .filter(node -> node.clientKey().equals("dependent")).findFirst().orElseThrow();
+        var binding = harness.store.latestRunBinding(task.id(), "NODE_ANALYSIS", dependency.id()).orElseThrow();
+        String chunkId = harness.store.allChunks(source.id()).get(0).id();
+        harness.store.submitNodeAnalysis(task.id(), binding.id(), dependency.id(), "tc-dependency",
+                mapper.writeValueAsString(Map.of("findings", List.of(Map.of(
+                        "type", "ENTITY", "name", "Dependency", "summary", "done",
+                        "evidence", List.of(Map.of("chunkId", chunkId, "start", 0, "end", 5)))))));
+        harness.runtime.completeRun(binding.runId());
+
+        harness.coordinator.advance(task.id());
+        assertThat(harness.store.task(task.id())).get().extracting("status", "currentStage")
+                .containsExactly("ANALYZING", "ANALYZING");
+        assertThat(harness.store.latestRunBinding(task.id(), "NODE_ANALYSIS", dependent.id())).isPresent();
+        assertThat(harness.store.node(dependent.id())).get().extracting("status").isEqualTo("RUNNING");
+    }
+
+    @Test
     void blockingQuestionMovesToWaitingUserThenResumesAfterAnswer() throws Exception {
         Harness harness = harness();
         var task = harness.store.createTask("project-a", "T", "USER", 4, "session-1");
