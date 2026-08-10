@@ -2,55 +2,15 @@
 
 ## 2026-08-10
 
-### PRD Analysis Agent：Run 对话详情
+### 撤回 PRD Analysis Agent
 
-- 变更：PRD 详情的 Runs 标签中，每条 Mapper、Node Analyst、Reconciler Run 都新增「对话详情」按钮，复用既有 `/v1/runs/{runId}/audit` 与 Run Audit Dialog 展示模型输出、工具调用、审批、事件和所属 Session，不复制或另存模型消息。
-- 思路：PRD Run 本身就是普通 Managed Run，已有审计接口和展示能力；直接复用可保持 ToolCall/消息的单一事实来源，并让失败节点的实际对话可追溯。
-- 验证：`node --check paicli-server/src/main/resources/static/app.js` 通过；真实 Node Run 的 `/v1/runs/{runId}/audit` 返回 7 条消息、3 次 ToolCall 与事件，`git diff --check` 通过。后端 API、数据库、配置、Sandbox、架构边界和产品站未变；README 已同步，其他运行文档不适用。
+- 变更：按确认范围移除 PRD Analysis Agent 的后端 API、调度器、Store、工具、配置、种子 Skill 模板、Console 页面和测试；README、架构及阶段说明同步回退。已删除本地数据库中的 PRD 任务、来源、分块、节点、问题、校验、运行绑定、产物索引与内部运行会话，并物理移除 10 张 PRD 表、40/41 迁移记录、3 个专用 Profile 与 3 个本地 Skill 模板目录；保留用户原始上传会话及其他既有功能数据。
+- 思路：该能力整体废弃，使用提交级回退恢复到引入 PRD 垂直切片前的代码边界，避免仅隐藏入口而遗留可调用 API 或后台 Worker。
+- 验证：数据库 PRD 业务记录与内部会话计数均为 0，`PRAGMA foreign_key_check` 通过；`node --check paicli-server/src/main/resources/static/app.js` 与 `git diff --check` 通过。Maven 回归未能完成：全量 `mvnw.cmd test` 在 124 秒内无输出而超时，随后 Wrapper 报 `Cannot start maven from wrapper`，系统未发现可替代的 `mvn` 命令；未强制停止本地服务或改写 Wrapper。
 
-### PRD Analysis Agent：同轮依赖完成的误死锁修复
-
-- 变更：ANALYZING 改为先刷新所有既有 Node Run，再从 SQLite 重新读取节点并统一计算 READY；依赖节点在同一次 `advance()` 后半段完成时，其后继节点会在该轮被调度，不再沿用遍历早期的未就绪快照并错误标记 dependency graph deadlock。
-- 思路：真实「营运设备上门维修流程」任务中，`objects` 节点排在其依赖 `core-flow` 之前；旧实现先检查 `objects`、后完成 `core-flow`，随后直接执行无进展判定，导致 14/15 节点完成仍 FAILED。死锁判断必须建立在同轮 Run 刷新后的 DB 状态上。
-- 验证：新增 Coordinator 回归，覆盖后继节点先于依赖节点排序、依赖在同轮完成后仍会调度后继节点；`mvn test -pl paicli-server -am -Dtest=PrdAnalysisCoordinatorTest` 通过 7 项，`git diff --check` 通过。API、配置、Sandbox、阶段范围与产品站不适用；README 和架构说明已同步。
-
-### PRD Analysis Agent：任务删除
-
-- 变更：新增 `DELETE /v1/prd-analysis/tasks/{taskId}`；后端会拒绝仍有活跃 Run 的任务，先删除该任务已打包的 Artifact，再通过 SQLite 外键级联清理 task/source/chunk/node/dependency/finding/evidence/question/check/run binding。Console 列表与详情为 DRAFT、FAILED、CANCELED、COMPLETED 任务提供带不可恢复提示的删除按钮。
-- 思路：运行中的任务仍应由取消流程安全收束，不能在 Worker 或 Model Run 执行时物理删除；终态与未启动任务可直接清理，避免 PRD 列表被历史 smoke 任务长期占据。
-- 验证：新增 Store 级联删除回归；`node --check paicli-server/src/main/resources/static/app.js` 与 `mvn test -pl paicli-server -am -Dtest=PrdAnalysisStoreTest`（11 项）通过。完整 `mvn package` 通过，Surefire 报告汇总 330 项、0 failure、0 error、0 skipped，`git diff --check` 通过；`clean package` 因本地正在运行的 Server 锁住 jar 而无法清理，未强制停止用户进程。README/OpenAPI、架构和阶段说明已同步；配置、Sandbox、产品站不适用。
+本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
 ## 2026-08-09
-
-### PRD Analysis Agent：已回答 Blocking 问题的 Reconcile 循环上限
-
-- 变更：`WAITING_USER` 在没有 `OPEN` Blocking 问题、但仍有 `ANSWERED` 未闭环问题时，复用 `reconcileIteration` 和 `MAX_RECONCILE_ITERATIONS` 计数后才创建新的 Reconcile Run；达到上限时明确标记任务 FAILED，不再无限消耗模型 Token。已经全部 RESOLVED 的场景不会额外创建 Run。
-- 思路：用户答案解除的是人工等待，不等于 Reconciler 已把业务事实应用到最终模型；因此必须继续以 `countUnresolvedBlocking` 为完成门槛，同时为模型漏填 `resolvedQuestionIds` 设置与现有 FIXABLE 回流一致的持久化上限。
-- 验证：新增 Coordinator 回归，覆盖 ANSWERED Blocking 在两轮未 RESOLVED 的 Reconcile 后进入 FAILED，避免无限循环；聚焦 Coordinator + Harness 回归通过 8 项，完整 `clean package` 完成，Surefire 报告汇总 329 项、0 failure、0 error、0 skipped，`git diff --check` 通过。本次不改变 REST/OpenAPI、配置、Sandbox、阶段范围或产品站，相关文档不适用；README 与架构状态机说明已同步。
-
-### PRD Analysis Agent MVP 五项稳定性修复
-
-- 变更：Coordinator 的 Node retry 死锁判定改为读取 SQLite 中持久化的 `RUNNING` 节点数，避免同一次 `advance()` 中创建 attempt=1 后仍按局部计数把任务误判失败；`/start` 现在只将 DRAFT 任务持久化为 `INGESTING` 并立即返回，附件提取完全由 PRD Worker 异步推进。
-- 变更：系统 PRD Mapper、Node Analyst、Reconciler Profile 均包含 `read_artifact`，使大 Tool Result 外置后仍可续读；新增内部 `allChunks` 分页遍历，搜索、合同校验和 chunk 统计不再被工具分页上限 100 静默截断，模型侧 `prd_list_source_chunks` 保持分页。
-- 变更：新增 `countUnresolvedBlocking`，将 `OPEN` 与 `ANSWERED` 的 Blocking 问题都视为未闭环；WAITING_USER 仍只等待 OPEN 问题，而 Validator 与 Plan Handoff 必须等待 Reconciler 置为 `RESOLVED` 才允许完成或生成实施计划。OpenAPI、README、架构与阶段说明同步标明异步启动和上述边界。
-- 思路：本次严格收敛为 MVP 真实流程的五个确定性故障点，不扩展 ToolRouter 硬白名单、动态 Plan 或生产级边界重构；DB 仍是业务状态机正确性来源。
-- 验证：新增/强化 Node retry（attempt=1 成功后进入 RECONCILING）及 Scripted Model Golden Path，后者经 `RunProcessor → ToolCall → ToolRouter → PrdAnalysisToolProvider → Validator → Renderer` 完成并产出 5 个 Artifact；聚焦 PRD 回归通过 17 项。完整 `clean test` 与 `clean package` 均完成，Surefire 报告汇总 328 项、0 failure、0 error、0 skipped，两个可执行 jar 均已生成；`git diff --check` 通过。Sandbox、配置、产品站均未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
-
-### PRD Analysis Agent 可靠性门禁修复（R0–R3）
-
-- 变更：Console 将 `app.js` 移到 PRD Dialog 之后加载，新增缺失的 `openPrdDetail`，并把 PRD 状态提示改为独立的 `setPrdFormStatus`，不再覆盖其他表单的全局 `setFormError`。
-- 变更：Node Run 首次失败会创建 attempt=1 的普通 Managed Run，达到上限才失败；Mapper 提交会拒绝依赖环，Coordinator 对无 READY/RUNNING 的未完成依赖图显式失败，避免 ANALYZING 卡死。
-- 变更：三个 `prd_submit_*` 操作在同一个 SQLite 事务内串行检查 submission marker、写业务数据和持久化 submission 结果；摄入改为“替换 chunks + 更新 source 状态”同事务，迁移 41 增加 `(source_id, ordinal)` 与 `(task_id, client_key)` 唯一性约束并清理历史重复行。
-- 变更：只有内置 `system.prd` Profile 将 Skill 列表作为 required 全文注入，普通 Profile 恢复按需 Skill 语义；PRD Profile 不再隐式扩展 Plan/协作/WorkingPlan 工具，Node 的 `prd_search_sources` 补回后端 binding 权限校验；修正 required Skill 被重复计入 Context token 预算。
-- 验证：新增前端脚本顺序、Node 自动重试、Mapper DAG cycle、摄入替换原子性和 PRD 严格工具白名单回归；`.\mvnw.cmd test -pl paicli-server -am -Dtest=PrdAnalysisStoreTest,PrdAnalysisCoordinatorTest,ContextManagerTest,WebSecurityIntegrationTest` 通过 42 项，`node --check` 通过。全量 `.\mvnw.cmd clean test` 与 `.\mvnw.cmd clean package` 也均通过：common 3 + server 320 + sandbox 4，共 327 项零失败。API 路径、请求和响应未变，因此 OpenAPI 无需改动；运行架构、迁移、阶段与 Console 行为已同步 README、`docs/architecture.md`、`docs/phases.md`。Sandbox、配置和产品站未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
-
-### PRD Analysis Agent 复审重构：移除独立 Runtime，回归 PaiCLI Managed Run Harness
-
-- 变更：基于最新 `master` 撤销 `PrdAnalysisEngine + ModelClient + TaskExecutor + prd_analysis_actions + AtomicFileWriter` 的独立执行链，改为 `PrdAnalysisCoordinator` 只维护业务状态；Mapper、Node Analyst、Reconciler 均创建普通持久化 Run，由现有 `RunProcessor / ContextManager / ToolCatalog / ToolRouter` 执行，三个结构化提交统一落到 `PrdAnalysisToolProvider` 和普通 `tool_calls` 生命周期。
-- 变更：恢复附件摄入与快照分块、迁移 40 的 source/chunk/node/dependency/finding/evidence/question/check/run binding 模型、Java Validator 的有限 FIXABLE 回流、用户回答后重新 RECONCILING、ArtifactStore 五类标准产物、PlanService Handoff、Console 独立入口、Micrometer 指标与过期 claim 恢复；删除格式失败时伪造业务事实的 fallback 路径。
-- 变更：修复内置 PRD Profile 的跨项目解析。启动种子仍只创建一套 `system.prd.mapper/node-analyst/reconciler`，但仅 `templateKey=system.prd` 可被其他项目复用；普通用户 Profile 继续严格项目隔离。恢复 Windows Maven Wrapper 对普通目录空 `Target` 的兼容判断，并同步 Console 静态资源版本安全测试。
-- 思路：PRD 层只拥有可审计业务状态和确定性门禁，不拥有第二套 Agent Loop、ToolCall、并发模型或 Artifact 文件协议；模型失败必须由普通 Run 重试/失败暴露，不能用正则或默认实体掩盖。数据库迁移号顺延到 40，避免与 ExpertThread 迁移 38、Completion Contract 迁移 39 冲突。
-- 验证：新增 `PrdAnalysisHarnessIntegrationTest`，用 Scripted Model 真实贯通 Profile/required Skill/RunProcessor/普通 ToolCall/PrdAnalysisToolProvider，并验证 providerCallId 与内部 ToolCall ID 的持久化边界；新增跨项目内置 Profile、同模板伪装 Profile 与普通 Profile 的隔离测试。`node --check paicli-server/src/main/resources/static/app.js`、全量 `.\mvnw.cmd clean test` 与 `.\mvnw.cmd clean package` 均通过；每轮 common 3 + server 316 + sandbox 4，共 323 项测试零失败，`git diff --check` 通过。API/运行架构/阶段/配置与 Console 已同步 README、OpenAPI、`docs/architecture.md`、`docs/phases.md`、`.env.example`；Sandbox 与产品站行为未改变，`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用。
 
 ### 技术架构与面试材料同步：远端 master 协作连续性与 Harness 证据闭环
 
@@ -142,27 +102,6 @@
 - 变更：任务处于 IN_REVIEW（待验收）且存在失败 Run 时，执行层提示文案改为“存在失败的执行（可查看协作动态原因），但阶段交付已就绪；请核验后验收或带原因要求返工”，不再声称“Leader 已形成最终结论”。
 - 思路：真实案例中 Leader Run 因部署期缺失 prompts/base.md 资源而失败（旧运行实例类路径无该资源；重建并重启后的实例已具备），根任务按“失败但阶段已交付”回到待验收；用户重启后发现该 Run 仍显示“TRIGGERED · 失败”且任务状态不变，误以为没有恢复。TRIGGERED 只是 Task-Run 关联关系，真实状态是 FAILED（终态），待验收本就等待人工 ACCEPT，重启不会自动改变；本次仅修正前端展示，让失败原因与可执行动作一目了然。
 - 验证：`node --check app.js` 通过，`git diff --check` 通过；纯前端展示变更，未改后端状态机与数据库（无相关 Java 测试），README 执行层说明已同步。
-### 新增：PRD Analysis Agent（业务 Agent 垂直切片，阶段 1–10）
-
-- 变更：落地第一个真正的业务 Agent——PRD 分析。Console 新增独立「PRD 分析」入口：上传 PRD（可选接口/数据契约、补充文档）创建任务，Java 确定性状态机 INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED（FAILED/CANCELED 终态），服务重启后由 `PrdAnalysisWorkerCoordinator` 按 SQLite 当前状态恢复推进。
-- 变更：启动种子对 SQLite 瞬时繁忙（SQLITE_BUSY）做有限重试且失败不阻断启动；Profile 仍由协调器在创建首个 PRD Run 前懒加载重试，避免「无法启动 / 无法新建 PRD 流程」。
-- 变更：迁移 40 新增 10 张表（`prd_analysis_tasks`/`sources`/`source_chunks`/`nodes`/`node_dependencies`/`findings`/`evidence`/`questions`/`checks`/`runs`）；`PrdAnalysisStore` 提供粗粒度幂等提交（`prd_submit_map` / `prd_submit_node_analysis` / `prd_submit_reconciliation`，按 run+toolCallId 去重），全部结构化写入走现有 ToolCall 生命周期，finding 等 ID 全部由 Server 生成。
-- 变更：新增 11 个 PRD 工具（`prd_get_task_context`/`prd_list_source_chunks`/`prd_read_node`/`prd_search_sources`/`prd_get_dependency_summaries`/`prd_get_findings`/`prd_get_open_questions`/`prd_get_validation_report`/`prd_submit_map`/`prd_submit_node_analysis`/`prd_submit_reconciliation`），工具权限以后端 `prd_analysis_runs` 绑定为准（Mapper/Node/Reconciler 角色与 nodeId 绑定校验，禁止越权）。
-- 变更：新增 3 个系统 Agent Profile（`system.prd.mapper` / `system.prd.node-analyst` / `system.prd.reconciler`，工具白名单 + required skill）与 3 个内置 Skill（`prd-map` / `prd-node-analyze` / `prd-reconcile`，classpath 资源启动种子到 data/skills）；`ContextManager` 按 Agent Profile 的 `skillNamesJson` 把 required skill 全文注入 system 前缀（无 required skill 的普通 Run 行为不变）。
-- 变更：节点由 Java 确定性并行调度（依赖满足才 READY，受 `maxParallelism` 与全局上限约束），全部节点完成后 barrier 只创建一次 Reconciler Run；Reconciler 接收结构化 findings/glossary/open questions/上一轮校验报告/用户 answers。
-- 变更：`PrdAnalysisValidator` 为纯 Java 的 8 项确定性校验（证据完整性、引用完整性、重复实体、字段映射、规则冲突、状态转换、阻塞问题、节点完成）；FIXABLE（如重复实体）自动回流 RECONCILING（最多 2 轮），AMBIGUOUS（如字段缺失、规则互斥）进入 WAITING_USER，用户批量回答后自动继续。
-- 变更：`PrdAnalysisRenderer` 从 DB 生成 5 类产物并写入现有 Artifact Store（`analysis.md`、`domain_model.json`、`traceability_matrix.json`、`validation_report.json`、`questions.json`）；`PrdAnalysisPlanHandoffService` 基于 domain model 确定性生成实施 Plan（复用 PlanService，不直接写 Plan Store）。
-- 变更：复用既有 Harness——RunProcessor/ContextManager/ModelClient/ToolCatalog/ServerToolProvider/Agent Profile/Skill/Child Run/Usage/Budget/Artifact/Recovery/PlanService，未新增第二套 AgentLoop/ToolCall/Subagent Runtime；Maven 编译期把 `SqliteConnectionFactory` 公开为跨包 Store 复用。
-- 变更：Micrometer 指标 `paicli.prd.tasks.started/completed/failed`、`paicli.prd.nodes.failed`、`paicli.prd.validation.failures`、`paicli.prd.questions.blocking`、`paicli.prd.stage.duration`（Token 不重复统计，仍由绑定 Run 的 model_usage 汇总）。
-- 验证：新增 6 个测试类共 22 项（`PrdAnalysisStoreTest`、`PrdAnalysisToolProviderTest`、`PrdAnalysisCoordinatorTest`（全链路 + barrier + 澄清恢复）、`PrdAnalysisValidatorTest`、`PrdAnalysisRendererTest`、`PrdAnalysisPlanHandoffServiceTest`、`PrdAnalysisEvaluationTest`），覆盖持久化/幂等/权限/并发/恢复/确定性校验/澄清/产物/Plan Handoff，全部通过；`node --check app.js` 通过。数据库迁移 40 与 OpenAPI（`PrdAnalysisController` @Operation）已同步，`README.md`、`docs/architecture.md`、`docs/phases.md` 已更新；`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用（本功能不改变 Sandbox 执行边界，产品站未展示 PRD 分析能力）。
-
-### 修复：Console PRD 分析前端资源缓存导致无法新建/查看详情
-
-- 变更：`index.html` 中 `app.js`/`app.css` 的缓存版本号升级为 `v=20260808-prd-analysis-1`。此前版本号停留在 20260804/20260805，浏览器会继续使用不含 PRD 代码的旧 `app.js`，导致点击「PRD 分析」无响应、无法新建任务、详情页打不开。
-- 变更：修复详情页节点重试传参（`renderPrdNodes` 改用任务级 `taskId`，不再读取节点对象上不存在的 `taskId`）。
-- 思路：前端静态资源用固定版本号做缓存破坏；新增功能后必须同步 bump，否则旧脚本仍在浏览器缓存里。
-- 验证：临时实例冒烟——`GET /` 返回新版本号且含 `prdAnalysis` 按钮；`GET /app.js?v=20260808-prd-analysis-1` 包含 `openPrdAnalysis`/`renderPrdDetail` 与事件绑定；REST 创建/列表/详情接口返回正常结构；`node --check app.js` 通过。
-
 
 ### 修复：阶段“空交付”被误判为已交付 + 失败 Leader 未把已交付任务送回重新验收
 

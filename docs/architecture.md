@@ -73,34 +73,8 @@ PaiCLI Server
 版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
 
 评测中心从效率工作台中抽离为首页一级入口。宽屏使用“套件/报告”双栏布局，套件用例默认折叠，两栏各自限高滚动；窄屏降级为上下两块独立滚动区域。这样套件、Case 和 Trial 增长时不会形成一条无限延长的单列页面。
-## PRD Analysis Agent
 
-PRD 分析是第一个真正复用 Harness 的业务 Agent 垂直切片：业务流程单独实现为 Java 确定性状态机，底层执行完全复用普通 Session/Run/ToolCall/Profile/Skill/Artifact/Plan。
-
-```text
-Console「PRD 分析」→ PrdAnalysisController → PrdAnalysisService（`/start` 仅持久化排队）→ PrdAnalysisWorkerCoordinator → PrdAnalysisCoordinator
-    状态机：INGESTING → MAPPING → ANALYZING → RECONCILING → VERIFYING → WAITING_USER / PACKAGING → COMPLETED
-    ├─ INGESTING   Worker 异步调用 PrdSourceIngestionService（DocumentTextExtractor + StructuredDocumentChunker 快照分块）
-    ├─ MAPPING     Mapper Run（system.prd.mapper + prd-map skill）→ prd_submit_map
-    ├─ ANALYZING   N 个 Node Analyst 业务子 Run（普通 Managed Run，由 prd_analysis_runs 绑定）→ prd_submit_node_analysis
-    ├─ RECONCILING Reconciler Run（system.prd.reconciler + prd-reconcile）→ prd_submit_reconciliation
-    ├─ VERIFYING   PrdAnalysisValidator（Java 8 项确定性校验）→ FIXABLE 回流 / AMBIGUOUS 进入 WAITING_USER
-    ├─ WAITING_USER 用户批量回答 → 重新 RECONCILING（ANSWERED 未被 RESOLVED 时复用 reconcileIteration，最多 2 轮后 FAILED）
-    └─ PACKAGING   PrdAnalysisRenderer → 5 类 Artifact → COMPLETED
-```
-
-关键边界：
-
-- **DB 是事实来源**：状态推进只依据 SQLite（`prd_analysis_runs` 绑定 + Run 终态重新计算），Worker 轮询恢复，不依赖 terminal Event；ANALYZING 每轮先刷新全部既有 Node Run，再按刷新后的持久化状态计算 READY，避免依赖节点本轮完成却被误判 dependency deadlock。
-- **删除边界**：仅无活跃 Run 的 PRD task 可以永久删除；先删除已打包 Artifact，再由 task 外键级联清理 source/chunk/node/finding/question/check/run binding，活跃任务必须先取消。
-- **计划不编排流程**：Plan 只用于「分析完成后的实施计划交接」（`PrdAnalysisPlanHandoffService` 复用 PlanService），不承担 PRD 内部阶段编排。
-- **后端绑定权限**：`prd_*` 工具从当前 RunId 反查 `prd_analysis_runs` 的 purpose/task/node 绑定，Mapper/Node/Reconciler 不能越权。
-- **结构化提交**：模型只通过三个粗粒度 submit 工具提交，全部事务写入；ID 由 Server 生成，Markdown 是派生产物。
-- **确定性校验**：Validator 纯 Java，FIXABLE（重复实体等）自动回流最多 2 轮，AMBIGUOUS（字段缺失/规则互斥）产生 BLOCKING 问题进入 WAITING_USER。
-- **Skill / Tool 隔离**：仅内置 `system.prd` Profile 将 `skillNamesJson` 作为 required skill，由 ContextManager 注入 SKILL.md 全文；普通 Profile 保持按需 Skill 索引。PRD Profile 是严格工具白名单，不隐式附加 Plan、协作或 WorkingPlan 工具；后端仍按 `prd_analysis_runs` purpose/node binding 复核。
-- **系统 Profile 作用域**：只有 `templateKey=system.prd` 的三个内置 Profile 可跨项目解析，避免启动时在 `default` 种子化后其他项目无法创建 Mapper Run；普通 Profile 仍保持项目隔离。
-- **评测**：simple-order fixture + 确定性评分（实体/规则数、指定字段映射、冲突发现、阻塞问题与回答后通过），并以 Scripted Model 真实执行一次 `RunProcessor → ToolCall → PrdAnalysisToolProvider`；LLM Judge 不作硬门禁。
-
+## Plan Runtime 基础
 
 Plan Runtime 是位于普通 ReAct Run 之上的任务层编排边界。它把“计划”从模型文本变成可恢复、可审计、可调度的数据对象，但不替代现有 RunProcessor，也不绕过 ToolCall、Approval、Event、Artifact 和预算链路。
 
@@ -249,7 +223,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 41：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–37 覆盖协作工作区、WorkingPlan、Run 反思和任务摘要/交付清单；38 增加 ExpertThread，39 增加 Completion Contract、结构化工具证据和 Deferred 外部工具调用，40 增加 PRD Analysis 的 10 张业务状态表，41 为 source chunk ordinal 和 task node clientKey 添加唯一性约束。PRD 的 submit 写入和 submission marker、以及摄入分块替换和 source 状态更新均在同一事务内完成；Coordinator 对依赖循环和无进展图明确失败，避免任务无期限停留在 ANALYZING。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 38：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

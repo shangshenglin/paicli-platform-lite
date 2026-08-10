@@ -138,16 +138,5 @@ final class ApiDtos {
     record ImportSkillRequest(@NotBlank String projectKey, @NotBlank String gitUrl,
                               String name, String ref, Boolean global) { }
 
-    record CreatePrdTaskRequest(@NotBlank String sessionId, @NotBlank String projectKey,
-                                 @NotBlank String title, @NotBlank String prdAttachmentId,
-                                 String sourceContractAttachmentId, List<String> supportingAttachmentIds,
-                                 Integer maxParallelism) { }
-
-    record PrdAnswersRequest(@NotNull @Size(min = 1, max = 100) List<PrdAnswerItem> answers) { }
-
-    record PrdAnswerItem(@NotBlank String questionId, @NotBlank String answer) { }
-
-    record PrdPlanRequest(String objective) { }
-
     record ErrorResponse(String error, String message) { }
 }

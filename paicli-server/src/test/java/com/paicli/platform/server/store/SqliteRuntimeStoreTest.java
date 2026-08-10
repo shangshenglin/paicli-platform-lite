@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
         }
     }
 
@@ -772,25 +772,6 @@ class SqliteRuntimeStoreTest {
             executor.shutdownNow();
         }
         assertThat(store.sessions()).hasSize(24);
-    }
-
-    @Test
-    void resolvesOnlyBuiltInPrdProfilesAcrossProjects() throws Exception {
-        store();
-        ProductivityStore productivity = new ProductivityStore(properties());
-        var systemPrd = productivity.saveAgentProfile("system.prd.mapper", "default", "PRD Mapper",
-                "built in", "map", null, "[]", "[]", "", "EXPERT", "MANUAL",
-                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "system.prd", 1);
-        var ordinary = productivity.saveAgentProfile("ordinary-agent", "default", "Ordinary",
-                "project scoped", "work", null, "[]", "[]", "", "EXPERT", "MANUAL",
-                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "", 0);
-        var lookalike = productivity.saveAgentProfile("user-prd-lookalike", "default", "Lookalike",
-                "must remain scoped", "work", null, "[]", "[]", "", "EXPERT", "MANUAL",
-                "PROJECT", "INHERIT", "enabled", "high", "bash", true, "system.prd", 1);
-
-        assertThat(productivity.resolveAgentProfile("another-project", systemPrd.id())).contains(systemPrd);
-        assertThat(productivity.resolveAgentProfile("another-project", ordinary.id())).isEmpty();
-        assertThat(productivity.resolveAgentProfile("another-project", lookalike.id())).isEmpty();
     }
 
     @Test

@@ -92,18 +92,6 @@ public class DocumentAttachmentService {
         }
     }
 
-    /** Reads the stored attachment bytes for a staged or bound document. */
-    public byte[] readBytes(InputAttachmentRecord attachment) {
-        if (attachment == null) throw new IllegalArgumentException("attachment is required");
-        Path source = root.resolve(attachment.relativePath()).normalize();
-        if (!source.startsWith(root)) throw new IllegalArgumentException("attachment path escapes root");
-        try {
-            return Files.readAllBytes(source);
-        } catch (Exception e) {
-            throw new IllegalStateException("failed to read document attachment", e);
-        }
-    }
-
     public static boolean isDocument(InputAttachmentRecord attachment) {
         return attachment != null && !attachment.mimeType().toLowerCase(Locale.ROOT).startsWith("image/");
     }

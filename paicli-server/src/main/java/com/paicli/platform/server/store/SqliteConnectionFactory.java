@@ -9,11 +9,11 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 
-public final class SqliteConnectionFactory {
+final class SqliteConnectionFactory {
     private static final int BUSY_TIMEOUT_MS = 30_000;
     private final String jdbcUrl;
 
-    public SqliteConnectionFactory(Path databasePath) {
+    SqliteConnectionFactory(Path databasePath) {
         this.jdbcUrl = "jdbc:sqlite:" + databasePath.toAbsolutePath().normalize();
     }
 
@@ -28,7 +28,7 @@ public final class SqliteConnectionFactory {
         }
     }
 
-    public Connection open() throws SQLException {
+    Connection open() throws SQLException {
         Connection connection = DriverManager.getConnection(jdbcUrl);
         try {
             if (connection instanceof SQLiteConnection sqliteConnection) {

@@ -167,14 +167,7 @@ public class ProductivityStore {
     public Optional<AgentProfile> resolveAgentProfile(String projectKey, String requestedId) {
         if (blank(requestedId)) return Optional.empty();
         return findAgentProfile(requestedId)
-                .filter(profile -> (profile.projectKey().equals(project(projectKey))
-                        || isBuiltInPrdProfile(profile)) && profile.enabled());
-    }
-
-    private static boolean isBuiltInPrdProfile(AgentProfile profile) {
-        return "default".equals(profile.projectKey())
-                && profile.id().startsWith("system.prd.")
-                && "system.prd".equals(profile.templateKey());
+                .filter(profile -> profile.projectKey().equals(project(projectKey)) && profile.enabled());
     }
 
     public AgentProfile saveAgentProfile(String id, String projectKey, String name, String description,

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260808-prd-analysis-1">
+  <link rel="stylesheet" href="/app.css?v=20260804-workbench-batch-delete-1">
 </head>
 <body>
 <div class="app">
@@ -22,7 +22,6 @@
       <button class="secondary" id="workbench">效率工作台</button>
       <button class="secondary" id="agentStudio">专家创建</button>
       <button class="secondary" id="evaluationCenter">Agent 评测</button>
-<button class="secondary" id="prdAnalysis">PRD 分析</button>
       <button class="secondary" id="capabilities">能力管理</button>
       <button class="secondary" id="settings">连接设置</button>
       <a class="secondary" href="/docs">API 文档</a>
@@ -438,32 +437,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<dialog id="prdDialog" class="wide-dialog prd-dialog">
-  <div class="dialog-title"><strong>PRD 分析</strong><button class="secondary" id="closePrd">关闭</button></div>
-  <div class="hint" id="prdProject">当前项目：default</div>
-  <div class="evaluation-toolbar">
-    <div>
-      <strong>PRD Analysis Agent</strong>
-      <p class="hint">上传 PRD 后自动完成需求地图、节点分析、归并、确定性校验与人工澄清，最终生成 analysis.md / domain_model.json 等产物。</p>
-    </div>
-    <div class="managed-actions"><button class="secondary" id="refreshPrd">刷新</button><button class="primary" id="createPrdTask">新建 PRD 分析</button></div>
-  </div>
-  <div class="managed-list" id="prdTaskList"></div>
-  <div id="prdDetail"></div>
-</dialog>
-<dialog id="prdCreateDialog" class="wide-dialog">
-  <div class="dialog-title"><strong>新建 PRD 分析</strong><button class="secondary" id="closePrdCreate">取消</button></div>
-  <div class="capability-status" id="prdCreateStatus"></div>
-  <section class="capability-section">
-    <label>标题 * <input id="prdTitle" placeholder="例如：订单退款 PRD 分析"></label>
-    <label>PRD 文档 * <input id="prdFile" type="file" accept=".txt,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.htm,.json,.xml,.rtf,.epub,.odt,.ods,.odp"></label>
-    <div class="hint" id="prdFileStatus">选择 PRD 后自动上传到当前会话。</div>
-    <label>接口 / 数据契约（可选）<input id="prdContractFile" type="file" accept=".txt,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.htm,.json,.xml,.rtf,.epub,.odt,.ods,.odp"></label>
-    <label>补充文档（可选，可多选）<input id="prdSupportFiles" type="file" multiple accept=".txt,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.htm,.json,.xml,.rtf,.epub,.odt,.ods,.odp"></label>
-    <label>最大并发节点数 <input id="prdMaxParallelism" type="number" min="1" max="8" value="4"></label>
-  </section>
-  <div class="dialog-actions"><button class="primary" id="prdCreateSubmit">创建并开始分析</button></div>
-</dialog>
-<script src="/app.js?v=20260809-prd-reliability-1"></script>
+<script src="/app.js?v=20260805-workspace-html-preview-2"></script>
 </body>
 </html>

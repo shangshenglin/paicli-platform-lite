@@ -112,11 +112,9 @@ public class ContextManager {
         String projectRules = prompts.projectRules(projectKey, workspaceRunId);
         List<String> allowedSkills = parseStringList(agentProfile == null ? "" : agentProfile.skillNamesJson());
         String skillIndex = skillService.indexPrompt(projectKey, allowedSkills);
-        String requiredSkills = skillService.requiredPrompt(projectKey,
-                isBuiltInPrdProfile(agentProfile) ? allowedSkills : List.of());
         Set<String> allowedTools = new java.util.HashSet<>(
                 parseStringList(agentProfile == null ? "" : agentProfile.toolNamesJson()));
-        if (agentProfile != null && !allowedTools.isEmpty() && !isBuiltInPrdProfile(agentProfile)) {
+        if (agentProfile != null && !allowedTools.isEmpty()) {
             allowedTools.addAll(PlanToolProvider.PROFILE_PLAN_TOOLS);
             allowedTools.addAll(CollaborationToolProvider.PROFILE_COLLABORATION_TOOLS);
             allowedTools.add(WorkingPlanToolProvider.UPDATE_WORKING_PLAN);
@@ -137,7 +135,6 @@ public class ContextManager {
         if (!agentInstruction.isBlank()) stablePrefix.add(ModelMessage.system(agentInstruction));
         if (!projectRules.isBlank()) stablePrefix.add(ModelMessage.system(projectRules));
         if (!skillIndex.isBlank()) stablePrefix.add(ModelMessage.system(skillIndex));
-        if (!requiredSkills.isBlank()) stablePrefix.add(ModelMessage.system(requiredSkills));
         if (!languageDirective.isBlank()) stablePrefix.add(ModelMessage.system(languageDirective));
         int toolTokens = TokenEstimator.estimateTools(toolDefinitions);
         int fixedTokens = TokenEstimator.estimateMessages(stablePrefix) + toolTokens
@@ -252,13 +249,6 @@ public class ContextManager {
         return new PreparedContext(new ModelRequest(messages, toolDefinitions,
                 outputLimit, run.thinkingMode(), run.reasoningEffort()),
                 estimated, compaction, manifest, maxMessageSequence);
-    }
-
-    private static boolean isBuiltInPrdProfile(ProductivityStore.AgentProfile profile) {
-        return profile != null
-                && "default".equals(profile.projectKey())
-                && profile.id().startsWith("system.prd.")
-                && "system.prd".equals(profile.templateKey());
     }
 
     private static DynamicBlocks fitDynamicBlocks(String knowledge, String memories, int tokenBudget) {
