@@ -2,6 +2,12 @@
 
 ## 2026-08-10
 
+### PRD Analysis Agent：Run 对话详情
+
+- 变更：PRD 详情的 Runs 标签中，每条 Mapper、Node Analyst、Reconciler Run 都新增「对话详情」按钮，复用既有 `/v1/runs/{runId}/audit` 与 Run Audit Dialog 展示模型输出、工具调用、审批、事件和所属 Session，不复制或另存模型消息。
+- 思路：PRD Run 本身就是普通 Managed Run，已有审计接口和展示能力；直接复用可保持 ToolCall/消息的单一事实来源，并让失败节点的实际对话可追溯。
+- 验证：`node --check paicli-server/src/main/resources/static/app.js` 通过；真实 Node Run 的 `/v1/runs/{runId}/audit` 返回 7 条消息、3 次 ToolCall 与事件，`git diff --check` 通过。后端 API、数据库、配置、Sandbox、架构边界和产品站未变；README 已同步，其他运行文档不适用。
+
 ### PRD Analysis Agent：同轮依赖完成的误死锁修复
 
 - 变更：ANALYZING 改为先刷新所有既有 Node Run，再从 SQLite 重新读取节点并统一计算 READY；依赖节点在同一次 `advance()` 后半段完成时，其后继节点会在该轮被调度，不再沿用遍历早期的未就绪快照并错误标记 dependency graph deadlock。

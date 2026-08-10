@@ -5916,6 +5916,11 @@ function renderPrdRuns(runs) {
   runs.forEach(run => {
     const item = workbenchItem(run.purpose + ' · ' + run.runId,
       'attempt ' + run.attempt + ' · ' + run.status + (run.submitted ? ' · 已提交' : ''));
+    actionButton(item, '对话详情', () => openPlanStepRun(null, {
+      runId: run.runId,
+      ordinal: 'PRD',
+      title: 'PRD ' + run.purpose
+    }));
     wrap.append(item);
   });
   return wrap;

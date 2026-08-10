@@ -12,6 +12,7 @@
 - [x] 5 类产物（analysis.md / domain_model.json / traceability_matrix.json / validation_report.json / questions.json）。
 - [x] Plan Handoff 复用 PlanService 生成实施计划。
 - [x] Console 独立「PRD 分析」入口（导航/列表/创建/详情/问题回答/Artifacts/生成 Plan）。
+- [x] PRD Runs 页可复用统一 Run Audit Dialog 查看模型对话、工具调用、事件和所属 Session。
 - [x] PRD task 永久删除：Console 对非活跃任务提供二次确认；后端拒绝活跃 Run，并级联删除任务业务数据及已打包 Artifact。
 - [x] 确定性评测 fixture（simple-order-prd / simple-order-contract）与 PRD 回归，包含 Scripted Model → RunProcessor → ToolCall → PrdAnalysisToolProvider → Validator → Renderer 的 Golden Path；Node retry 保持 ANALYZING、超过 100 chunks 的全量内部遍历、以及 ANSWERED Blocking 必须经 Reconcile RESOLVED 后才能完成。
 
