@@ -409,7 +409,10 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .task-comment-list { display: grid; gap: 8px; }
 .task-activity-list { position: relative; display: grid; gap: 0; }
 .task-comment { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #151a21; }
+.task-comment.human { border-left: 3px solid #f1c56c; }
+.task-comment.stage { border-left: 3px solid #69a9d5; }
 .task-comment.conclusion { border-left: 3px solid var(--green); }
+.task-comment-tag { display: inline-block; margin: 6px 0 0; padding: 1px 7px; border-radius: 8px; background: rgba(241,197,108,.14); color: #f1c56c; font-size: 10px; }
 .task-comment p { margin: 8px 0; white-space: pre-wrap; }
 .task-comment-reply { display: block; margin-top: 6px; color: #8fb8d2; }
 .task-comment-meta, .task-run-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -435,6 +438,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .task-run-row { padding: 11px 0; border-bottom: 1px solid var(--line); }
 .task-run-row > div { min-width: 0; display: grid; gap: 3px; }
 .task-run-row strong, .task-run-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-expert-thread { margin: 8px 0; padding: 8px 10px; border: 1px solid #2a313b; border-radius: 6px; background: #161c23; }
+.task-expert-thread > strong { color: #dce3ec; font-size: 12px; }
+.task-expert-thread-run { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; color: var(--muted); font-size: 12px; }
 .task-empty { padding: 28px 10px; color: var(--muted); text-align: center; }
 .message { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; margin-bottom: 23px; }
 .avatar { width: 31px; height: 31px; background: #262c35; font-weight: 700; }

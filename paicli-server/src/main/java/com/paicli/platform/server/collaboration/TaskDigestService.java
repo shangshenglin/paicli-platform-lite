@@ -71,9 +71,14 @@ public class TaskDigestService {
         return store.saveTaskDigest(taskId, json, String.valueOf(maxActivityId));
     }
 
-    /** Renders the latest digest for injection into a Leader run input. */
+    /**
+     * Renders the current digest for injection into a Leader run input. Always rebuilds so the
+     * digest reflects the live task state (status, stages, deliveries, latest human instruction)
+     * instead of a stale first revision; a rework run must see the delivered stages and the
+     * human feedback, otherwise the Leader would re-trigger work from scratch.
+     */
     public String prompt(String taskId) {
-        TaskDigestRecord record = latest(taskId).orElseGet(() -> build(taskId));
+        TaskDigestRecord record = build(taskId);
         return "<task_digest>\n" + record.digestJson() + "\n</task_digest>";
     }
 

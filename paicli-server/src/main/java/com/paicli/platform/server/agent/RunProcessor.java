@@ -237,8 +237,24 @@ public class RunProcessor {
                         "estimatedInputTokens", context.estimatedInputTokens(),
                         "inputTokens", response.usage().inputTokens(),
                         "outputTokens", response.usage().outputTokens(),
-                        "cachedInputTokens", response.usage().cachedInputTokens())));
+                        "cachedInputTokens", response.usage().cachedInputTokens())),
+                        context.maxMessageSequence());
                 if (!completed) {
+                    RunStatus currentStatus = store.findRun(run.id())
+                            .map(RunRecord::status).orElse(RunStatus.CANCELED);
+                    if (!currentStatus.terminal()) {
+                        // User input arrived while the model was generating (e.g. a collaboration
+                        // comment delivered into the active run's session) and was not part of the
+                        // context. The atomic final commit refused to complete; preserve this answer
+                        // as an intermediate assistant message, record the event and requeue in one
+                        // transaction so the next turn necessarily includes the new input.
+                        store.commitIntermediateAssistantAndRequeue(run.sessionId(), run.id(),
+                                response.content(), response.reasoningContent(), json(Map.of(
+                                "contextMessageSequence", context.maxMessageSequence(),
+                                "latestSequence", store.maxMessageSequence(run.sessionId()),
+                                "staleAssistantArchived", true)),
+                                run.currentStep() + 1);
+                    }
                     toolRouter.release(run.id());
                     return;
                 }

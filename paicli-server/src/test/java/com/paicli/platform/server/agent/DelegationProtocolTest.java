@@ -52,6 +52,75 @@ class DelegationProtocolTest {
     }
 
     @Test
+    void marksDoneCriteriaUnverifiedWithoutExplicitEvidence() {
+        AgentResultValidator validator = new AgentResultValidator();
+        var result = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "all done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of()),
+                List.of("tests pass", "login works"));
+        assertThat(result.valid()).isTrue();
+        assertThat(result.criteria()).extracting("criterion")
+                .containsExactly("tests pass", "login works");
+        assertThat(result.criteria()).extracting("status")
+                .containsExactly("UNVERIFIED", "UNVERIFIED");
+    }
+
+    @Test
+    void marksDoneCriteriaEvidencedOnlyFromExplicitCriterionEvidence() {
+        AgentResultValidator validator = new AgentResultValidator();
+        var evidenced = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                "criterion_evidence", Map.of("tests pass", "test-report-1")),
+                List.of("tests pass", "login works"));
+        assertThat(evidenced.valid()).isTrue();
+        assertThat(evidenced.criteria()).extracting("status")
+                .containsExactly("EVIDENCED", "UNVERIFIED");
+
+        // No summary keyword / substring matching pretending semantic validation.
+        var claimed = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "all tests passed",
+                "files_changed", List.of("a.txt"), "artifacts", List.of()),
+                List.of("tests pass"));
+        assertThat(claimed.criteria()).extracting("status").containsExactly("UNVERIFIED");
+    }
+
+    @Test
+    void emptyCriterionEvidenceContainersAreNotEvidenced() {
+        AgentResultValidator validator = new AgentResultValidator();
+        for (Object empty : List.of("", List.of(), Map.of())) {
+            var result = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                    "status", "COMPLETED", "summary", "done",
+                    "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                    "criterion_evidence", Map.of("tests pass", empty)),
+                    List.of("tests pass"));
+            assertThat(result.criteria()).extracting("status").containsExactly("UNVERIFIED");
+        }
+        var evidencedList = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                "criterion_evidence", Map.of("tests pass", List.of("test-report-1"))),
+                List.of("tests pass"));
+        assertThat(evidencedList.criteria()).extracting("status").containsExactly("EVIDENCED");
+        var evidencedText = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "done",
+                "files_changed", List.of("a.txt"), "artifacts", List.of(),
+                "criterion_evidence", Map.of("tests pass", "test-report-1")),
+                List.of("tests pass"));
+        assertThat(evidencedText.criteria()).extracting("status").containsExactly("EVIDENCED");
+    }
+
+    @Test
+    void legacyValidateWithoutCriteriaKeepsOldBehavior() {
+        AgentResultValidator validator = new AgentResultValidator();
+        var result = validator.validate(run(RunStatus.COMPLETED), Map.of(
+                "status", "COMPLETED", "summary", "wrote the file",
+                "files_changed", List.of("a.txt"), "artifacts", List.of()));
+        assertThat(result.valid()).isTrue();
+        assertThat(result.criteria()).isEmpty();
+    }
+
+    @Test
     void detectsConflictingWritersAndAllowsDisjointWrites() {
         WorkspaceMergeService merge = new WorkspaceMergeService();
         assertThat(merge.detectConflicts(List.of(

@@ -2,7 +2,116 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-09
+
+### WorkingPlan 基础能力常驻与明确触发规则
+
+- 变更：`ContextManager` 在 Agent Profile 配置非空业务 Tool allowlist 时，额外保留 `update_working_plan`，确保 WorkingPlan 作为 Run 内部 Harness 能力不会被业务工具白名单过滤；未扩大其他 Core Tool 权限。
+- 变更：Agent 通用 System Prompt 明确 WorkingPlan 的创建条件、简短记录与 `evidenceRefs` 更新要求，以及工具失败、验证失败、用户补充要求或执行方向变化时先更新再继续的规则；简单单步/只读/可直接回答任务仍不要求创建计划。
+- 思路：继续由模型在正常 Model Decision 中自主判断 WorkingPlan，保持 Act → Observe → Replan 流程，不新增 Plan 阶段、Run 状态、独立 Model Call、数据结构或 Tool Schema。
+- 验证：新增 `ContextManagerTest` 覆盖无 allowlist、有业务 allowlist 时的 `update_working_plan` 可见性，以及其他基础工具不被额外放开；新增 System Prompt 触发规则断言。同步修正已有迁移断言以包含当前代码中的迁移 40，随后执行全量 `clean verify`。同步更新 README 与架构说明；未修改 API、配置、Sandbox、Formal Plan 或产品站，`docs/phases.md`、OpenAPI、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用。
+
+### Completion Evidence 二次复核：命令 mutation 证据统一与测试分类再收紧
+
+- 变更：新增 `WorkspaceMutationEvidence` 和 `RunEvidence.workspaceMutations`；`AgentResultService`、SQLite 终态 delegation envelope、`AgentResultValidator` 与 `RunVerificationService` 统一消费/传递 `workspace_mutations`，命令修改未知具体文件时不伪造 `files_changed`。`TestCommandClassifier` 拒绝换行、单独后台 `&`、`-DskipTests=true`、pytest `--collect-only` 和 cargo `--no-run`。
+- 思路：Child CompletionVerifier 与 Parent AgentResultValidator 必须基于同一份结构化证据判断 Completion Contract；测试证据继续采用宁可漏报、不可误报的保守边界。未改变数据库 Schema、REST 路径请求响应或产品站能力，OpenAPI 与产品站文档不适用。
+- 验证：新增并通过 21 项定向测试，覆盖分类器绕过、RunEvidence → AgentResultService → AgentResultValidator 端到端命令 mutation，以及 SQLite delegation envelope；随后执行全量 `clean test` 与 `clean package`。
+
+### Completion Evidence 复核收尾：Deferred 批处理、mutation 边界与复合测试命令
+
+- 变更：将 `get_agent_result` 从只读工具集合和 `RunProcessor` 只读并行前缀中排除，保证会停放/唤醒父 Run 的调用先独立持久化；`RunEvidenceCollector` 不再把已识别测试命令的 workspace fingerprint 当作最后一次 mutation，非测试命令的显式 workspace mutation 可作为 `MUTATION_REQUIRED` 证据；`TestCommandClassifier` 拒绝 `||`、`;`、管道以及测试命令后的尾部命令，避免用复合命令最终的 0 退出码生成伪造 PASSED TestEvidence。
+- 思路：Completion Contract 必须区分源码/产品变更、测试生成物和可能改变父 Run 生命周期的外部等待；验证器消费统一的 mutation evidence，而不是只看 `write_file`，并让测试证据的退出码与最后一个实际测试 invocation 对齐。数据库 Schema、REST 请求/响应和 OpenAPI 未变，产品站未变。
+- 验证：定向 Maven 回归测试 23 项全部通过（`DeferredAgentResultTest`、`RunEvidenceCollectorTest`、`RunVerificationServiceTest`、`TestCommandClassifierTest`）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 仍有既有解析问题，测试使用同版本缓存 Maven 3.9.9 并包含 `paicli-common` 上游模块执行。
+
+### Harness Loop v2 · PR：Completion Contract、执行证据与 Deferred get_agent_result（9 个提交）
+
+- 变更（Commit 1·结构化工具证据）：迁移 39 新增 `tool_calls.result_metadata_json`；LocalSandboxDriver 与 Sandbox 代理的 `write_file` 统一返回 `path/changed/beforeSha256/afterSha256/bytesWritten`，`execute_command` 继续带 `exitCode/timedOut/shell/cwd/durationMs`；ToolResult.metadata 持久化，证据不再依赖解析 stdout 文本。
+- 变更（Commit 2·测试族分类）：新增 `TestFamily` 与 `TestCommandClassifier`，删除 `contains("mvn")/contains("check")` 粗糙启发式；`mvn compile`、`./check-status.sh` 不再误判为测试。
+- 变更（Commit 3·证据收集）：新增 `RunEvidenceCollector` 与 `RunEvidence/FileEvidence/CommandEvidence/TestEvidence/ArtifactEvidence/TestStatus`；`lastMutationOrdinal` 仅由真实 write_file 变更决定，供“最后 mutation 之后测试必须通过”判定。
+- 变更（Commit 4·完成合同）：新增 `CompletionMode`、`RunCompletionContractRecord` 与 `run_completion_contracts` 表；`CompletionContractService` 按 DelegationEnvelope → PlanStep → Root 保守分类器 → WorkingPlan completion 的可靠性顺序建立合同，只可加强不可被模型削弱；`CompletionRequirementClassifier` 只识别高置信度命令式任务，问答默认 TEXT_ONLY；`update_working_plan` 增加可选 `completion` 结构化声明。
+- 变更（Commit 5·合同驱动验证）：`RunVerificationService` 重构为纯逻辑 `verify(run, finalAnswer, contract, evidence)`，按 TEXT_ONLY / MUTATION_REQUIRED / TEST_REQUIRED / MUTATION_AND_TEST 验证；不同 TestFamily 互不覆盖，required tests 必须在最后一次真实 mutation 之后通过。
+- 变更（Commit 6·AgentResult 证据闭环）：新增 `AgentResultService` 自动归集 `files_changed/commands_executed/tests/artifacts/completion_contract/evidence`；`AgentResultValidator` 增加 contract-aware 校验；`DeliveryManifestService.recordStageDelivery(taskId, stage, runId)` 与 `WorkspaceMergeService.ChildChanges.of` 复用统一证据。
+- 变更（Commit 7·Deferred get_agent_result）：`ToolCallStatus.WAITING_EXTERNAL`；`tool_calls` 增加 `wait_kind/wait_ref/waiting_since`；`get_agent_result` 在 child 未终态时返回 deferred metadata，RunProcessor 标记 WAITING_EXTERNAL 且 Parent 进入 WAITING_AGENT（不追加最终 tool 消息、不轮询）；child 终态由 `DeferredAgentResultService` 原子完成原始 ToolCall、追加 tool 消息并重排队 Parent。
+- 变更（Commit 8·恢复/竞态/审计）：`@PostConstruct` 启动恢复扫描 WAITING_EXTERNAL CHILD_RUN（child 已终态立即 resolve）；Lost Wakeup 双边幂等保护；事件 `tool.deferred / tool.deferred.resolved / agent.result.validated / run.evidence.collected / run.completion_contract.created / strengthened`。
+- 变更（Commit 9·文档与回归）：README、docs/architecture.md、docs/phases.md、docs/docker-sandbox.md、changeLog 同步；`.\mvnw.cmd clean test` 全量通过（paicli-common + paicli-server + paicli-sandbox-agent）。
+- 思路：Harness 从“行为驱动”升级为“任务要求驱动”——模型负责策略与代码生成，系统环境提供真实执行事实（ToolCall/ToolResult/Workspace/Artifact），CompletionVerifier 用机器可验证的合同 vs 证据决定是否完成；自然语言业务语义仍由 Parent Reviewer/人工/真实测试负责，不引入 Completion Judge LLM，不假装自动理解所有 done_criteria。
+- 验证：`.\mvnw.cmd clean test` 全量通过（含新增 TestCommandClassifierTest、RunEvidenceCollectorTest、CompletionRequirementClassifierTest、CompletionContractServiceTest、RunVerificationServiceTest、AgentResultValidatorTest、AgentResultServiceTest、DeferredAgentResultTest、LocalSandboxDriverTest/SqliteRuntimeStoreTest 扩展）；OpenAPI 无 REST 路径变更（get_agent_result 行为变化为 Server 内部协议，不改变请求/响应 schema），`paicli-site/README.md` 无产品可见能力变更，故二者本次不适用；`git diff --check` 通过。
+### Harness Loop v2 审查修复：真实变更证据、原子 Deferred 停放与严格完成门禁
+
+- 变更：修复 Docker Sandbox `write_file` 在写入后才计算 before hash 的问题；`execute_command` 持久化 workspace fingerprint，RunEvidence 只接受明确的变更证据，缺少 metadata 时不猜测 `changed=true`。
+- 变更：新增 `parkDeferredToolCallAndWaitParent` SQLite 原子操作，在同一事务内提交 ToolCall `WAITING_EXTERNAL`、父 Run `WAITING_AGENT` 和事件，消除 child 终态与 parent 停放之间的 Lost Wakeup 窗口。
+- 变更：Formal PlanStep 按绑定 `run_id` 参与 Contract 推导；WorkingPlan completion 更新触发 strengthen；预算停止先经过 CompletionVerifier，合同未满足时进入 FAILED。
+- 变更：测试命令按 shell operator boundary 与 executable/参数保守分类，补充 Gradle check、pnpm/yarn、dotnet test，并拒绝 `echo test`、`echo junit`、`test-data.sh` 等假阳性；AgentResult 不再允许普通 command 替代 PASSED TestEvidence。
+- 变更：RunEvidence 增加业务 Artifact 视图，`tool_result` 不再进入 AgentResult 或 DeliveryManifest 的业务交付清单；同步 README、架构、阶段、Docker Sandbox 和 Agent prompt 规则。
+- 思路：Completion Contract -> Real Evidence -> Deterministic Verification 保持单一闭环，恢复与交付路径复用同一证据源；数据库 schema、REST API/OpenAPI、配置和产品站能力未变，不适用对应文档同步。
+- 验证：完整 Maven 测试通过（common 3、server 281、sandbox-agent 4，BUILD SUCCESS）；`git diff --check` 通过。Maven Wrapper 在当前 PowerShell 直接调用存在既有解析问题，测试使用同版本已缓存 Maven 二进制完成。
+
+## 2026-08-08
+
+### ExpertThread：同一专家在协作任务内的逻辑线程 + 模型执行期间新评论竞态保护
+
+- 变更：新增轻量 `ExpertThread`（迁移 38）：`collaboration_expert_threads`（`root_task_id + agent_profile_id + thread_role` 唯一确定一个逻辑线程）+ `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。新增 `ExpertThreadService`（`getOrCreate` 幂等 / `attachRun` / `findByRun` / `refreshDigest`）与 `ExpertThreadDigestBuilder`。`CollaborationService.trigger` 在确定 agent 与根任务后先 getOrCreate 线程，新 Run 创建后 attachRun；阶段派发子 Run 同样绑定对应专家线程（非致命，异常只记录警告不阻断协作）。
+- 变更：终端 Run 永远不复活。同一专家后续再次执行创建新 Session + 新 Run，并挂到原 ExpertThread；不同根任务、不同专家、不同 role 各自独立线程，互不串线。新 Run 不加载旧 Run 完整历史，只在输入注入 `<expert_thread_resume>` 紧凑摘要（最新 Run 状态/摘要、已完成/剩余工作、blockers、changed files、artifact refs、test 报告引用、最新人工指令），不含 ToolResult 全文、Artifact 正文、reasoning 与全量旧对话；需要具体内容时由模型按需 `read_file/read_artifact`。Leader 线程（role=LEADER）继续走既有 TaskDigest，不重复注入 resume。
+- 变更：`CollaborationService.onRunTerminal` 末尾统一刷新 ExpertThread Digest（AgentResult/交付清单已落库后再构建），保证顺序为 AgentResult/DeliveryManifest → Digest。
+- 变更：Active Run 竞态保护。`ContextManager.PreparedContext` 新增 `maxMessageSequence`（本次模型上下文构建时 Session 最大 message sequence）；`RunProcessor` 在模型返回无工具调用的最终回答后、提交 COMPLETED 前重新查询 `store.maxMessageSequence(sessionId)`，若大于 context 构建值，说明模型执行期间有新用户输入（例如评论被注入活跃 Run 会话），此时：持久化 `run.new_input_during_model` 事件、把当前模型回答保留为 assistant 中间消息、Run 重新 QUEUED、下一轮必含新增消息；无新增消息时保持原完成流程。
+- 变更：`GET /v1/collaboration/tasks/{id}` 响应新增 `expertThreads`（每个线程含 threadId/agentProfileId/threadRole/digestJson/latestRunId 与绑定 Runs 的 ordinal/实时状态）；Console 执行层新增“专家线程”分组展示（`#序号 状态`，可直接打开会话），OpenAPI 描述同步。
+- 思路：现有协作层用 TaskDigest 服务 Leader 复唤醒，但没有“同一专家多次执行之间的逻辑连续性”。ExpertThread 把 `root task + agent + role` 作为唯一键，保持三层分离：Thread=逻辑连续、Session=单次执行上下文、Run=单次执行事实；Digest 只带引用不携带正文，避免把旧历史逐步重新塞回模型上下文（Session 复用会导致 Run-B1 50K + Run-B2 30K 逐轮膨胀）。竞态修复针对“Context 已构建→模型请求发送→用户追加评论→模型返回 Final→直接完成 Run”的漏消息窗口。
+- 验证：`.\mvnw.cmd clean test` 全量 232 项通过（paicli-common 3 + paicli-server 226 + paicli-sandbox-agent 3）。新增测试覆盖：ExpertThread 幂等复用与 Worker 重启恢复、不同任务/专家/角色不串线、Digest 只含引用不含全文、trigger 绑定线程且二次触发复用同线程、专家 Run 注入 resume 而 Leader 不注入、`PreparedContext.maxMessageSequence`、RunProcessor 模型期间新评论不假完成并重排队（事件 + 中间 assistant 消息 + 再完成）、迁移版本 1–38；既有 `terminalRunCannotBeCompletedOrRequeuedAfterCancellation` 继续保证终端 Run 不回退。`node --check app.js` 通过，`git diff --check` 通过。本次未改 Sandbox 协议、Approval 核心、ToolRouter 核心、Plan 执行与 Memory 架构，故 `docs/docker-sandbox.md`、`paicli-site/README.md` 不适用；README、`docs/architecture.md`、`docs/phases.md` 与 OpenAPI 已同步。
+
+### ExpertThread 评审修正：事务化竞态保护、阶段 Resume 注入、Digest 按专家归因、并发挂载与生命周期
+
+- 变更（竞态事务化）：`RunProcessor` 不再“先查 sequence 再完成”，改为 `SqliteRuntimeStore.commitFinalAssistantAndComplete(..., expectedMaxMessageSequence)` 在单个 SQLite 事务内“比对最新 message sequence + 置 COMPLETED”：模型执行期间有新输入时整体回滚、不完成。新输入分支改由 `commitIntermediateAssistantAndRequeue` 单事务持久化 `run.new_input_during_model` 事件 + assistant 中间消息 + 重新 QUEUED，避免“中间回答已写、Run 卡旧状态”的崩溃恢复问题。评论投递侧新增 `appendUserMessageIfRunActive`（事务内重确认 Run 非终态再追加）：`CollaborationService.comment()` 改为“投递失败即回退创建新幂等 Trigger/Run”，消除 `hasActiveRunForTarget→deliverCommentToActiveRuns` 的 TOCTOU（Run 在判断后恰好终态时评论不再挂到已结束 Run 后面）。
+- 变更（阶段 Resume）：`createAndDispatchSubtask` 调整为先 `getOrCreate` ExpertThread、构建含 `<expert_thread_resume>` 的阶段输入、再 `createOrGetDelegation`、最后 `attachRun`，因此 Leader 再次派遣同一专家时，阶段子 Run 启动即携带该专家线程的紧凑摘要（此前只在普通 trigger 注入）。
+- 变更（Digest 按专家归因）：`ExpertThreadDigestBuilder` 的 `completed_work/remaining_work/blockers` 只统计 `assigneeId == thread.agentProfileId()` 的阶段，不再把其他专家的工作误当作本专家已完成；`changed_files` 不再扫描共享工作区当前文件列表，改为只消费该 Run 自己的 DeliveryManifest.changedFiles（run-scoped、可审计），避免共享 workspace 下文件归属串专家。
+- 变更（并发与生命周期）：`CollaborationStore.attachExpertThreadRun` 改为单个 `BEGIN IMMEDIATE` 事务（校验 Run 未绑定其他线程 → ordinal 分配 → INSERT → 成功后才更新 `latest_run_id`）：重复挂载幂等、跨线程挂载抛 `IllegalStateException`，并发挂载 ordinal 唯一且 latest 与绑定一致。`collaboration_expert_threads.latest_run_id` 增加 `REFERENCES runs(id) ON DELETE SET NULL`；`SqliteRuntimeStore.deleteRuns` 删除终态 Run 时清理线程绑定、从剩余绑定重选 `latest_run_id`（无则置空）并把受影响线程摘要置空，避免注入已删除 Run/Artifact 引用，下一 Run 终态重建。
+- 修复：`ExpertThreadDigestBuilder` 中经管道写入损坏的中文（`??????`）与省略号（`?`）恢复为正确文案（“专家 X 在任务「Y」中的持续工作”与 `…`），避免污染 `<expert_thread_resume>` 模型上下文。
+- 修复（CI）：`mvnw` 在 git 中恢复可执行位（100644→100755），workflow 增加 `chmod +x mvnw` 步骤，`./mvnw -B -ntp clean verify` 不再因 Permission denied（126）跳过 Maven 编译与测试。
+- 验证：新增/更新测试——`SqliteRuntimeStoreTest`（commitFinal 拒绝新输入、commitIntermediate 原子重排队、appendUserMessageIfRunActive 拒绝终态 Run）、`CollaborationStoreTest`（并发挂载 6 线程 ordinal 1–6 且 latest 一致、重复挂载幂等、跨线程挂载抛错）、`CollaborationServiceTest`（阶段派发注入 resume、评论投递失败回退新 Trigger）、`TaskDigestManifestTest`（Digest 只含本专家阶段与 Manifest 变更文件，其他专家文件/阶段不串入）。`.\mvnw.cmd clean test` 全量 239 项通过（common 3 + server 233 + sandbox-agent 3），`node --check app.js` 通过，`git diff --check` 通过。README、`docs/architecture.md`、`docs/phases.md` 已同步；`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用（无 Sandbox/产品站变更）。
+
+### PR #13 收尾：stale assistant 归档、单 Agent 使用 EXPERT 线程、done_criteria 接通 AgentResultValidator
+
+- 变更（stale assistant 归档）：`SqliteRuntimeStore.commitIntermediateAssistantAndRequeue` 把模型执行期间生成的旧回答保存为 `archived=1` 的 assistant 消息——完整保留用于审计（`messages(sessionId)` 仍可见），但 `activeMessages(sessionId)` 与下一轮模型上下文自动排除；`run.new_input_during_model` 事件 JSON 增加 `staleAssistantArchived:true`。配套修正 `maxMessageSequence` 只统计 `archived=0` 的 active 消息（与 Context 视图一致），否则归档后的 stale assistant 会让后续完成判定永远“有新输入”而无法 COMPLETED。未在 ContextManager 增加任何特殊过滤，复用既有 archived 机制。
+- 变更（单 Agent → EXPERT 线程）：`CollaborationService.resolveThreadRole` 只把真正的小队 Leader（TEAM leaderAgentProfileId）判为 `LEADER`，其余一律 `EXPERT`——包括单 Agent CollaborationTask 的被指派 Agent。因此单 Agent 任务 REQUEST_REWORK/再触发时，Run2 输入同时获得 TaskDigest（整体任务状态）与 `<expert_thread_resume>`（该专家自己之前的摘要），不再被误判为 LEADER 而漏掉 Resume。Team Leader 仍走 TaskDigest、不注入 Resume，行为不变。
+- 变更（done_criteria 接通 Validator）：`DelegationToolProvider.result()` 从持久化的 `delegation.envelopeJson` 读取 spawn 时真实写入的 `done_criteria`，传给 `AgentResultValidator.validate(child, result, doneCriteria)`，并在 `get_agent_result` 响应中返回 `done_criteria` 与逐 criterion 的确定性证据状态（`EVIDENCED` 仅当子 Agent 显式提交 `criterion_evidence`（map 或 {criterion,evidence} 列表）且值非空；否则 `UNVERIFIED`）。不做 summary 关键词/字符串 contains 假装语义验证；`UNVERIFIED` 暂不改变 `validation.valid`，保留现有 delegation 行为。`ValidationResult` 新增 `criteria` 列表（保留无 criteria 的 2 参构造兼容）。修复 PlanStep fallback：`doneCriteriaJson` 按 JSON array 解析为 `List<String>`，不再 `List.of(rawJson)` 当作单元素。`done_criteria` 为空时 Validator 行为与旧版完全一致。
+- 验证：新增/更新测试——`RunProcessorTest`（stale assistant 归档 + 第二轮 ModelRequest 含新评论、不含旧回答）、`SqliteRuntimeStoreTest`（原子重排队后 assistant 存在于全量消息、不在 activeMessages）、`CollaborationServiceTest`（单 Agent REQUEST_REWORK 触发 EXPERT 线程并注入 Resume、投递回退测试改用 EXPERT 角色）、`DelegationProtocolTest`（Validator criteria：无证据 UNVERIFIED、显式证据 EVIDENCED、无 criteria 旧行为不回归）、`DelegationToolProviderTest`（spawn 持久化 done_criteria、get_agent_result 返回 done_criteria + criteria、PlanStep doneCriteriaJson 数组 fallback）。`.\mvnw.cmd clean test` 全量 245 项通过（common 3 + server 239 + sandbox-agent 3），`git diff --check` 通过。README、`docs/architecture.md`、`docs/phases.md` 已同步；`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用（无 Sandbox/产品站变更）。
+
+### PR #13 收尾（二）：Stage done_criteria 接通 Validator、archived 隔离所有语义链路、空容器证据判定
+
+- 变更（Stage done_criteria）：`CollaborationService.createAndDispatchSubtask` 不再向 `createOrGetDelegation` 传空 envelope `{}`，而是复用 `DelegationEnvelopeBuilder` 在派遣时构建持久化阶段 envelope：`done_criteria` 取阶段任务 `acceptanceCriteria`（按行拆分过滤空白），并写入 `collaboration_task_id`、`parent_run_id`。因此 `get_agent_result` 的 `doneCriteria(delegation)` 能读到阶段验收标准并传给 `AgentResultValidator`（spawn_agent 之外最常见的协作阶段派遣路径也接通）。envelope 构建失败时回退 `{}`，不阻断阶段派遣。
+- 变更（archived 语义链路隔离）：新增 `SqliteRuntimeStore.activeMessagesForRun(runId)`（`archived=0`），并让所有“Agent 语义消费者”只读 active 消息、`messages()/messagesForRun()` 仅作为审计历史：`ExpertThreadDigestBuilder.runSummary` 改用 `activeMessagesForRun`；`DelegationToolProvider.result()` 的最终回答与 `latestAssistantAnswer` 改用 `activeMessages`；Memory 提取 `enqueueMemoryExtraction` 的 source snapshot 查询增加 `AND archived=0`，避免 stale assistant 被提炼成长期记忆。语义统一为：**archived = 保留事实，任何 Agent 语义链路都不能再消费**。
+- 变更（空容器证据）：`AgentResultValidator` 判定 EVIDENCED 增加 `hasExplicitEvidence`——空字符串、空 List、空 Map 都视为无证据（UNVERIFIED），只有非空标量/数组/对象才算显式证据；仍不做 summary 关键词匹配，`UNVERIFIED` 不改 `valid`。
+- 验证：新增/更新测试——`DelegationToolProviderTest.stageDispatchAcceptanceCriteriaBecomeDoneCriteriaForValidator`（Leader → createAndDispatchSubtask，验收标准“测试通过并保持接口兼容” → get_agent_result 的 `done_criteria` 与 `validation.criteria[0].status == UNVERIFIED`）、`DelegationProtocolTest.emptyCriterionEvidenceContainersAreNotEvidenced`（`""`/`[]`/`{}` → UNVERIFIED，`["test-report-1"]`/`"test-report-1"` → EVIDENCED）、`CollaborationServiceTest` 阶段派遣 mock 改为接受真实 envelope。`.\mvnw.cmd clean test` 全量 247 项通过（common 3 + server 241 + sandbox-agent 3），`git diff --check` 通过。README、`docs/architecture.md`、`docs/phases.md` 已同步；`docs/docker-sandbox.md`、`paicli-site/README.md` 不适用（无 Sandbox/产品站变更）。
+
+### 协作执行层状态展示修正：失败 Run 的触发关系与待验收语义不再误导
+
+- 变更：Console 执行层把根任务 Run 的展示标签从原始 relationship（TRIGGERED/HUMAN_ACTION/STAGE_BARRIER…）改为中文触发语义（触发执行/人工发起/阶段完成触发…），失败 Run 仍显示真实状态“失败”，不再让人把“TRIGGERED”误读为卡住的状态。
+- 变更：任务处于 IN_REVIEW（待验收）且存在失败 Run 时，执行层提示文案改为“存在失败的执行（可查看协作动态原因），但阶段交付已就绪；请核验后验收或带原因要求返工”，不再声称“Leader 已形成最终结论”。
+- 思路：真实案例中 Leader Run 因部署期缺失 prompts/base.md 资源而失败（旧运行实例类路径无该资源；重建并重启后的实例已具备），根任务按“失败但阶段已交付”回到待验收；用户重启后发现该 Run 仍显示“TRIGGERED · 失败”且任务状态不变，误以为没有恢复。TRIGGERED 只是 Task-Run 关联关系，真实状态是 FAILED（终态），待验收本就等待人工 ACCEPT，重启不会自动改变；本次仅修正前端展示，让失败原因与可执行动作一目了然。
+- 验证：`node --check app.js` 通过，`git diff --check` 通过；纯前端展示变更，未改后端状态机与数据库（无相关 Java 测试），README 执行层说明已同步。
+
+### 修复：阶段“空交付”被误判为已交付 + 失败 Leader 未把已交付任务送回重新验收
+
+- 变更：`CollaborationService.hasStageDeliveryEvidence` 只把非 `tool_result` 类型的 Artifact 视为交付证据。此前 `artifactsForRun` 会统计 `tool_result`（read_file/execute_command 大结果外置）类型的只读物化产物，导致「只读不动手」的阶段 Run（真实案例 Stage 5 只读文件后直接宣布完成，没有写文件/发评论）也被判定为已交付并进入 IN_REVIEW、记录 DELIVERED 清单；现在这类空交付会正确走「无持久交付证据」分支，阶段与父任务置 BLOCKED，等待 Leader 重新派发。
+- 变更：`CollaborationService.onRunTerminal` 根任务失败分支新增 `hasDeliveredStages` 判断：当 Leader Run 失败（例如工具调用循环被限流终止）但任务树中已有 IN_REVIEW/DONE 的已交付阶段时，根任务回到 IN_REVIEW（重新验收），而不是一律 BLOCKED；只有没有任何已交付阶段时才按原有语义 BLOCKED。
+- 思路：真实案例中 Stage 5 只做了只读调用就以最终回复结束（模型假完成），旧证据门禁被 `tool_result` 外置产物误放行；Stage 6 修复重派后真正落盘交付，但 Leader Run 因 `list_dir` 重复调用循环被终止，根任务被错误置 BLOCKED。修复后空交付阶段不再冒充交付，失败但已有交付的根任务回到人工验收，避免用户手动 RESUME。
+- 验证：新增 `CollaborationServiceTest.readOnlyToolResultArtifactIsNotStageDeliveryEvidence`（仅有 tool_result 物化产物的阶段 Run 完成 → 阶段与父任务 BLOCKED）与 `failedLeaderRunWithDeliveredStagesReturnsTaskToReview`（Leader Run FAILED 但存在 IN_REVIEW 阶段 → 根任务 IN_REVIEW）；paicli-server 全量测试 217 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、REST 契约、Sandbox、配置、产品站或前端，故迁移、OpenAPI、`docs/docker-sandbox.md`、`docs/phases.md`、`paicli-site/README.md` 不适用；README 与 `docs/architecture.md` 的交付证据/复验语义已同步。
+
+### 协作视图聚合子 Agent 评论/动态、人工评论按时间入列，并统一子 Agent 中文输出
+
+- 变更：`GET /v1/collaboration/tasks/{id}` 的 comments/activities 由「仅根任务」改为整棵树聚合（`CollaborationStore.treeComments/treeActivities`：根 + 全部阶段子任务，按时间/事件序合并），根任务协作视图因此能看到所有子 Agent 的最终回复、并行阶段的多个负责人交付、阶段屏障与阶段动作；每条评论/动态保留所属 taskId，前端据此显示「阶段 N · 负责人」上下文，并在「子任务与阶段」区提示阶段串行依赖（阶段 N 依赖前序阶段）与同阶段并行数量。
+- 变更：人工反馈落库。`REQUEST_REWORK` / `BLOCK` 的原因会先持久化为该任务的 USER 评论（幂等去重）再触发/落状态，因此返工/阻塞原因按时间顺序出现在「评论与决策」，成为任务摘要的 latest_human_instruction，并能被复唤醒 Leader 通过 get_collaboration_task 读到；评论列表按时间顺序统一渲染（人工评论不置顶），人工评论带「人工评论」标识、子 Agent 评论带阶段标识。
+- 变更：任务摘要修复。`TaskDigestService.prompt` 改为每次重建摘要，注入 Leader 复唤醒/返工 Run 的是实时状态（status/阶段/交付/最新人工指令），而不是创建任务时的旧 revision（旧摘要曾显示 status=TODO、stages=[]，会误导返工 Run 从头重做）。
+- 变更：语言统一。`ContextManager.languageDirective` 改为从「用户原始意图」检测语言（协作信封里的 title/description/acceptance_criteria 或阶段任务内容，排除英文键名/ID/枚举等脚手架），含中文即中文、仅纯英文才英文、无信号默认中文；语言指令从 runtime 用户消息提升为 system 消息并强化文案（思考/推理/评论/最终回答一律中文，英文工具输出用中文转述）；`prompts/base.md`、`prompts/agent.md` 同步「默认中文、仅整条纯英文才英文」。
+- 思路：根任务详情此前只读自己的 comments/activities，子 Agent 的交付评论落在各自阶段子任务上，导致「只能看见 Leader 评论」；聚合后由前端按 taskId 还原阶段上下文，天然覆盖并行与阶段依赖。语言混乱的根因是协作信封的英文脚手架让 latin>han 触发英文指令，以及专家中途漂移；改为按用户真实意图判定 + system 级强约束后，中文任务稳定中文、英文用户仍得英文。
+- 验证：新增 `CollaborationStoreTest.treeCommentsAndActivitiesAggregateRootAndDescendantStages`、`ContextManagerTest.languageDirectiveUsesUserIntentNotCollaborationWrapperScaffolding`、`CollaborationServiceTest.requestReworkPersistsReasonAsHumanCommentBeforeTriggering`、`TaskDigestManifestTest` 摘要刷新断言；paicli-server 全量测试 215 项全部通过，`node --check app.js` 通过，`git diff --check` 通过。本次未修改数据库 Schema、REST 请求/响应/错误契约、Sandbox、配置或产品站，故迁移、`docs/docker-sandbox.md`、`docs/phases.md`、`paicli-site/README.md` 不适用；OpenAPI 的 `GET /tasks/{id}` 行为描述已同步，README 与 `docs/architecture.md` 已同步。
+
 ## 2026-08-07
+
+### 修复：评论/提及触发返工时，待验收（IN_REVIEW）协作任务未置回进行中（IN_PROGRESS）
+
+- 变更：`CollaborationService.trigger` 新建 Run 后把任务置回 `IN_PROGRESS` 的触发类型白名单，由 `HUMAN_ACTION/STAGE_BARRIER` 扩展为 `HUMAN_ACTION/STAGE_BARRIER/MENTION/REPLY`。根因是人工在待验收任务上回复评论（或显式 Mention、回复 Agent 评论）时，`comment` 走 `MENTION/REPLY` Trigger 新建返工 Run，但任务状态仍停留在 `IN_REVIEW`：前端一直显示“待验收”，且返工 Run 终态后 `onRunTerminal` 的 `IN_PROGRESS` 守卫不生效，任务不会重新提交待验收，状态永久卡在“待验收”。
+- 思路：IN_REVIEW 表示“全部 Run 终态 + 等人工 ACCEPT”；一旦评论/提及又新建了 Run，任务就不再只是等待验收而是正在返工，应先回到 `IN_PROGRESS`，待返工 Run 终态并重新具备交付证据后，由既有 `onRunTerminal` 再置回 `IN_REVIEW`。`STAGE_BARRIER` 保留在名单内仅为兼容：`triggerLeaderForCompletedStage` 已对 IN_REVIEW 父任务提前拦截，不会误唤醒；`RUN_EVENT` 只在子 Run 终态事件时唤醒 Leader，此时任务不会处于 IN_REVIEW，故未纳入。
+- 验证：新增 `CollaborationServiceTest.userCommentReworkOnDeliveredTaskMovesItBackToInProgress`（IN_REVIEW + 用户评论默认 Mention 触发 MENTION 新建 Run 后，断言任务被 `updateStatus` 置为 `IN_PROGRESS`）；`CollaborationServiceTest` 26 项全部通过，`git diff --check` 通过。本次未修改数据库 Schema、REST API 请求/响应/错误语义、Sandbox、配置或产品站，故迁移、`docs/docker-sandbox.md`、`docs/phases.md` 和 `paicli-site/README.md` 不适用（属既有协作层状态机缺陷修复，无新阶段里程碑）；OpenAPI 评论接口行为描述已补充（无契约变化），README 与 `docs/architecture.md` 的状态流转说明已同步。
 
 ### 修复：已进入人工验收（IN_REVIEW）的协作任务重启后不再被阶段屏障重新唤醒
 

@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CollaborationStoreTest {
     @TempDir
@@ -143,6 +144,29 @@ class CollaborationStoreTest {
     }
 
     @Test
+    void treeCommentsAndActivitiesAggregateRootAndDescendantStages() throws Exception {
+        runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var parent = store.saveTask(null, "project-a", "Root", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var stage1 = store.saveTask(null, "project-a", "Stage one", "", "IN_REVIEW",
+                0, "AGENT", "agent-a", "", parent.id(), 1, null, "AGENT:leader-a");
+        var stage2 = store.saveTask(null, "project-a", "Stage two", "", "IN_REVIEW",
+                0, "AGENT", "agent-b", "", parent.id(), 2, null, "AGENT:leader-a");
+
+        store.addComment(parent.id(), null, "USER", null, "please rework", false, List.of());
+        store.addComment(stage1.id(), null, "AGENT", "agent-a", "stage one delivered", false, List.of());
+        store.addComment(stage2.id(), null, "AGENT", "agent-b", "stage two delivered", false, List.of());
+
+        assertThat(store.treeComments(parent.id())).extracting("content")
+                .containsExactlyInAnyOrder("please rework", "stage one delivered", "stage two delivered");
+        assertThat(store.treeActivities(parent.id(), 0, 100)).extracting("taskId")
+                .contains(parent.id(), stage1.id(), stage2.id());
+        assertThat(store.treeActivities(parent.id(), 0, 100)).extracting("activityType")
+                .contains("TASK_CREATED", "COMMENT_POSTED");
+    }
+
+    @Test
     void deletesTerminalTaskTreeButRetainsRunAndSessionAudit() throws Exception {
         SqliteRuntimeStore runtime = runtime();
         CollaborationStore store = new CollaborationStore(properties());
@@ -162,6 +186,118 @@ class CollaborationStoreTest {
         assertThat(store.tasks("project-a", null, 50)).isEmpty();
         assertThat(runtime.findRun(run.id())).isPresent();
         assertThat(runtime.findSession(session.id())).isPresent();
+    }
+
+    @Test
+    void expertThreadIsIdempotentPerRootAgentRoleAndRecoversAfterReopen() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task = store.saveTask(null, "project-a", "Thread task", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        CollaborationStore.ExpertThread first = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread again = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        assertThat(again.id()).isEqualTo(first.id());
+
+        var session1 = runtime.createSession("collaboration", "project-a");
+        var session2 = runtime.createSession("collaboration 2", "project-a");
+        var run1 = runtime.createRun(session1.id(), "first attempt", "auto", "", List.of(),
+                null, "backend-a", 0, 0, "bash");
+        var run2 = runtime.createRun(session2.id(), "second attempt", "auto", "", List.of(),
+                null, "backend-a", 0, 0, "bash");
+        store.attachExpertThreadRun(first.id(), run1.id());
+        store.attachExpertThreadRun(first.id(), run2.id());
+        assertThat(store.expertThreadRuns(first.id())).extracting("ordinal").containsExactly(1, 2);
+        assertThat(store.expertThreadForRun(run1.id())).get().extracting("id").isEqualTo(first.id());
+        assertThat(store.expertThreadForRun(run2.id())).get().extracting("id").isEqualTo(first.id());
+        store.updateExpertThreadDigest(first.id(), "{\\\"x\\\":1}");
+        assertThat(store.expertThread(first.id())).get().extracting("digestJson").isEqualTo("{\\\"x\\\":1}");
+        assertThat(store.expertThread(first.id())).get().extracting("latestRunId").isEqualTo(run2.id());
+
+        // Worker restart: a fresh store over the same database still resolves the thread graph.
+        CollaborationStore reopened = new CollaborationStore(properties());
+        assertThat(reopened.expertThread(first.id())).get().extracting("digestJson").isEqualTo("{\\\"x\\\":1}");
+        assertThat(reopened.expertThreadRuns(first.id())).hasSize(2);
+        assertThat(reopened.expertThreadForRun(run1.id())).get().extracting("id").isEqualTo(first.id());
+    }
+
+    @Test
+    void expertThreadIsDistinctPerRootTaskAndAgentAndRole() throws Exception {
+        runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task1 = store.saveTask(null, "project-a", "Task 1", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var task2 = store.saveTask(null, "project-a", "Task 2", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        CollaborationStore.ExpertThread t1 = store.getOrCreateExpertThread(task1.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread sameRootOtherTask = store.getOrCreateExpertThread(task2.id(), "backend-a", "EXPERT");
+        CollaborationStore.ExpertThread otherAgent = store.getOrCreateExpertThread(task1.id(), "reviewer-a", "EXPERT");
+        CollaborationStore.ExpertThread otherRole = store.getOrCreateExpertThread(task1.id(), "backend-a", "LEADER");
+
+        assertThat(sameRootOtherTask.id()).isNotEqualTo(t1.id());
+        assertThat(otherAgent.id()).isNotEqualTo(t1.id());
+        assertThat(otherRole.id()).isNotEqualTo(t1.id());
+        assertThat(store.getOrCreateExpertThread(task1.id(), "backend-a", "EXPERT").id()).isEqualTo(t1.id());
+    }
+
+    @Test
+    void attachExpertThreadRunIsIdempotentAndRejectsCrossThreadBinding() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task = store.saveTask(null, "project-a", "Thread task", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var threadA = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        var threadB = store.getOrCreateExpertThread(task.id(), "reviewer-a", "EXPERT");
+        var session = runtime.createSession("collaboration", "project-a");
+        var run = runtime.createRun(session.id(), "run", "auto", "", List.of(),
+                null, "backend-a", 0, 0, "bash");
+
+        store.attachExpertThreadRun(threadA.id(), run.id());
+        store.attachExpertThreadRun(threadA.id(), run.id()); // idempotent re-attach
+
+        assertThat(store.expertThreadRuns(threadA.id())).hasSize(1);
+        assertThat(store.expertThreadForRun(run.id())).get().extracting("id").isEqualTo(threadA.id());
+        assertThatThrownBy(() -> store.attachExpertThreadRun(threadB.id(), run.id()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already bound");
+    }
+
+    @Test
+    void attachExpertThreadRunIsSafeUnderConcurrentBindings() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task = store.saveTask(null, "project-a", "Thread task", "", "IN_PROGRESS",
+                0, "TEAM", "team-a", "", null, 0, null, "USER");
+        var thread = store.getOrCreateExpertThread(task.id(), "backend-a", "EXPERT");
+        int count = 6;
+        List<String> runIds = new java.util.ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            var session = runtime.createSession("collaboration " + i, "project-a");
+            runIds.add(runtime.createRun(session.id(), "run " + i, "auto", "", List.of(),
+                    null, "backend-a", 0, 0, "bash").id());
+        }
+        var barrier = new java.util.concurrent.CyclicBarrier(count);
+        var errors = java.util.Collections.synchronizedList(new java.util.ArrayList<Throwable>());
+        var workers = new java.util.ArrayList<Thread>();
+        for (String runId : runIds) {
+            Thread worker = new Thread(() -> {
+                try {
+                    barrier.await();
+                    store.attachExpertThreadRun(thread.id(), runId);
+                } catch (Throwable error) {
+                    errors.add(error);
+                }
+            });
+            worker.start();
+            workers.add(worker);
+        }
+        for (Thread worker : workers) worker.join();
+
+        assertThat(errors).isEmpty();
+        assertThat(store.expertThreadRuns(thread.id())).hasSize(count);
+        assertThat(store.expertThreadRuns(thread.id())).extracting("ordinal")
+                .containsExactlyInAnyOrder(1, 2, 3, 4, 5, 6);
+        String latest = store.expertThread(thread.id()).orElseThrow().latestRunId();
+        assertThat(runIds).contains(latest);
     }
 
     private SqliteRuntimeStore runtime() throws Exception {
