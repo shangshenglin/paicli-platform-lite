@@ -68,7 +68,13 @@ PaiCLI Server
 
 `EvaluationService` 在读取报告时同步终态 Trial，并从 Run、Message、ToolCall 和 ModelUsage 构建结构化评分快照。Case 的 `maxTokens` 明确定义为输出 Token，报告同时保留输入、输出和总 Token；工具数、输出 Token、耗时上限属于硬门禁，避免“超预算扣 10 分后仍刚好达到阈值”。Execution 只有在全部 Trial 达到阈值且通过资源门禁时通过；运行中报告保持可刷新，不阻塞 Worker 等待。
 
-`evaluation_baselines` 只接受已通过 Trial，保存人工确认的来源 Run、最终回答、工具名称序列、Token 口径和耗时。新基线使用输出 Token；迁移前基线以 `TOTAL` 标记并继续按总 Token 比较。基线不持久化为新的模型上下文，也不把原始 reasoning 作为严格相等条件；这避免模型升级时因合法路径变化产生大量伪回归。
+Case 分为 `RULE` 与 `REPOSITORY`。`RULE` 保持原有工具/回答/资源确定性评分；`REPOSITORY` 借鉴 SWE-bench 的执行式方法，只使用私有 fixture。`data/evaluation-fixtures/{fixtureRef}/workspace` 是固定缺陷快照，`hidden` 是模型不可见的 Grader 文件源。启动 Trial 前，`RepositoryEvaluationService` 校验覆盖 `workspace` 与 `hidden` 的目录级 SHA-256，在 Run 入队前复制公开工作区到唯一 workspace owner，并把 fixture 摘要、Grader Spec 与 Patch Policy 冻结到 `evaluation_trials.case_snapshot_json`；评分前再次复核摘要，因此 Case 后续编辑或 fixture 中途漂移都不能静默改变正在执行或历史 Trial。
+
+仓库 Run 终态后，评测器比较原 fixture 与 Agent workspace 的文件摘要，拒绝符号链接、保留的 `.paicli-evaluation` 路径、禁止 glob、超量文件和超大 Patch。通过完整性检查后，在 Run 挂载内创建全新的 grader 副本，应用文件差异并从 fixture `hidden/` 注入映射文件；模型上下文和 Agent workspace 从未包含隐藏文件、Grader 命令或正确 Patch。grader 准备、FAIL_TO_PASS、PASS_TO_PASS 均先以固定幂等键持久化为内部 ToolCall，再按顺序进入 Docker Sandbox；刷新/恢复复用已完成结果。Local Sandbox 不获得宿主命令能力，因此仓库 Grader 在 Local 模式会明确失败。
+
+仓库 Trial 同时保存四个正交结论：`resolved` 表示 F2P/P2P 全部通过，`integrityPassed` 表示 Patch 边界有效，`securityPassed` 表示未触发禁止工具/回答，`budgetPassed` 表示工具、Token、耗时在预算内。Trial 的正式 `passed` 要求 resolved、完整性、安全和 Run 正常完成；预算只单独报告，不把功能正确性压缩成含义模糊的扣分。Execution 报告汇总 resolved Trial、稳定全通过 Case 与每 resolved Token。
+
+`evaluation_baselines` 只接受已通过 Trial，保存人工确认的来源 Run、最终回答、工具名称序列、Token 口径、耗时和 Trial Grader 详情。新基线使用输出 Token；迁移前基线以 `TOTAL` 标记并继续按总 Token 比较。`RULE` 继续检查关键工具保留；`REPOSITORY` 不要求重复相同工具路径，而是比较 resolved，并分别显示输出 Token 150% 与耗时 200% 回归线。基线不持久化为新的模型上下文，也不把原始 reasoning 作为严格相等条件；这避免模型升级时因合法路径变化产生大量伪回归。
 
 版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
 
@@ -211,7 +217,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 38：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 39：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定，39 增加私有仓库 fixture/grader、不可变 Trial Case 快照和 Baseline Grader 详情。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

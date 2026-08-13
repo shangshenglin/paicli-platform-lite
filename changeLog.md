@@ -4,6 +4,15 @@
 
 ## 2026-08-13
 
+### 私有仓库 SWE-bench 风格执行式评测
+
+- 变更：Evaluation Case 增加向后兼容的 `RULE/REPOSITORY` 类型以及 fixture 引用/摘要、Grader Spec 和 Patch Policy；迁移 39 为 Trial 增加不可变 Case 快照、为 Baseline 增加 Grader 详情。现有 Starter Pack 与规则评分不变。
+- 变更：新增 `RepositoryEvaluationService`。仓库 Trial 在 Run 入队前从 `data/evaluation-fixtures/{ref}/workspace` 复制独立工作区并校验覆盖公开工作区与隐藏测试的 fixture SHA-256，评分前再次拒绝 fixture 漂移；Run 终态后比较文件摘要，拒绝符号链接、Agent 伪造的保留 grader 目录、禁止路径、超量文件和超大 Patch（新增、修改、删除均计入字节预算），再在新的 grader 副本中应用差异并从 fixture `hidden/` 注入模型不可见文件。
+- 变更：grader prepare、FAIL_TO_PASS 与 PASS_TO_PASS 都先使用固定 idempotency key 持久化为内部 ToolCall，再按顺序进入现有 Sandbox；刷新或恢复复用已完成 ToolCall。报告分离 `resolved`、Patch 完整性、安全、预算和 Run 完成状态，增加 resolved Trial、稳定 Case 与每 resolved Token 汇总；仓库 Baseline 不再把具体工具路径作为功能正确性的替代指标。
+- 变更：新增 fixture inspect API、Console 仓库 Case 表单及 F2P/P2P/改动文件报告；同步 README API/数据目录/运行语义、`docs/architecture.md` 和 `docs/phases.md`。Sandbox 行为边界本身未改变：仓库 Grader 只在已有 Docker `execute_command` 能力中运行，Local 仍拒绝宿主命令，因此 `docs/docker-sandbox.md` 不适用；未修改产品站，`paicli-site/README.md` 不适用。
+- 思路：只借鉴 SWE-bench 的固定缺陷快照、隐藏测试、FAIL_TO_PASS、PASS_TO_PASS 和执行式判分，不接入或捆绑公开 SWE-bench Verified，也不宣称生成官方成绩。功能、安全、稳定性与成本保持可分别解释，避免“调用了指定工具/回答包含关键词”被误当成代码已经修复。
+- 验证：新增 `RepositoryEvaluationServiceTest`，覆盖完整 fixture 摘要、Run 前及评分前漂移拒绝、Run 前工作区准备、不可变 Trial 快照、Agent/Grader 工作区隔离、隐藏文件注入、F2P/P2P 顺序、Grader ToolCall 持久化和 resolved 汇总；定向 Evaluation/Store 测试通过。以 `paicli.sandbox-mode=local` 执行最终全量回归，Common 3、Server 253、Sandbox Agent 4，共 260 项测试全部通过；前端 `node --check` 与 `git diff --check` 通过。默认 Docker 模式因当前终端没有 Docker CLI 而使 13 个 Spring 上下文测试失败；标准 `clean test`、`clean package` 以及非 clean `package` 均因正在运行的既有 Server 进程锁定 `paicli-server-0.6.0-SNAPSHOT.jar`，分别无法清理或在 Spring Boot repackage 阶段重命名该文件，未擅自停止进程。真实 Docker Grader 端到端验证因此尚未执行。
+
 ### Docker Sandbox 工具链、临时 HOME 与网络隔离增强
 
 - 变更：Docker Sandbox 默认网络从共享 internal network 收紧为 `none`，控制面继续使用 `docker exec` + 容器 loopback；如配置自定义网络，启动时验证其 Docker `Internal=true`，非内部网络拒绝启动，不存在时只以 `--internal` 创建。
@@ -311,7 +320,7 @@
 ### 外部 Harness Token 成本优化设计基线
 
 - 变更：新增 `docs/harness-token-optimization.md`，以本机“写一个推箱子小游戏”协作任务为复盘样本，记录 8 个关联 Run、53 次实际模型调用、1,379,337 输入 Token、51,075 输出 Token、1,093,376 cached input Token 和 14 次重试，并按初始 Leader、成员委派、终态 `RUN_EVENT`、评论 `REPLY`、供应商 429 限流和取消逐项解释调用放大的原因；同时记录专家档案绑定方案未解析、Task-Run 回退服务端默认 Kimi 的真实路由事实。
-- 变更：明确现有 ContextManager/Context Manifest、稳定缓存前缀、按需工具 Schema、Run 级预算和项目级用量的能力边界；规划阶段 25 的任务级外部 Harness，包括 Token/费用信封、原子预留结算、Trigger 合并、Leader 单飞、429 冷却、结构化交接包、角色 Context Profile、确定性工具结果归并、模型分层和质量/成本联合评测。
+- 变更：明确现有 ContextManager/Context Manifest、稳定缓存前缀、按需工具 Schema、Run 级预算和项目级用量的能力边界；当前阶段清单将该任务级外部 Harness 顺延为阶段 26，包括 Token/费用信封、原子预留结算、Trigger 合并、Leader 单飞、429 冷却、结构化交接包、角色 Context Profile、确定性工具结果归并、模型分层和质量/成本联合评测。
 - 思路：Prompt Cache 只能降低重复前缀的单价，不能减少不必要的模型调用、输出、动态上下文和失败重试；任务级 Harness 应在模型调用前以确定性规则判断“是否有新证据且值得再决策”，并保留 Trigger/Run/Approval/Sandbox/人工验收的完整审计链路。对 Claude Code 与 Codex 只引用公开文档可验证的项目记忆、回合上限、网关预算/路由、精简 Prompt/工具、缓存与可独立拆分的多 Agent 实践，不推断其未公开的内部实现。
 - 文档：README 增加设计入口，architecture 与 phases 同步标记为后续方向；未变更 API、数据库迁移、Sandbox、启动配置或产品站点，故 OpenAPI、`docs/docker-sandbox.md`、README 配置/启动说明和 `paicli-site/README.md` 不适用。
 - 验证：只读查询本机 SQLite 的 Task-Run、Run、Trigger 和 Model Usage 数据，并核对 CollaborationService、RunProcessor、ContextManager、ToolCatalog 与 ProductivityStore 的现有实现；外部参照仅查阅 Anthropic 和 OpenAI 官方文档。该次为文档变更，未改变运行时行为，未执行 Maven 测试；交付前执行 `git diff --check`。

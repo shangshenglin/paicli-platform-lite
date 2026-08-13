@@ -2,7 +2,7 @@
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–24，并补齐 Memory/RAG/Plan/Agent Harness、持久化 CollaborationTask、结构化团队路由、事件驱动 Leader 唤醒、受控并行、多 Shell 执行和 Context/Memory 认知控制层；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–25，并补齐 Memory/RAG/Plan/Agent Harness、持久化 CollaborationTask、结构化团队路由、事件驱动 Leader 唤醒、受控并行、多 Shell 执行、Context/Memory 认知控制层和私有仓库执行式评测；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 外部 Harness 的下一步不再只是压缩单次 Prompt，而是以任务为单位控制模型调用、事件合并、Agent 交接、模型分层与成本质量评测；本机“推箱子”协作任务的真实用量复盘和可落地优化顺序见 [外部 Harness Token 成本优化方案](docs/harness-token-optimization.md)。
 
@@ -497,7 +497,7 @@ data/workspaces/{runId}/PAI.md
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.2.0` 包含 7 个套件、28 个用例：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.3.0` 包含 8 个套件、36 个用例：
 
 - **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
 - **工具与审批**：写文件、普通读取/构建/测试命令、危险命令等待审批、破坏性命令拒绝和写后读取；只有风险分类命中的命令会真实等待 Approval。
@@ -523,6 +523,16 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 
 Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。当前版本没有把 LLM-as-Judge 当作硬门禁，也不严格比较原始 reasoning；开放式语义 Rubric 留作后续扩展。
 
+#### SWE-bench 方法借鉴：私有仓库任务评测
+
+Case 新增 `RULE` 与 `REPOSITORY` 两种类型。`RULE` 完全保持上述确定性规则评分；`REPOSITORY` 面向内部代码任务，借鉴 SWE-bench 的固定缺陷快照、FAIL_TO_PASS、PASS_TO_PASS 和独立执行式判分，但不下载、捆绑或宣称运行公开 SWE-bench Verified 数据集。
+
+私有 fixture 放在 `data/evaluation-fixtures/{fixtureRef}/`：`workspace/` 是 Agent 可见的固定缺陷快照，`hidden/` 只保存 Grader 结束后注入的测试文件。创建 Case 前通过 `GET /v1/evaluations/fixtures/inspect?fixtureRef=...` 取得覆盖整个 fixture（含 `workspace/` 与 `hidden/`）的确定性 SHA-256，并把摘要与 Grader/Patch Policy 一起保存；每个 Trial 再冻结不可变 Case 快照，评分前会复核摘要，后续编辑 Case 或中途修改 fixture 都不会静默改变已开始 Trial 的判分语义。
+
+仓库 Trial 在排队前复制独立 workspace；Run 终态后比较 fixture 与 Agent workspace，检查修改文件数、Patch 字节和禁止路径。通过完整性门禁后，Server 在保留的 Run 挂载内创建新的 `.paicli-evaluation/grader` 副本，应用 Agent 文件差异，再从 fixture 的 `hidden/` 注入映射文件。F2P 与 P2P 命令由 Server 配置并按顺序执行；准备动作和两个 Grader 命令都先以固定 idempotency key 持久化为内部 ToolCall，恢复时复用结果。模型不能看到隐藏目录、Grader 命令或正确 Patch。
+
+仓库任务以 `resolved` 为功能主指标：Patch 完整、F2P 与 P2P 全部退出 0 才为真；正式 Trial 通过还要求 Run 正常完成且无禁止工具/回答违规。Token、耗时和工具数单独报告为 `budgetPassed`，不再用资源扣分掩盖功能结果。Execution 报告额外汇总 resolved 数、稳定通过 Case 数和每 resolved Token。仓库 Grader 必须使用 Docker Sandbox；Local 模式继续拒绝宿主命令执行。
+
 ## 数据目录
 
 ```text
@@ -531,6 +541,9 @@ data/
 ├─ workspaces/{runId}/
 ├─ artifacts/
 ├─ audit/
+├─ evaluation-fixtures/{fixtureRef}/
+│  ├─ workspace/
+│  └─ hidden/
 ├─ prompts/
 │  └─ AGENTS.md
 ├─ skills/{name}/
@@ -542,7 +555,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–38：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性）。
+SQLite `schema_migrations` 当前记录版本 1–39：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定，39 增加仓库评测 fixture/grader/Patch Policy、Trial Case 快照和 Baseline Grader 详情。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
@@ -764,6 +777,7 @@ PUT/DELETE                  /v1/productivity/notifications/{id}
 
 ```text
 POST                        /v1/evaluations/starter-pack
+GET                         /v1/evaluations/fixtures/inspect?fixtureRef=...
 GET/POST                    /v1/evaluations/suites
 PUT/DELETE                  /v1/evaluations/suites/{suiteId}
 GET/POST                    /v1/evaluations/suites/{suiteId}/cases
@@ -773,7 +787,7 @@ GET                         /v1/evaluations/executions/{executionId}
 POST                        /v1/evaluations/trials/{trialId}/baseline
 ```
 
-`POST /v1/evaluations/suites/{suiteId}/executions` 可选传 `agentTeamId`。未传时保持单 Agent 基线；传入时每个 Trial 绑定该团队 Leader，并将成员、并发、深度和 Reviewer/Runner 约束固化到普通 Run 的协作策略。
+`POST /v1/evaluations/suites/{suiteId}/executions` 可选传 `agentTeamId`。未传时保持单 Agent 基线；传入时每个 Trial 绑定该团队 Leader，并将成员、并发、深度和 Reviewer/Runner 约束固化到普通 Run 的协作策略。`EvaluationCaseRequest.caseType=REPOSITORY` 时还需传 `fixtureRef`、`fixtureSha256`、`grader` 和 `patchPolicy`；详情见上方“私有仓库任务评测”。
 
 ### CollaborationTask 与结构化路由
 
@@ -831,7 +845,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - SQLite Store、迁移 1–34、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路，以及 7 套件/28 Case Starter Pack 完整性和幂等安装。
+- Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路、8 套件/36 Case Starter Pack，以及私有仓库 fixture 摘要、Case 快照、Patch 完整性、隐藏测试注入和 F2P/P2P 独立判分。
 
 此外已完成：
 
@@ -849,7 +863,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - MCP 当前只支持远程 Streamable HTTP，不管理本地 stdio MCP 进程。
 - 默认不依赖外部向量数据库；未配置真实 Embedding 时使用明确的本地降级。
 - 图片型 PDF 支持受限 OCR/视觉路径；尚不支持音频和视频理解。
-- 评测第一版是确定性安全、工具、关键文本和预算门禁，不等同于开放式语义质量评价或无偏 LLM Judge。
+- `RULE` 评测是确定性安全、工具、关键文本和预算门禁，不等同于开放式语义质量评价或无偏 LLM Judge；`REPOSITORY` 只代表内部 SWE-bench 风格执行式评测，不是官方 SWE-bench Verified 成绩。
 - 单机 SQLite 通过一次性 WAL 初始化、30 秒写锁等待和短事务承载并发；它降低锁冲突但不等同于多节点数据库，高写入规模仍应迁移 PostgreSQL。
 
 ## 文档与产品站点

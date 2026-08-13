@@ -91,7 +91,9 @@ final class ApiDtos {
                                  List<String> requiredTools, List<String> forbiddenTools,
                                  List<String> requiredResponse, List<String> forbiddenResponse,
                                  Integer maxToolCalls, Integer maxTokens, Long maxDurationMs,
-                                 Boolean enabled) { }
+                                 Boolean enabled, String caseType, String fixtureRef,
+                                 String fixtureSha256, Map<String, Object> grader,
+                                 Map<String, Object> patchPolicy) { }
 
     record EvaluationStartRequest(String modelProfileId, String agentTeamId,
                                   Integer trialCount, Integer passThreshold) { }
