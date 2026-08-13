@@ -511,6 +511,14 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id) ON DELETE CASCADE)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_cases_suite " +
                     "ON evaluation_cases(suite_id,enabled,name)");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "case_type",
+                    "TEXT NOT NULL DEFAULT 'RULE'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "fixture_ref", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "fixture_sha256", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "grader_spec_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "patch_policy_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_executions (" +
                     "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, project_key TEXT NOT NULL, status TEXT NOT NULL, " +
                     "model_profile_id TEXT, trial_count INTEGER NOT NULL, pass_threshold INTEGER NOT NULL, " +
@@ -528,6 +536,8 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_trials_execution " +
                     "ON evaluation_trials(execution_id,case_id,ordinal)");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_trials", "case_snapshot_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_baselines (" +
                     "case_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, response TEXT NOT NULL, " +
                     "tool_names_json TEXT NOT NULL, tokens INTEGER NOT NULL, " +
@@ -536,6 +546,8 @@ public class SqliteRuntimeStore {
                     "FOREIGN KEY(case_id) REFERENCES evaluation_cases(id) ON DELETE CASCADE)");
             SqliteSchemaMigrator.ensureColumn(connection, "evaluation_baselines", "token_metric",
                     "TEXT NOT NULL DEFAULT 'TOTAL'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_baselines", "details_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE TABLE IF NOT EXISTS plans (" +
                     "id TEXT PRIMARY KEY, session_id TEXT, run_id TEXT, project_key TEXT NOT NULL, " +
                     "objective TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, " +

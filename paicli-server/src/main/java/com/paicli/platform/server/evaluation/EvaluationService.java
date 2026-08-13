@@ -24,6 +24,7 @@ import java.util.Set;
 @Service
 public class EvaluationService {
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
+    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() { };
     private static final Set<RunStatus> TERMINAL = Set.of(
             RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED);
 
@@ -31,14 +32,22 @@ public class EvaluationService {
     private final SqliteRuntimeStore runtime;
     private final ProductivityStore productivity;
     private final ObjectMapper mapper;
+    private final RepositoryEvaluationService repositoryEvaluations;
 
     @Autowired
     public EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
-                             ProductivityStore productivity, ObjectMapper mapper) {
+                             ProductivityStore productivity, ObjectMapper mapper,
+                             RepositoryEvaluationService repositoryEvaluations) {
         this.evaluations = evaluations;
         this.runtime = runtime;
         this.productivity = productivity;
         this.mapper = mapper;
+        this.repositoryEvaluations = repositoryEvaluations;
+    }
+
+    EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
+                      ProductivityStore productivity, ObjectMapper mapper) {
+        this(evaluations, runtime, productivity, mapper, null);
     }
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime, ObjectMapper mapper) {
@@ -73,22 +82,37 @@ public class EvaluationService {
         try {
             for (var evaluationCase : cases) {
                 for (int ordinal = 1; ordinal <= trials; ordinal++) {
+                    RepositoryEvaluationService.PreparedRepositoryCase prepared = null;
+                    if ("REPOSITORY".equals(evaluationCase.caseType())) {
+                        if (repositoryEvaluations == null) {
+                            throw new IllegalStateException("repository evaluation is unavailable");
+                        }
+                        prepared = repositoryEvaluations.prepare(evaluationCase,
+                                evaluationWorkspaceOwner(execution.id(), evaluationCase.id(), ordinal));
+                    }
                     var session = runtime.createInternalSession(
                             "Evaluation: " + suite.name() + " / " + evaluationCase.name() + " #" + ordinal,
                             suite.projectKey());
-                    var run = leader == null
-                            ? runtime.createRun(session.id(), evaluationCase.prompt(), "auto", "", List.of(),
-                            modelProfileId, 0, 0)
-                            : runtime.createRun(session.id(), evaluationCase.prompt(),
-                            leader.thinkingMode(), leader.reasoningEffort(), List.of(), modelProfileId,
-                            leader.id(), 0, 0, leader.executionShell());
+                    var run = prepared == null
+                            ? leader == null
+                                ? runtime.createRun(session.id(), evaluationCase.prompt(), "auto", "", List.of(),
+                                modelProfileId, 0, 0)
+                                : runtime.createRun(session.id(), evaluationCase.prompt(),
+                                leader.thinkingMode(), leader.reasoningEffort(), List.of(), modelProfileId,
+                                leader.id(), 0, 0, leader.executionShell())
+                            : runtime.createRunInWorkspace(session.id(), evaluationCase.prompt(),
+                                leader == null ? "auto" : leader.thinkingMode(),
+                                leader == null ? "" : leader.reasoningEffort(), List.of(), modelProfileId,
+                                leader == null ? null : leader.id(), 0, 0,
+                                leader == null ? "bash" : leader.executionShell(), prepared.workspaceOwner());
                     if (team != null) {
                         runtime.saveCollaborationPolicy(run.id(), true, "MEDIUM", "MEDIUM",
                                 team.memberAgentProfileIdsJson(), team.maxExperts(), team.maxDepth(),
                                 team.maxExperts(), team.maxConcurrency(), 0, 0, team.maxDepth() > 1,
                                 team.requireReviewer(), team.requireRunner());
                     }
-                    evaluations.addTrial(execution.id(), evaluationCase.id(), ordinal, session.id(), run.id());
+                    evaluations.addTrial(execution.id(), evaluationCase.id(), ordinal, session.id(), run.id(),
+                            prepared == null ? "{}" : prepared.caseSnapshotJson());
                 }
             }
             return execution;
@@ -112,7 +136,7 @@ public class EvaluationService {
             return new TrialResult(trial, evaluationCase == null ? trial.caseId() : evaluationCase.name(),
                     evaluations.baseline(trial.caseId()).isPresent(), details);
         }).toList();
-        return new EvaluationReport(suite, execution, trials);
+        return new EvaluationReport(suite, execution, trials, summary(trials));
     }
 
     private Map<String, Object> liveDetails(EvaluationStore.EvaluationTrial trial,
@@ -141,10 +165,13 @@ public class EvaluationService {
         if (!Boolean.TRUE.equals(trial.passed())) {
             throw new IllegalStateException("only a passed trial can become a baseline");
         }
-        var tools = runtime.toolCallsForRun(run.id()).stream().map(ToolCallRecord::toolName).toList();
+        var tools = runtime.toolCallsForRun(run.id()).stream()
+                .map(ToolCallRecord::toolName)
+                .filter(name -> !name.startsWith("evaluation_grader"))
+                .toList();
         var usage = runtime.modelTokenUsageForRun(run.id());
         return evaluations.saveBaseline(trial.caseId(), run.id(), finalResponse(run), write(tools),
-                usage.outputTokens(), "OUTPUT", duration(run));
+                usage.outputTokens(), "OUTPUT", duration(run), trial.detailsJson());
     }
 
     private void synchronize(String executionId) {
@@ -173,6 +200,10 @@ public class EvaluationService {
     private void grade(EvaluationStore.EvaluationExecution execution,
                        EvaluationStore.EvaluationTrial trial, RunRecord run) {
         var evaluationCase = evaluations.evaluationCase(trial.caseId()).orElseThrow();
+        if (isRepositoryTrial(trial)) {
+            gradeRepository(execution, trial, run, evaluationCase);
+            return;
+        }
         var tools = runtime.toolCallsForRun(run.id());
         List<String> toolNames = tools.stream().map(ToolCallRecord::toolName).toList();
         String response = finalResponse(run);
@@ -250,6 +281,82 @@ public class EvaluationService {
         evaluations.completeTrial(trial.id(), run.status().name(), score, passed, write(details));
     }
 
+    private void gradeRepository(EvaluationStore.EvaluationExecution execution,
+                                 EvaluationStore.EvaluationTrial trial, RunRecord run,
+                                 EvaluationStore.EvaluationCase evaluationCase) {
+        if (repositoryEvaluations == null) {
+            evaluations.completeTrial(trial.id(), "FAILED", 0, false,
+                    write(Map.of("summary", "repository grader is unavailable", "resolved", false)));
+            return;
+        }
+        var agentTools = runtime.toolCallsForRun(run.id()).stream()
+                .filter(tool -> !"evaluation_grader".equals(tool.toolName())).toList();
+        List<String> toolNames = agentTools.stream().map(ToolCallRecord::toolName).toList();
+        var usage = runtime.modelTokenUsageForRun(run.id());
+        long duration = duration(run);
+        RepositoryEvaluationService.RepositoryGrade grade = repositoryEvaluations.grade(trial, run);
+
+        List<Map<String, Object>> checks = new ArrayList<>();
+        boolean securityPassed = true;
+        for (String forbidden : readList(evaluationCase.forbiddenToolsJson())) {
+            boolean ok = !toolNames.contains(forbidden);
+            securityPassed &= ok;
+            checks.add(Map.of("rule", "forbidden_tool", "passed", ok, "deduction", ok ? 0 : 100,
+                    "evidence", forbidden));
+        }
+        String response = finalResponse(run);
+        for (String forbidden : readList(evaluationCase.forbiddenResponseJson())) {
+            boolean ok = !response.contains(forbidden);
+            securityPassed &= ok;
+            checks.add(Map.of("rule", "forbidden_response", "passed", ok, "deduction", ok ? 0 : 100,
+                    "evidence", forbidden));
+        }
+        boolean toolBudgetPassed = evaluationCase.maxToolCalls() <= 0
+                || agentTools.size() <= evaluationCase.maxToolCalls();
+        boolean tokenBudgetPassed = evaluationCase.maxTokens() <= 0
+                || usage.outputTokens() <= evaluationCase.maxTokens();
+        boolean durationBudgetPassed = evaluationCase.maxDurationMs() <= 0
+                || duration <= evaluationCase.maxDurationMs();
+        boolean budgetPassed = toolBudgetPassed && tokenBudgetPassed && durationBudgetPassed;
+        boolean runCompleted = run.status() == RunStatus.COMPLETED;
+        boolean passed = grade.resolved() && grade.integrityPassed() && securityPassed && runCompleted;
+        int score = grade.resolved() && grade.integrityPassed() ? 100 : 0;
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("summary", passed ? "passed" : "failed");
+        details.put("caseType", "REPOSITORY");
+        details.put("resolved", grade.resolved());
+        details.put("integrityPassed", grade.integrityPassed());
+        details.put("securityPassed", securityPassed);
+        details.put("budgetPassed", budgetPassed);
+        details.put("budget", Map.of(
+                "toolCalls", toolBudgetPassed,
+                "outputTokens", tokenBudgetPassed,
+                "duration", durationBudgetPassed));
+        details.put("runCompleted", runCompleted);
+        details.put("runStatus", run.status().name());
+        details.put("toolNames", toolNames);
+        details.put("toolCalls", agentTools.size());
+        addTokenDetails(details, usage);
+        details.put("durationMs", duration);
+        details.put("response", response);
+        details.put("checks", checks);
+        details.put("repository", mapper.convertValue(grade, MAP_TYPE));
+        details.put("passThresholdIgnored", execution.passThreshold());
+
+        var baseline = evaluations.baseline(evaluationCase.id()).orElse(null);
+        if (baseline != null) {
+            details.put("baseline", Map.of(
+                    "outputTokens", baseline.tokens(),
+                    "durationMs", baseline.durationMs(),
+                    "tokenWithin150Percent", baseline.tokens() <= 0
+                            || usage.outputTokens() <= Math.ceil(baseline.tokens() * 1.5),
+                    "durationWithin200Percent", baseline.durationMs() <= 0
+                            || duration <= Math.ceil(baseline.durationMs() * 2.0)));
+        }
+        evaluations.completeTrial(trial.id(), run.status().name(), score, passed, write(details));
+    }
+
     private static int deduct(int score, int points, List<Map<String, Object>> checks,
                               String rule, boolean passed, String evidence) {
         checks.add(Map.of("rule", rule, "passed", passed, "deduction", points, "evidence", evidence));
@@ -290,9 +397,47 @@ public class EvaluationService {
         catch (Exception e) { throw new IllegalStateException("failed to serialize evaluation data", e); }
     }
 
+    private static String evaluationWorkspaceOwner(String executionId, String caseId, int ordinal) {
+        return "evaluation-" + executionId + "-" + caseId + "-" + ordinal;
+    }
+
+    private boolean isRepositoryTrial(EvaluationStore.EvaluationTrial trial) {
+        try {
+            return "REPOSITORY".equals(mapper.readTree(trial.caseSnapshotJson()).path("caseType").asText());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static Map<String, Object> summary(List<TrialResult> trials) {
+        long completed = trials.stream().filter(value -> value.trial().score() != null).count();
+        long passed = trials.stream().filter(value -> Boolean.TRUE.equals(value.trial().passed())).count();
+        long repositoryTrials = trials.stream()
+                .filter(value -> "REPOSITORY".equals(value.details().get("caseType"))).count();
+        long resolved = trials.stream().filter(value -> Boolean.TRUE.equals(value.details().get("resolved"))).count();
+        long stableCases = trials.stream().collect(java.util.stream.Collectors.groupingBy(
+                        value -> value.trial().caseId()))
+                .values().stream().filter(group -> !group.isEmpty()
+                        && group.stream().allMatch(value -> Boolean.TRUE.equals(value.trial().passed()))).count();
+        long successfulTokens = trials.stream()
+                .filter(value -> Boolean.TRUE.equals(value.details().get("resolved")))
+                .mapToLong(value -> numberValue(value.details().get("totalTokens"))).sum();
+        return Map.of(
+                "completedTrials", completed,
+                "passedTrials", passed,
+                "repositoryTrials", repositoryTrials,
+                "resolvedTrials", resolved,
+                "stableCases", stableCases,
+                "tokensPerResolved", resolved == 0 ? 0 : successfulTokens / resolved);
+    }
+
+    private static long numberValue(Object value) {
+        return value instanceof Number number ? number.longValue() : 0;
+    }
+
     public record EvaluationReport(EvaluationStore.EvaluationSuite suite,
                                    EvaluationStore.EvaluationExecution execution,
-                                   List<TrialResult> trials) { }
+                                   List<TrialResult> trials, Map<String, Object> summary) { }
     public record TrialResult(EvaluationStore.EvaluationTrial trial, String caseName,
                               boolean hasBaseline, Map<String, Object> details) { }
 }

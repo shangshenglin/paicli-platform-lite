@@ -98,12 +98,23 @@ public class EvaluationStore {
                                    String requiredToolsJson, String forbiddenToolsJson,
                                    String requiredResponseJson, String forbiddenResponseJson,
                                    int maxToolCalls, int maxTokens, long maxDurationMs, boolean enabled) {
+        return saveCase(id, suiteId, name, prompt, requiredToolsJson, forbiddenToolsJson,
+                requiredResponseJson, forbiddenResponseJson, maxToolCalls, maxTokens,
+                maxDurationMs, enabled, "RULE", null, null, "{}", "{}");
+    }
+
+    public EvaluationCase saveCase(String id, String suiteId, String name, String prompt,
+                                   String requiredToolsJson, String forbiddenToolsJson,
+                                   String requiredResponseJson, String forbiddenResponseJson,
+                                   int maxToolCalls, int maxTokens, long maxDurationMs, boolean enabled,
+                                   String caseType, String fixtureRef, String fixtureSha256,
+                                   String graderSpecJson, String patchPolicyJson) {
         if (suite(suiteId).isEmpty()) throw new IllegalArgumentException("evaluation suite not found: " + suiteId);
         Instant now = Instant.now();
         String resolvedId = blank(id) ? id("eval-case") : id;
         String sql = blank(id)
-                ? "INSERT INTO evaluation_cases(id,suite_id,name,prompt,required_tools_json,forbidden_tools_json,required_response_json,forbidden_response_json,max_tool_calls,max_tokens,max_duration_ms,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-                : "UPDATE evaluation_cases SET suite_id=?,name=?,prompt=?,required_tools_json=?,forbidden_tools_json=?,required_response_json=?,forbidden_response_json=?,max_tool_calls=?,max_tokens=?,max_duration_ms=?,enabled=?,updated_at=? WHERE id=?";
+                ? "INSERT INTO evaluation_cases(id,suite_id,name,prompt,required_tools_json,forbidden_tools_json,required_response_json,forbidden_response_json,max_tool_calls,max_tokens,max_duration_ms,enabled,case_type,fixture_ref,fixture_sha256,grader_spec_json,patch_policy_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                : "UPDATE evaluation_cases SET suite_id=?,name=?,prompt=?,required_tools_json=?,forbidden_tools_json=?,required_response_json=?,forbidden_response_json=?,max_tool_calls=?,max_tokens=?,max_duration_ms=?,enabled=?,case_type=?,fixture_ref=?,fixture_sha256=?,grader_spec_json=?,patch_policy_json=?,updated_at=? WHERE id=?";
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(sql)) {
             int i = 1;
             if (blank(id)) ps.setString(i++, resolvedId);
@@ -113,6 +124,11 @@ public class EvaluationStore {
             ps.setString(i++, json(requiredResponseJson)); ps.setString(i++, json(forbiddenResponseJson));
             ps.setInt(i++, Math.max(0, maxToolCalls)); ps.setInt(i++, Math.max(0, maxTokens));
             ps.setLong(i++, Math.max(0, maxDurationMs)); ps.setInt(i++, enabled ? 1 : 0);
+            ps.setString(i++, normalizeCaseType(caseType));
+            ps.setString(i++, nullableOptional(fixtureRef, 240));
+            ps.setString(i++, nullableOptional(fixtureSha256, 64));
+            ps.setString(i++, objectJson(graderSpecJson));
+            ps.setString(i++, objectJson(patchPolicyJson));
             if (blank(id)) ps.setString(i++, now.toString());
             ps.setString(i++, now.toString());
             if (!blank(id)) ps.setString(i, resolvedId);
@@ -169,12 +185,18 @@ public class EvaluationStore {
 
     public EvaluationTrial addTrial(String executionId, String caseId, int ordinal,
                                     String sessionId, String runId) {
+        return addTrial(executionId, caseId, ordinal, sessionId, runId, "{}");
+    }
+
+    public EvaluationTrial addTrial(String executionId, String caseId, int ordinal,
+                                    String sessionId, String runId, String caseSnapshotJson) {
         String id = id("eval-trial"); Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO evaluation_trials(id,execution_id,case_id,ordinal,session_id,run_id,status,created_at) VALUES(?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO evaluation_trials(id,execution_id,case_id,ordinal,session_id,run_id,status,case_snapshot_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, id); ps.setString(2, executionId); ps.setString(3, caseId);
             ps.setInt(4, ordinal); ps.setString(5, sessionId); ps.setString(6, runId);
-            ps.setString(7, "RUNNING"); ps.setString(8, now.toString()); ps.executeUpdate();
+            ps.setString(7, "RUNNING"); ps.setString(8, objectJson(caseSnapshotJson));
+            ps.setString(9, now.toString()); ps.executeUpdate();
             return trial(id).orElseThrow();
         } catch (SQLException e) { throw failure("create evaluation trial", e); }
     }
@@ -229,17 +251,25 @@ public class EvaluationStore {
     public EvaluationBaseline saveBaseline(String caseId, String sourceRunId, String response,
                                            String toolNamesJson, int tokens, String tokenMetric,
                                            long durationMs) {
+        return saveBaseline(caseId, sourceRunId, response, toolNamesJson, tokens, tokenMetric,
+                durationMs, "{}");
+    }
+
+    public EvaluationBaseline saveBaseline(String caseId, String sourceRunId, String response,
+                                           String toolNamesJson, int tokens, String tokenMetric,
+                                           long durationMs, String detailsJson) {
         Instant now = Instant.now();
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO evaluation_baselines(case_id,source_run_id,response,tool_names_json,tokens,token_metric,duration_ms,created_at,updated_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET source_run_id=excluded.source_run_id," +
+                "INSERT INTO evaluation_baselines(case_id,source_run_id,response,tool_names_json,tokens,token_metric,duration_ms,details_json,created_at,updated_at) " +
+                        "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET source_run_id=excluded.source_run_id," +
                         "response=excluded.response,tool_names_json=excluded.tool_names_json,tokens=excluded.tokens," +
-                        "token_metric=excluded.token_metric,duration_ms=excluded.duration_ms,updated_at=excluded.updated_at")) {
+                        "token_metric=excluded.token_metric,duration_ms=excluded.duration_ms," +
+                        "details_json=excluded.details_json,updated_at=excluded.updated_at")) {
             ps.setString(1, caseId); ps.setString(2, sourceRunId); ps.setString(3, response == null ? "" : response);
             ps.setString(4, toolNamesJson); ps.setInt(5, Math.max(0, tokens));
             ps.setString(6, "OUTPUT".equalsIgnoreCase(tokenMetric) ? "OUTPUT" : "TOTAL");
-            ps.setLong(7, Math.max(0, durationMs)); ps.setString(8, now.toString());
-            ps.setString(9, now.toString()); ps.executeUpdate();
+            ps.setLong(7, Math.max(0, durationMs)); ps.setString(8, objectJson(detailsJson));
+            ps.setString(9, now.toString()); ps.setString(10, now.toString()); ps.executeUpdate();
             return baseline(caseId).orElseThrow();
         } catch (SQLException e) { throw failure("save evaluation baseline", e); }
     }
@@ -263,7 +293,20 @@ public class EvaluationStore {
         if (normalized.length() > limit) throw new IllegalArgumentException("value is too long");
         return normalized;
     }
+    private static String nullableOptional(String value, int limit) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.length() > limit) throw new IllegalArgumentException("value is too long");
+        return normalized.isBlank() ? null : normalized;
+    }
     private static String json(String value) { return blank(value) ? "[]" : value; }
+    private static String objectJson(String value) { return blank(value) ? "{}" : value; }
+    private static String normalizeCaseType(String value) {
+        String normalized = blank(value) ? "RULE" : value.trim().toUpperCase(java.util.Locale.ROOT);
+        if (!normalized.equals("RULE") && !normalized.equals("REPOSITORY")) {
+            throw new IllegalArgumentException("caseType must be RULE or REPOSITORY");
+        }
+        return normalized;
+    }
     private static int range(int value, int min, int max, String name) {
         if (value < min || value > max) throw new IllegalArgumentException(name + " must be between " + min + " and " + max);
         return value;
@@ -281,7 +324,10 @@ public class EvaluationStore {
                 rs.getString("prompt"), rs.getString("required_tools_json"), rs.getString("forbidden_tools_json"),
                 rs.getString("required_response_json"), rs.getString("forbidden_response_json"),
                 rs.getInt("max_tool_calls"), rs.getInt("max_tokens"), rs.getLong("max_duration_ms"),
-                rs.getInt("enabled") != 0, instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
+                rs.getInt("enabled") != 0, rs.getString("case_type"), rs.getString("fixture_ref"),
+                rs.getString("fixture_sha256"), rs.getString("grader_spec_json"),
+                rs.getString("patch_policy_json"), instant(rs.getString("created_at")),
+                instant(rs.getString("updated_at")));
     }
     private static EvaluationExecution execution(ResultSet rs) throws SQLException {
         Double score = rs.getObject("average_score") == null ? null : rs.getDouble("average_score");
@@ -296,13 +342,13 @@ public class EvaluationStore {
         Boolean passed = rs.getObject("passed") == null ? null : rs.getInt("passed") != 0;
         return new EvaluationTrial(rs.getString("id"), rs.getString("execution_id"), rs.getString("case_id"),
                 rs.getInt("ordinal"), rs.getString("session_id"), rs.getString("run_id"), rs.getString("status"),
-                score, passed, rs.getString("details_json"), instant(rs.getString("created_at")),
-                instant(rs.getString("completed_at")));
+                score, passed, rs.getString("details_json"), rs.getString("case_snapshot_json"),
+                instant(rs.getString("created_at")), instant(rs.getString("completed_at")));
     }
     private static EvaluationBaseline baseline(ResultSet rs) throws SQLException {
         return new EvaluationBaseline(rs.getString("case_id"), rs.getString("source_run_id"),
                 rs.getString("response"), rs.getString("tool_names_json"), rs.getInt("tokens"),
-                rs.getString("token_metric"), rs.getLong("duration_ms"),
+                rs.getString("token_metric"), rs.getLong("duration_ms"), rs.getString("details_json"),
                 instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
     }
 
@@ -312,14 +358,18 @@ public class EvaluationStore {
                                  String requiredToolsJson, String forbiddenToolsJson,
                                  String requiredResponseJson, String forbiddenResponseJson,
                                  int maxToolCalls, int maxTokens, long maxDurationMs, boolean enabled,
+                                 String caseType, String fixtureRef, String fixtureSha256,
+                                 String graderSpecJson, String patchPolicyJson,
                                  Instant createdAt, Instant updatedAt) { }
     public record EvaluationExecution(String id, String suiteId, String projectKey, String status,
                                       String modelProfileId, String agentTeamId, int trialCount, int passThreshold,
                                       Double averageScore, Boolean passed, Instant createdAt, Instant completedAt) { }
     public record EvaluationTrial(String id, String executionId, String caseId, int ordinal,
                                   String sessionId, String runId, String status, Integer score,
-                                  Boolean passed, String detailsJson, Instant createdAt, Instant completedAt) { }
+                                  Boolean passed, String detailsJson, String caseSnapshotJson,
+                                  Instant createdAt, Instant completedAt) { }
     public record EvaluationBaseline(String caseId, String sourceRunId, String response,
                                      String toolNamesJson, int tokens, String tokenMetric, long durationMs,
+                                     String detailsJson,
                                      Instant createdAt, Instant updatedAt) { }
 }

@@ -3396,8 +3396,9 @@ async function loadEvaluations() {
         caseList.append(element('summary', '', `查看 ${cases.length} 个用例`));
         cases.forEach(value => {
           const ruleCount = value.requiredTools.length + value.forbiddenTools.length + value.requiredResponse.length + value.forbiddenResponse.length;
+          const repositorySummary = value.caseType === 'REPOSITORY' ? ` · 仓库任务 · fixture ${value.fixtureRef || '未配置'}` : '';
           const child = workbenchItem(`${value.enabled ? '●' : '○'} ${value.name}`,
-            `${value.prompt} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} 输出 Token` : ''}`);
+            `${value.prompt}${repositorySummary} · ${ruleCount} 条内容规则${value.maxToolCalls ? ` · ≤${value.maxToolCalls} 工具` : ''}${value.maxTokens ? ` · ≤${value.maxTokens} 输出 Token` : ''}`);
           child.classList.add('evaluation-case-item');
           actionButton(child, value.enabled ? '停用' : '启用', () => setEvaluationCaseEnabled(value, !value.enabled));
           actionButton(child, '删除', async () => {
@@ -3459,6 +3460,11 @@ function openEvaluationCaseDialog(suite) {
   $('evaluationCaseForm').reset(); $('evaluationCaseForm').dataset.suiteId = suite.id;
   $('evaluationCaseSuite').textContent = `所属套件：${suite.name}`; $('evaluationCaseEnabled').checked = true;
   ['evaluationMaxTools', 'evaluationMaxTokens', 'evaluationMaxDuration'].forEach(id => { $(id).value = '0'; });
+  $('evaluationCaseType').value = 'RULE'; $('evaluationGraderShell').value = 'bash';
+  $('evaluationGraderTimeout').value = '90'; $('evaluationHiddenFiles').value = '[]';
+  $('evaluationPatchMaxFiles').value = '40'; $('evaluationPatchMaxBytes').value = '2000000';
+  $('evaluationFixtureInspection').textContent = '';
+  toggleRepositoryEvaluationFields();
   setFormError('evaluationCaseError'); $('evaluationCaseDialog').showModal(); $('evaluationCaseName').focus();
 }
 
@@ -3466,16 +3472,57 @@ function evaluationRuleList(id) {
   return $(id).value.split(/[\n,，]+/).map(value => value.trim()).filter(Boolean);
 }
 
+function toggleRepositoryEvaluationFields() {
+  const repository = $('evaluationCaseType').value === 'REPOSITORY';
+  document.querySelectorAll('[data-repository-field]').forEach(node => { node.hidden = !repository; });
+}
+
+function evaluationJson(id, fallback) {
+  const text = $(id).value.trim();
+  if (!text) return fallback;
+  return JSON.parse(text);
+}
+
+async function inspectEvaluationFixture() {
+  const fixtureRef = $('evaluationFixtureRef').value.trim();
+  if (!fixtureRef) return setFormError('evaluationCaseError', '请先填写 Fixture 引用');
+  try {
+    const result = await api(`/v1/evaluations/fixtures/inspect?fixtureRef=${encodeURIComponent(fixtureRef)}`);
+    $('evaluationFixtureSha').value = result.sha256;
+    $('evaluationFixtureInspection').textContent = `${result.fileCount} 个文件 · ${result.bytes} bytes · ${result.sha256}`;
+    setFormError('evaluationCaseError');
+  } catch (error) { setFormError('evaluationCaseError', error.message); }
+}
+
 async function submitEvaluationCase(event) {
   event.preventDefault(); setFormError('evaluationCaseError'); $('saveEvaluationCase').disabled = true;
   try {
     const suiteId = $('evaluationCaseForm').dataset.suiteId;
+    const caseType = $('evaluationCaseType').value;
+    const repository = caseType === 'REPOSITORY';
+    const hiddenFiles = repository ? evaluationJson('evaluationHiddenFiles', []) : [];
+    if (!Array.isArray(hiddenFiles)) throw new Error('隐藏文件映射必须是 JSON 数组');
     await api(`/v1/evaluations/suites/${suiteId}/cases`, {method: 'POST', body: JSON.stringify({
       name: $('evaluationCaseName').value.trim(), prompt: $('evaluationCasePrompt').value.trim(),
       requiredTools: evaluationRuleList('evaluationRequiredTools'), forbiddenTools: evaluationRuleList('evaluationForbiddenTools'),
       requiredResponse: evaluationRuleList('evaluationRequiredResponse'), forbiddenResponse: evaluationRuleList('evaluationForbiddenResponse'),
       maxToolCalls: +$('evaluationMaxTools').value, maxTokens: +$('evaluationMaxTokens').value,
-      maxDurationMs: +$('evaluationMaxDuration').value, enabled: $('evaluationCaseEnabled').checked
+      maxDurationMs: +$('evaluationMaxDuration').value, enabled: $('evaluationCaseEnabled').checked,
+      caseType,
+      fixtureRef: repository ? $('evaluationFixtureRef').value.trim() : null,
+      fixtureSha256: repository ? $('evaluationFixtureSha').value.trim() : null,
+      grader: repository ? {
+        shell: $('evaluationGraderShell').value,
+        failToPassCommand: $('evaluationFailToPass').value.trim(),
+        passToPassCommand: $('evaluationPassToPass').value.trim(),
+        timeoutSeconds: +$('evaluationGraderTimeout').value,
+        hiddenFiles
+      } : {},
+      patchPolicy: repository ? {
+        maxChangedFiles: +$('evaluationPatchMaxFiles').value,
+        maxPatchBytes: +$('evaluationPatchMaxBytes').value,
+        forbiddenPaths: evaluationRuleList('evaluationForbiddenPaths')
+      } : {}
     })});
     $('evaluationCaseDialog').close(); await loadEvaluations(); showNotice('评测用例已创建');
   } catch (error) { setFormError('evaluationCaseError', error.message); }
@@ -3507,6 +3554,8 @@ async function loadEvaluationReport(executionId, notify = true) {
     const team = state.agentTeams.find(value => value.id === execution.agentTeamId);
     header.append(element('strong', '', `${report.suite.name} · ${score}`),
       element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过${team ? ` · 团队 ${team.name}` : ''}`));
+    if ((report.summary?.repositoryTrials || 0) > 0) header.append(element('small', '',
+      `仓库任务 ${report.summary.resolvedTrials}/${report.summary.repositoryTrials} resolved · 稳定通过 ${report.summary.stableCases} Case · 每 resolved ${report.summary.tokensPerResolved || 0} Token`));
     const refresh = element('button', 'secondary', '刷新报告'); refresh.onclick = () => loadEvaluationReport(executionId); header.append(refresh);
     const nodes = [header];
     report.trials.forEach(value => {
@@ -3518,6 +3567,18 @@ async function loadEvaluationReport(executionId, notify = true) {
         `${details.toolCalls} 次工具调用 · ${details.outputTokens ?? details.tokens ?? 0} 输出 Token · ${details.totalTokens ?? details.tokens ?? 0} 总 Token · ${details.durationMs || 0} ms`));
       const failures = (details.checks || []).filter(check => !check.passed);
       if (failures.length) item.append(element('div', 'evaluation-checks', failures.map(check => `${check.rule}：${check.evidence}（-${check.deduction}）`).join('\n')));
+      if (details.caseType === 'REPOSITORY') {
+        const repository = details.repository || {};
+        const f2p = repository.failToPass || {};
+        const p2p = repository.passToPass || {};
+        item.append(element('div', 'evaluation-checks',
+          `resolved=${details.resolved} · integrity=${details.integrityPassed} · security=${details.securityPassed} · budget=${details.budgetPassed}\n` +
+          `F2P ${f2p.passed ? 'PASS' : f2p.executed ? 'FAIL' : 'NOT RUN'} · P2P ${p2p.passed ? 'PASS' : p2p.executed ? 'FAIL' : 'NOT RUN'}\n` +
+          `修改 ${(repository.changedFiles || []).length} 文件 / ${repository.changedBytes || 0} bytes${repository.error ? `\n${repository.error}` : ''}`));
+        if ((repository.changedFiles || []).length) {
+          item.append(element('pre', 'evaluation-checks', repository.changedFiles.join('\n')));
+        }
+      }
       (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
         const approvalText = element('div', 'evaluation-checks', `等待审批：${approval.reason}`);
         const allow = element('button', 'primary', '仅本次允许');
@@ -5516,6 +5577,8 @@ $('scheduleForm').onsubmit = submitSchedule;
 $('notificationForm').onsubmit = submitNotification;
 $('evaluationSuiteForm').onsubmit = submitEvaluationSuite;
 $('evaluationCaseForm').onsubmit = submitEvaluationCase;
+$('evaluationCaseType').onchange = toggleRepositoryEvaluationFields;
+$('inspectEvaluationFixture').onclick = inspectEvaluationFixture;
 $('profileLocal').onchange = updateProfilePriceFields;
 $('agentRole').onchange = updateAgentRoleHelp;
 $('scheduleType').onchange = updateScheduleFields;

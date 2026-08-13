@@ -272,7 +272,16 @@
 - [x] Run 完成不自动推进任务；单 Agent 任务由被分配 Agent、Team 任务由 Leader 提交 `IN_REVIEW`，人工通过显式 `ACCEPT` 完成最终审核，也可在任意节点评论并启动、继续、阻塞、返工、取消或重新打开；活跃 Run 期间取消任务会同时持久化取消关联 Run 树并中断模型与 Sandbox 执行。
 - [x] Schema 迁移记录推进到 34，并增加迁移、Store 幂等、评论提及、Task-Run、Route Decision、团队 Trial、阶段屏障、小队并发领取、取消审批清理、任务工作区迁移与空交付门禁回归测试；主 Header 汇总当前项目待审批项，子专家 Approval 可不进入会话直接处理，已终态 Run 的遗留审批会自动关闭。
 
-## 阶段 25（规划）：外部 Harness 成本与协作效率控制
+## 阶段 25：私有仓库执行式 Agent 评测
+
+- [x] Evaluation Case 增加兼容的 `RULE/REPOSITORY` 类型；规则回归保持原评分，仓库任务使用固定 fixture、独立 workspace 与不可变 Trial Case 快照。
+- [x] `data/evaluation-fixtures/{ref}/workspace` 与 `hidden` 分离；启动前和评分前校验覆盖二者的目录 SHA-256，模型不可见隐藏测试、Grader 命令和正确 Patch。
+- [x] Run 终态后生成文件级 Patch 摘要，拒绝符号链接、保留目录、禁止路径、超量文件与超大 Patch；新建干净 grader 副本后再应用差异和注入隐藏文件。
+- [x] Grader Prepare、FAIL_TO_PASS 和 PASS_TO_PASS 均先持久化为带固定幂等键的内部 ToolCall，再按顺序进入 Docker Sandbox，支持报告刷新和中断恢复。
+- [x] 仓库报告分离 `resolved`、完整性、安全、预算和 Run 完成状态，汇总 resolved 数、稳定全通过 Case 与每 resolved Token；不把内部结果称为官方 SWE-bench Verified 成绩。
+- [x] Schema 迁移 39、Fixture Inspect/API、Console Case 配置与 F2P/P2P 报告、Store/Service 回归测试以及 README/架构/OpenAPI 文档同步。
+
+## 阶段 26（规划）：外部 Harness 成本与协作效率控制
 
 - [ ] 在普通对话、专家协作与 CollaborationTask 之前增加统一的任务级 Token/费用信封、原子预留和结算；保留现有项目/Run 级预算作为下层硬上限。
 - [ ] 增加 Trigger 合并、Leader 单飞、证据版本、429 冷却与可读的 Harness 决策审计，避免每条成员事件或评论都直接创建新的模型 Run。

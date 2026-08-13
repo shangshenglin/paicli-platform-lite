@@ -215,8 +215,20 @@
     <div class="dialog-title"><strong>新建评测用例</strong><button type="button" class="secondary" id="cancelEvaluationCase">取消</button></div>
     <p class="hint" id="evaluationCaseSuite"></p>
     <div class="form-grid">
+      <label class="form-field"><span>用例类型</span><select id="evaluationCaseType"><option value="RULE">规则回归</option><option value="REPOSITORY">仓库任务（隐藏测试）</option></select></label>
       <label class="form-field"><span>用例名称 *</span><input id="evaluationCaseName" maxlength="120" required placeholder="例如：危险工具必须审批"></label>
       <label class="form-field full"><span>输入 Prompt *</span><textarea id="evaluationCasePrompt" rows="4" required></textarea></label>
+      <label class="form-field" data-repository-field hidden><span>Fixture 引用 *</span><input id="evaluationFixtureRef" maxlength="240" placeholder="例如 paicli/session-delete-001"><small>读取 data/evaluation-fixtures/{ref}/workspace</small></label>
+      <label class="form-field" data-repository-field hidden><span>Fixture SHA-256 *</span><input id="evaluationFixtureSha" maxlength="64" spellcheck="false"><small>可调用 fixture inspect API 计算</small></label>
+      <div class="form-field full" data-repository-field hidden><span>Fixture 检查</span><button class="secondary" type="button" id="inspectEvaluationFixture">读取文件数、大小与摘要</button><small id="evaluationFixtureInspection"></small></div>
+      <label class="form-field" data-repository-field hidden><span>Grader Shell</span><select id="evaluationGraderShell"><option value="bash">bash</option><option value="sh">sh</option><option value="powershell">powershell</option></select></label>
+      <label class="form-field" data-repository-field hidden><span>Grader 超时（秒）</span><input id="evaluationGraderTimeout" type="number" min="1" max="3600" value="90"></label>
+      <label class="form-field full" data-repository-field hidden><span>FAIL_TO_PASS 命令 *</span><textarea id="evaluationFailToPass" rows="3" spellcheck="false" placeholder="./mvnw -q -pl paicli-server -Dtest=BugRegressionTest test"></textarea></label>
+      <label class="form-field full" data-repository-field hidden><span>PASS_TO_PASS 命令 *</span><textarea id="evaluationPassToPass" rows="3" spellcheck="false" placeholder="./mvnw -q -pl paicli-server -Dtest=ExistingRegressionTest test"></textarea></label>
+      <label class="form-field full" data-repository-field hidden><span>隐藏文件映射（JSON）</span><textarea id="evaluationHiddenFiles" rows="3" spellcheck="false">[]</textarea><small>例如 [{"source":"BugTest.java","target":"src/test/java/BugTest.java"}]；source 位于 fixture hidden/</small></label>
+      <label class="form-field" data-repository-field hidden><span>最多修改文件</span><input id="evaluationPatchMaxFiles" type="number" min="1" max="1000" value="40"></label>
+      <label class="form-field" data-repository-field hidden><span>最大 Patch 字节</span><input id="evaluationPatchMaxBytes" type="number" min="1" max="100000000" value="2000000"></label>
+      <label class="form-field full" data-repository-field hidden><span>禁止修改路径</span><textarea id="evaluationForbiddenPaths" rows="3" placeholder="每行或逗号分隔，例如 .github/**,pom.xml"></textarea></label>
       <label class="form-field"><span>必须调用的工具</span><textarea id="evaluationRequiredTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
       <label class="form-field"><span>禁止调用的工具</span><textarea id="evaluationForbiddenTools" rows="3" placeholder="逗号或换行分隔"></textarea></label>
       <label class="form-field"><span>回答必须包含</span><textarea id="evaluationRequiredResponse" rows="3" placeholder="逗号或换行分隔"></textarea></label>
