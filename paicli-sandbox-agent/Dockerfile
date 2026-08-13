@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jdk AS java-runtime
+FROM eclipse-temurin:25-jdk AS java-runtime
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0
 
