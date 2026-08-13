@@ -2,6 +2,16 @@
 
 本文件记录 PaiCLI Platform Lite 从初版到当前 master 的主要演进、优化思路和后续变更记录规范。内容以 Git 提交历史、`README.md`、`docs/phases.md` 和架构说明为依据，用于项目总结、学习复盘和后续交接。
 
+## 2026-08-13
+
+### Docker Sandbox 工具链、临时 HOME 与网络隔离增强
+
+- 变更：Docker Sandbox 默认网络从共享 internal network 收紧为 `none`，控制面继续使用 `docker exec` + 容器 loopback；如配置自定义网络，启动时验证其 Docker `Internal=true`，非内部网络拒绝启动，不存在时只以 `--internal` 创建。
+- 变更：容器显式启用 Docker init 和 UID/GID `10001`，只读根文件系统之外提供容量可配的 `/tmp` 与私有 HOME tmpfs，并增加共享内存限制；命令环境把 Maven、Gradle、npm、pip、NuGet、Go/Rust 缓存定向到临时 HOME，Python/XDG/.NET 临时数据定向到 `/tmp`，不继承 Sandbox Agent Token。
+- 变更：Sandbox 镜像由 JRE 升级为 JDK 17，并补齐 Maven、Node.js/npm、Python/pip/venv、Git、curl 和 unzip；镜像、网络、CPU、内存、PID、tmpfs、共享内存与超时通过 `PAICLI_DOCKER_*` 环境变量外部化。
+- 思路：保留 PaiCLI 现有 ToolCall 持久化、Approval、幂等恢复和每 Run 容器模型，只增强执行底座；本次不引入 OpenSandbox/Kubernetes，不开放无策略外网，也不把依赖缓存写入持久化 workspace。
+- 验证：新增 `DockerSandboxPropertiesTest`，扩展 `DockerSandboxDriverTest` 与 `SandboxSecurityTest`，定向执行 Server 6 项、Sandbox Agent 4 项测试全部通过；使用 `paicli.sandbox-mode=local` 排除既有 `SqliteRuntimeStoreTest` 后执行其余全量回归，Common 3、Server 204、Sandbox Agent 4 项全部通过；Sandbox Agent 与 Common `package -DskipTests` 通过，`git diff --check` 通过。标准 `clean test` 因当前运行中的 Server 锁定 JAR 无法完成 clean；默认 Docker 模式全量测试还会因本终端没有 Docker CLI 失败，现有 Store 迁移断言期望 39–40 而当前代码仅注册到 38，均未在本工作项中扩大修改范围。当前终端也无法重建镜像验证实际 apt 工具版本与容器挂载，因此真实 Docker 端到端验证尚未执行并已在 README/Docker 文档明确记录。同步更新 `.env.example`、README、`docs/architecture.md`、`docs/phases.md` 与 `docs/docker-sandbox.md`；未修改数据库 Schema、REST API/OpenAPI 或产品站展示，迁移、Store 行为、OpenAPI 与 `paicli-site/README.md` 不适用。
+
 ## 2026-08-09
 
 ### WorkingPlan 基础能力常驻与明确触发规则

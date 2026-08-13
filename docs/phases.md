@@ -45,7 +45,7 @@
 ## 阶段 2：Docker 执行边界
 
 - [x] 每 Run 一个容器、随机控制令牌、无宿主端口暴露
-- [x] 工作区挂载、CPU/内存/PID/超时限制和内部网络
+- [x] 工作区挂载、CPU/内存/PID/超时限制；默认 `none` 网络隔离各 Run，自定义网络强制校验为 internal
 - [x] 写文件与命令审批、审批恢复、JSONL 审计
 - [x] 启动清理孤儿容器、Fake Docker 与真实 Docker 验收
 
@@ -224,10 +224,11 @@
 ## 阶段 20：多 Shell Docker 命令运行时
 
 - [x] `execute_command` 增加 `shell`、`cwd`、`timeoutSeconds`、`maxOutputBytes` 和显式 `env`，Shell 仅允许 `sh`、`bash`、`powershell` 固定映射。
-- [x] Docker Sandbox 镜像同时提供 Java 17、Bash 和 PowerShell Core；部署级命令超时同步注入 Sandbox Agent。
+- [x] Docker Sandbox 镜像提供 JDK 17、Maven、Node.js/npm、Python/pip/venv、Git、Bash 和 PowerShell Core；部署级命令超时同步注入 Sandbox Agent。
 - [x] Schema 迁移 26 为 Run 与 Agent Profile 持久化默认 Shell；模型省略参数时在 ToolCall 原子持久化和 Approval 之前补齐，恢复时复用。
 - [x] stdout/stderr 独立排空，记录退出码、Shell、工作目录、耗时、超时、字节数和截断状态；长结果复用 Artifact Store。
 - [x] 命令进程清空继承环境，显式 `env` 拒绝敏感变量名；Local 模式继续拒绝宿主机命令执行。
+- [x] 固定非 root UID + init，受限 `/tmp`、HOME tmpfs 与共享内存可配置；依赖缓存写入临时 HOME，不污染只读根文件系统或持久化 workspace。
 - [x] Run 取消销毁独占容器并返回 Sandbox 取消状态；Console 在首页、对话工具条、专家设置和执行详情展示执行环境。
 - [ ] 增加逐行 stdout/stderr SSE、PTY 交互终端和受控后台服务生命周期。
 
