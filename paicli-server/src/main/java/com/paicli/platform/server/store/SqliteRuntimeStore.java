@@ -9,6 +9,8 @@ import com.paicli.platform.common.ApprovalStatus;
 import com.paicli.platform.server.config.PlatformProperties;
 import com.paicli.platform.server.domain.AcceptedSnapshotRecord;
 import com.paicli.platform.server.domain.ApprovalRecord;
+import com.paicli.platform.server.domain.CompletionMode;
+import com.paicli.platform.server.domain.RunCompletionContractRecord;
 import com.paicli.platform.server.domain.ArtifactRecord;
 import com.paicli.platform.server.domain.DeliveryRecord;
 import com.paicli.platform.server.domain.MessageRecord;
@@ -24,6 +26,8 @@ import com.paicli.platform.server.domain.TaskTitle;
 import com.paicli.platform.server.domain.SessionGroupRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.domain.WorkingPlanRecord;
+import com.paicli.platform.server.agent.RunEvidence;
+import com.paicli.platform.server.agent.RunEvidenceDecoder;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Repository;
 
@@ -135,6 +139,11 @@ public class SqliteRuntimeStore {
                     "created_at TEXT NOT NULL, finished_at TEXT, FOREIGN KEY(run_id) REFERENCES runs(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "effect",
                     "TEXT NOT NULL DEFAULT 'NON_IDEMPOTENT_WRITE'");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "result_metadata_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "wait_kind", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "wait_ref", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "tool_calls", "waiting_since", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS approvals (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL UNIQUE, " +
@@ -305,12 +314,24 @@ public class SqliteRuntimeStore {
                     "items_json TEXT NOT NULL, status TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
+            SqliteSchemaMigrator.ensureColumn(connection, "run_working_plans", "completion_json", "TEXT");
             statement.execute("CREATE TABLE IF NOT EXISTS run_reflections (" +
                     "id TEXT PRIMARY KEY, run_id TEXT NOT NULL, failure_class TEXT NOT NULL, " +
                     "diagnosis TEXT NOT NULL, decision TEXT NOT NULL, plan_patch_json TEXT NOT NULL, " +
                     "evidence_refs_json TEXT NOT NULL, next_action TEXT NOT NULL, created_at TEXT NOT NULL, " +
                     "FOREIGN KEY(run_id) REFERENCES runs(id))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_run_reflections_run ON run_reflections(run_id, created_at)");
+            statement.execute("CREATE TABLE IF NOT EXISTS run_completion_contracts (" +
+                    "run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, " +
+                    "requires_workspace_change INTEGER NOT NULL DEFAULT 0, " +
+                    "requires_tests INTEGER NOT NULL DEFAULT 0, " +
+                    "required_test_families_json TEXT NOT NULL DEFAULT '[]', " +
+                    "write_scope_json TEXT NOT NULL DEFAULT '[]', " +
+                    "done_criteria_json TEXT NOT NULL DEFAULT '[]', " +
+                    "source TEXT NOT NULL, reason TEXT NOT NULL, " +
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+                    "FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_completion_contracts_run ON run_completion_contracts(run_id)");
             statement.execute("CREATE TABLE IF NOT EXISTS collaboration_task_digests (" +
                     "task_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, digest_json TEXT NOT NULL, " +
                     "last_activity_id TEXT, updated_at TEXT NOT NULL)");
@@ -680,10 +701,21 @@ public class SqliteRuntimeStore {
                     "finished_at='" + Instant.now() + "',version=version+1 WHERE id IN " +
                     "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
                     "('COMPLETED','FAILED','CANCELED')");
+            reconcileBudgetStoppedCompletions(connection);
             SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE approvals SET status='DENIED',resolved_at='" + Instant.now()
                     + "' WHERE status='PENDING' AND run_id IN "
                     + "(SELECT id FROM runs WHERE status IN ('COMPLETED','FAILED','CANCELED'))");
+            statement.execute("INSERT OR IGNORE INTO collaboration_task_runs(task_id,run_id,trigger_id,relationship,created_at) "
+                    + "SELECT (SELECT existing_link.task_id FROM collaboration_task_runs existing_link "
+                    + "JOIN runs existing_run ON existing_run.id=existing_link.run_id "
+                    + "WHERE existing_run.session_id=continuation.session_id "
+                    + "ORDER BY existing_run.created_at DESC,existing_link.created_at DESC,existing_link.task_id LIMIT 1),"
+                    + "continuation.id,NULL,'SESSION_CONTINUATION',continuation.created_at FROM runs continuation "
+                    + "WHERE NOT EXISTS (SELECT 1 FROM collaboration_task_runs current_link "
+                    + "WHERE current_link.run_id=continuation.id) AND EXISTS (SELECT 1 "
+                    + "FROM collaboration_task_runs existing_link JOIN runs existing_run "
+                    + "ON existing_run.id=existing_link.run_id WHERE existing_run.session_id=continuation.session_id)");
             statement.execute("WITH RECURSIVE task_tree(root_id,task_id) AS ("
                     + "SELECT id,id FROM collaboration_tasks WHERE parent_id IS NULL OR parent_id='' "
                     + "UNION ALL SELECT task_tree.root_id,child.id FROM collaboration_tasks child "
@@ -697,6 +729,44 @@ public class SqliteRuntimeStore {
         }
         reconcileCollaborationTaskWorkspaces();
         recoverInterruptedRuns();
+    }
+
+    private void reconcileBudgetStoppedCompletions(Connection connection) throws SQLException {
+        String error = "run execution budget exceeded before completion (corrected historical status)";
+        String now = Instant.now().toString();
+        try (PreparedStatement event = connection.prepareStatement(
+                "INSERT INTO run_events(run_id,event_type,event_data,sequence,created_at) "
+                        + "SELECT r.id,'run.failed',?,COALESCE((SELECT MAX(e.sequence) FROM run_events e "
+                        + "WHERE e.run_id=r.id),0)+1,? FROM runs r WHERE r.status='COMPLETED' "
+                        + "AND EXISTS (SELECT 1 FROM run_events stopped WHERE stopped.run_id=r.id "
+                        + "AND stopped.event_type='run.budget_stopped') "
+                        + "AND NOT EXISTS (SELECT 1 FROM run_events failed WHERE failed.run_id=r.id "
+                        + "AND failed.event_type='run.failed' AND failed.event_data LIKE '%corrected historical status%')")) {
+            event.setString(1, "{\"status\":\"FAILED\",\"error\":\"" + escape(error) + "\"}");
+            event.setString(2, now);
+            event.executeUpdate();
+        }
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE runs SET status='FAILED',error=?,finished_at=COALESCE(finished_at,?),version=version+1 "
+                        + "WHERE status='COMPLETED' AND EXISTS (SELECT 1 FROM run_events stopped "
+                        + "WHERE stopped.run_id=runs.id AND stopped.event_type='run.budget_stopped')")) {
+            update.setString(1, error);
+            update.setString(2, now);
+            update.executeUpdate();
+        }
+        try (PreparedStatement activity = connection.prepareStatement(
+                "INSERT INTO collaboration_activities(task_id,activity_type,actor_type,actor_id,subject_id,"
+                        + "payload_json,created_at) SELECT link.task_id,'RUN_FAILED','SYSTEM',NULL,r.id,?,? "
+                        + "FROM runs r JOIN collaboration_task_runs link ON link.run_id=r.id "
+                        + "WHERE r.status='FAILED' AND r.error=? AND NOT EXISTS "
+                        + "(SELECT 1 FROM collaboration_activities existing WHERE existing.task_id=link.task_id "
+                        + "AND existing.activity_type='RUN_FAILED' AND existing.subject_id=r.id "
+                        + "AND existing.payload_json LIKE '%corrected historical status%')")) {
+            activity.setString(1, "{\"status\":\"FAILED\",\"error\":\"" + escape(error) + "\"}");
+            activity.setString(2, now);
+            activity.setString(3, error);
+            activity.executeUpdate();
+        }
     }
 
     public SessionRecord createSession(String title) {
@@ -2795,20 +2865,21 @@ public class SqliteRuntimeStore {
      * requeues the Run once after all outcomes are committed in model order.
      */
     public boolean commitToolMessage(String sessionId, String runId, ToolCallRecord call, boolean success,
-                                     String modelContent, String error, String eventJson) {
+                                     String modelContent, String error, String metadataJson, String eventJson) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
                 ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                        "UPDATE tool_calls SET status=?,result=?,error=?,result_metadata_json=?,finished_at=? " +
                                 "WHERE id=? AND status=?")) {
                     ps.setString(1, toolStatus.name());
                     ps.setString(2, success ? modelContent : null);
                     ps.setString(3, success ? null : error);
-                    ps.setString(4, Instant.now().toString());
-                    ps.setString(5, call.id());
-                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(5, Instant.now().toString());
+                    ps.setString(6, call.id());
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
                     if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
                 }
                 insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
@@ -2828,7 +2899,7 @@ public class SqliteRuntimeStore {
 
     public boolean commitToolOutcome(String sessionId, String runId, ToolCallRecord call,
                                      boolean success, String modelContent, String error,
-                                     String eventJson, int currentStep) {
+                                     String metadataJson, String eventJson, int currentStep) {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -2838,14 +2909,15 @@ public class SqliteRuntimeStore {
                 }
                 ToolCallStatus toolStatus = success ? ToolCallStatus.COMPLETED : ToolCallStatus.FAILED;
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "UPDATE tool_calls SET status=?,result=?,error=?,finished_at=? " +
+                        "UPDATE tool_calls SET status=?,result=?,error=?,result_metadata_json=?,finished_at=? " +
                                 "WHERE id=? AND status=?")) {
                     ps.setString(1, toolStatus.name());
                     ps.setString(2, success ? modelContent : null);
                     ps.setString(3, success ? null : error);
-                    ps.setString(4, Instant.now().toString());
-                    ps.setString(5, call.id());
-                    ps.setString(6, ToolCallStatus.RUNNING.name());
+                    ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(5, Instant.now().toString());
+                    ps.setString(6, call.id());
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
                     if (ps.executeUpdate() == 0) throw new IllegalStateException("tool call is no longer running");
                 }
                 insertMessage(connection, sessionId, runId, "tool", modelContent == null ? "" : modelContent,
@@ -3035,15 +3107,180 @@ public class SqliteRuntimeStore {
      */
     public boolean waitForAgent(String runId) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status=?")) {
+                "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status IN (?,?)")) {
             ps.setString(1, RunStatus.WAITING_AGENT.name());
             ps.setString(2, runId);
             ps.setString(3, RunStatus.QUEUED.name());
+            ps.setString(4, RunStatus.WAITING_TOOL.name());
             boolean updated = ps.executeUpdate() == 1;
             if (updated) insertEvent(connection, runId, "run.waiting_agent", "{\"status\":\"WAITING_AGENT\"}");
             return updated;
         } catch (SQLException e) {
             throw failure("wait for delegated agent", e);
+        }
+    }
+
+    /** Marks a submitted tool call as waiting on an external future condition. */
+    public boolean markToolCallWaitingExternal(String toolCallId, String waitKind, String waitRef) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "UPDATE tool_calls SET status=?,wait_kind=?,wait_ref=?,waiting_since=? WHERE id=? AND status=?")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, waitKind);
+            ps.setString(3, waitRef);
+            ps.setString(4, Instant.now().toString());
+            ps.setString(5, toolCallId);
+            ps.setString(6, ToolCallStatus.RUNNING.name());
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw failure("mark tool call waiting external", e);
+        }
+    }
+
+    /**
+     * Atomically parks a deferred tool call and its parent Run. Keeping these
+     * transitions in one SQLite transaction closes the window in which a child
+     * can become terminal after the tool is parked but before the parent is
+     * visible as WAITING_AGENT.
+     */
+    public boolean parkDeferredToolCallAndWaitParent(String toolCallId, String runId,
+                                                      String waitKind, String waitRef) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                int toolUpdated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,wait_kind=?,wait_ref=?,waiting_since=? "
+                                + "WHERE id=? AND run_id=? AND status=?")) {
+                    ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+                    ps.setString(2, waitKind);
+                    ps.setString(3, waitRef);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, toolCallId);
+                    ps.setString(6, runId);
+                    ps.setString(7, ToolCallStatus.RUNNING.name());
+                    toolUpdated = ps.executeUpdate();
+                }
+                if (toolUpdated != 1) {
+                    connection.rollback();
+                    return false;
+                }
+                int runUpdated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,version=version+1 WHERE id=? AND status IN (?,?)")) {
+                    ps.setString(1, RunStatus.WAITING_AGENT.name());
+                    ps.setString(2, runId);
+                    ps.setString(3, RunStatus.QUEUED.name());
+                    ps.setString(4, RunStatus.WAITING_TOOL.name());
+                    runUpdated = ps.executeUpdate();
+                }
+                if (runUpdated != 1) {
+                    connection.rollback();
+                    return false;
+                }
+                insertEvent(connection, runId, "tool.deferred", "{\"toolCallId\":\""
+                        + escape(toolCallId) + "\",\"waitKind\":\"" + escape(waitKind)
+                        + "\",\"waitRef\":\"" + escape(waitRef) + "\"}");
+                insertEvent(connection, runId, "run.waiting_agent", "{\"status\":\"WAITING_AGENT\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("park deferred tool call and wait for agent", e);
+        }
+    }
+
+    /** Tool calls parked on an external condition (e.g. a delegated child run). */
+    public List<ToolCallRecord> waitingExternalToolCalls(String waitKind, String waitRef) {
+        List<ToolCallRecord> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM tool_calls WHERE status=? AND wait_kind=? AND wait_ref=? ORDER BY created_at")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, waitKind);
+            ps.setString(3, waitRef);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(mapToolCall(rs));
+            }
+            return List.copyOf(values);
+        } catch (SQLException e) {
+            throw failure("list waiting external tool calls", e);
+        }
+    }
+
+    /** Distinct child run refs parked by deferred CHILD_RUN tool calls (startup recovery). */
+    public List<String> waitingExternalChildRunRefs() {
+        List<String> values = new ArrayList<>();
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT DISTINCT wait_ref FROM tool_calls WHERE status=? AND wait_kind=? AND wait_ref IS NOT NULL")) {
+            ps.setString(1, ToolCallStatus.WAITING_EXTERNAL.name());
+            ps.setString(2, "CHILD_RUN");
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) values.add(rs.getString(1));
+            }
+            return List.copyOf(values);
+        } catch (SQLException e) {
+            throw failure("list waiting external child run refs", e);
+        }
+    }
+
+    /**
+     * Atomically completes the original deferred tool call, appends the final
+     * tool message to the parent session and requeues the parked parent. Only
+     * the first resolver wins (WHERE status='WAITING_EXTERNAL'), so duplicate
+     * terminal callbacks are idempotent no-ops.
+     */
+    public boolean completeDeferredToolCallAndAppendResult(String sessionId, String runId, String toolCallId,
+                                                           String result, String metadataJson) {
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                int updated;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE tool_calls SET status=?,result=?,result_metadata_json=?,finished_at=? " +
+                                "WHERE id=? AND status=?")) {
+                    ps.setString(1, ToolCallStatus.COMPLETED.name());
+                    ps.setString(2, result);
+                    ps.setString(3, metadataJson == null ? "{}" : metadataJson);
+                    ps.setString(4, Instant.now().toString());
+                    ps.setString(5, toolCallId);
+                    ps.setString(6, ToolCallStatus.WAITING_EXTERNAL.name());
+                    updated = ps.executeUpdate();
+                }
+                if (updated == 0) {
+                    connection.rollback();
+                    return false;
+                }
+                String providerCallId = null;
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT provider_call_id FROM tool_calls WHERE id=?")) {
+                    ps.setString(1, toolCallId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) providerCallId = rs.getString(1);
+                    }
+                }
+                insertMessage(connection, sessionId, runId, "tool", result == null ? "" : result,
+                        null, providerCallId, null, false);
+                insertEvent(connection, runId, "tool.deferred.resolved", "{\"toolCallId\":\""
+                        + escape(toolCallId) + "\"}");
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "UPDATE runs SET status=?,queued_at=?,version=version+1 WHERE id=? AND status=?")) {
+                    ps.setString(1, RunStatus.QUEUED.name());
+                    ps.setString(2, Instant.now().toString());
+                    ps.setString(3, runId);
+                    ps.setString(4, RunStatus.WAITING_AGENT.name());
+                    ps.executeUpdate();
+                }
+                insertEvent(connection, runId, "run.queued", "{\"reason\":\"deferred_agent_result_resolved\"}");
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                rollback(connection);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw failure("complete deferred tool call", e);
         }
     }
 
@@ -3265,8 +3502,8 @@ public class SqliteRuntimeStore {
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? Optional.of(new WorkingPlanRecord(rs.getString("run_id"),
                         rs.getInt("revision"), rs.getString("objective"), rs.getString("items_json"),
-                        rs.getString("status"), instant(rs.getString("created_at")),
-                        instant(rs.getString("updated_at")))) : Optional.empty();
+                        rs.getString("status"), rs.getString("completion_json"),
+                        instant(rs.getString("created_at")), instant(rs.getString("updated_at")))) : Optional.empty();
             }
         } catch (SQLException e) {
             throw failure("read latest working plan", e);
@@ -3275,20 +3512,28 @@ public class SqliteRuntimeStore {
 
     /** Upserts the latest working plan of a Run; every save bumps the revision. */
     public WorkingPlanRecord saveWorkingPlan(String runId, String objective, String itemsJson, String status) {
+        return saveWorkingPlan(runId, objective, itemsJson, status, null);
+    }
+
+    /** Upserts the latest working plan of a Run; every save bumps the revision. */
+    public WorkingPlanRecord saveWorkingPlan(String runId, String objective, String itemsJson, String status,
+                                             String completionJson) {
         String now = Instant.now().toString();
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try (PreparedStatement ps = connection.prepareStatement(
-                    "INSERT INTO run_working_plans(run_id,revision,objective,items_json,status,created_at,updated_at) "
-                            + "VALUES(?,1,?,?,?,?,?) "
+                    "INSERT INTO run_working_plans(run_id,revision,objective,items_json,status,completion_json,created_at,updated_at) "
+                            + "VALUES(?,1,?,?,?,?,?,?) "
                             + "ON CONFLICT(run_id) DO UPDATE SET revision=revision+1,objective=excluded.objective,"
-                            + "items_json=excluded.items_json,status=excluded.status,updated_at=excluded.updated_at")) {
+                            + "items_json=excluded.items_json,status=excluded.status,"
+                            + "completion_json=excluded.completion_json,updated_at=excluded.updated_at")) {
                 ps.setString(1, runId);
                 ps.setString(2, objective == null ? "" : objective);
                 ps.setString(3, itemsJson == null ? "[]" : itemsJson);
                 ps.setString(4, status == null ? "ACTIVE" : status);
-                ps.setString(5, now);
+                ps.setString(5, completionJson);
                 ps.setString(6, now);
+                ps.setString(7, now);
                 ps.executeUpdate();
             }
             connection.commit();
@@ -3296,6 +3541,66 @@ public class SqliteRuntimeStore {
             throw failure("save working plan", e);
         }
         return latestWorkingPlan(runId).orElseThrow();
+    }
+
+    /** Saves a completion contract; a later save may only strengthen the contract. */
+    public RunCompletionContractRecord saveCompletionContract(RunCompletionContractRecord contract) {
+        String now = Instant.now().toString();
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO run_completion_contracts(run_id,mode,requires_workspace_change,requires_tests," +
+                            "required_test_families_json,write_scope_json,done_criteria_json,source,reason,created_at,updated_at) "
+                            + "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                            + "ON CONFLICT(run_id) DO UPDATE SET mode=excluded.mode," +
+                            "requires_workspace_change=excluded.requires_workspace_change," +
+                            "requires_tests=excluded.requires_tests," +
+                            "required_test_families_json=excluded.required_test_families_json," +
+                            "write_scope_json=excluded.write_scope_json," +
+                            "done_criteria_json=excluded.done_criteria_json," +
+                            "source=excluded.source,reason=excluded.reason,updated_at=excluded.updated_at")) {
+                ps.setString(1, contract.runId());
+                ps.setString(2, contract.mode().name());
+                ps.setInt(3, contract.requiresWorkspaceChange() ? 1 : 0);
+                ps.setInt(4, contract.requiresTests() ? 1 : 0);
+                ps.setString(5, listJson(contract.requiredTestFamilies()));
+                ps.setString(6, listJson(contract.writeScope()));
+                ps.setString(7, listJson(contract.doneCriteria()));
+                ps.setString(8, contract.source() == null ? "" : contract.source());
+                ps.setString(9, contract.reason() == null ? "" : contract.reason());
+                ps.setString(10, now);
+                ps.setString(11, now);
+                ps.executeUpdate();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            throw failure("save completion contract", e);
+        }
+        return completionContract(contract.runId()).orElseThrow();
+    }
+
+    public Optional<RunCompletionContractRecord> completionContract(String runId) {
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM run_completion_contracts WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapCompletionContract(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw failure("read completion contract", e);
+        }
+    }
+
+    private RunCompletionContractRecord mapCompletionContract(ResultSet rs) throws SQLException {
+        return new RunCompletionContractRecord(rs.getString("run_id"),
+                CompletionMode.valueOf(rs.getString("mode")),
+                rs.getInt("requires_workspace_change") == 1,
+                rs.getInt("requires_tests") == 1,
+                jsonList(rs.getString("required_test_families_json")),
+                jsonList(rs.getString("write_scope_json")),
+                jsonList(rs.getString("done_criteria_json")),
+                rs.getString("source"), rs.getString("reason"),
+                instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
     }
 
     public Optional<ReflectionRecord> latestReflection(String runId) {
@@ -4959,14 +5264,31 @@ public class SqliteRuntimeStore {
         value.put("status", status.name());
         value.put("failure_class", failureClass);
         value.put("summary", latestAssistantAnswer(connection, delegation.childSessionId()));
-        value.put("artifacts", delegationArtifacts(connection, delegation.childRunId()));
+        RunEvidence evidence = delegationEvidence(connection, delegation.childRunId());
+        value.put("artifacts", evidence.businessArtifacts().stream().map(artifact -> Map.of(
+                "id", artifact.id(), "type", artifact.type(), "name", artifact.name(),
+                "relative_path", artifact.relativePath(), "sha256", artifact.sha256())).toList());
         ModelTokenUsage usage = modelTokenUsageForRun(connection, delegation.childRunId());
         value.put("usage", Map.of("input_tokens", usage.inputTokens(),
                 "output_tokens", usage.outputTokens(), "total_tokens", usage.totalTokens()));
-        ToolEvidence evidence = delegationToolEvidence(connection, delegation.childRunId());
-        value.put("files_changed", evidence.filesChanged());
-        value.put("commands_executed", evidence.commandsExecuted());
-        value.put("tests", evidence.tests());
+        value.put("files_changed", evidence.filesChanged().stream().map(file -> Map.of(
+                "path", file.path(), "tool_call_id", file.toolCallId(), "changed", file.changed())).toList());
+        value.put("workspace_mutations", evidence.workspaceMutations().stream().map(mutation -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("source", mutation.source());
+            item.put("tool_call_id", mutation.toolCallId());
+            item.put("workspace_changed", mutation.workspaceChanged());
+            item.put("ordinal", mutation.ordinal());
+            if (mutation.command() != null && !mutation.command().isBlank()) item.put("command", mutation.command());
+            return item;
+        }).toList());
+        value.put("commands_executed", evidence.commandsExecuted().stream().map(command -> Map.of(
+                "tool_call_id", command.toolCallId(), "command", command.command(),
+                "exit_code", command.exitCode() == null ? "" : command.exitCode(),
+                "timed_out", command.timedOut())).toList());
+        value.put("tests", evidence.tests().stream().map(test -> Map.of(
+                "tool_call_id", test.toolCallId(), "family", test.family().name(),
+                "command", test.command(), "status", test.status().name())).toList());
         value.put("findings", List.of());
         value.put("risks", status == RunStatus.COMPLETED ? List.of()
                 : List.of(error == null || error.isBlank() ? status.name() : error));
@@ -4996,51 +5318,34 @@ public class SqliteRuntimeStore {
         }
     }
 
-    private static List<Map<String, Object>> delegationArtifacts(Connection connection, String runId)
-            throws SQLException {
-        List<Map<String, Object>> values = new ArrayList<>();
+    private RunEvidence delegationEvidence(Connection connection, String runId) throws SQLException {
+        List<RunEvidenceDecoder.ToolCall> calls = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT id,type,name,relative_path,sha256 FROM artifacts WHERE run_id=? ORDER BY created_at")) {
+                "SELECT id,tool_name,arguments,status,result,error,result_metadata_json "
+                        + "FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("id", rs.getString("id"));
-                    item.put("type", rs.getString("type"));
-                    item.put("name", rs.getString("name"));
-                    item.put("relative_path", rs.getString("relative_path"));
-                    item.put("sha256", rs.getString("sha256"));
-                    values.add(item);
+                    calls.add(new RunEvidenceDecoder.ToolCall(rs.getString("id"), rs.getString("tool_name"),
+                            rs.getString("arguments"), ToolCallStatus.valueOf(rs.getString("status")),
+                            rs.getString("result"), rs.getString("error"), rs.getString("result_metadata_json")));
                 }
             }
         }
-        return List.copyOf(values);
-    }
-
-    private ToolEvidence delegationToolEvidence(Connection connection, String runId) throws SQLException {
-        List<String> files = new ArrayList<>();
-        List<String> commands = new ArrayList<>();
-        List<String> tests = new ArrayList<>();
+        List<ArtifactRecord> artifacts = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT tool_name,arguments,result,status FROM tool_calls WHERE run_id=? ORDER BY created_at")) {
+                "SELECT id,run_id,type,name,relative_path,size,sha256,created_at "
+                        + "FROM artifacts WHERE run_id=? ORDER BY created_at")) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    String name = rs.getString("tool_name");
-                    JsonNode args = readJson(rs.getString("arguments"));
-                    if ("write_file".equals(name)) addDistinct(files, jsonText(args, "path"));
-                    if ("execute_command".equals(name)) {
-                        String command = jsonText(args, "command");
-                        addDistinct(commands, command);
-                        if (command.toLowerCase().matches(".*\\b(test|mvn|gradle|npm|pytest|junit)\\b.*")) {
-                            String result = rs.getString("result");
-                            tests.add((result == null ? command : command + " => " + boundedText(result, 500)));
-                        }
-                    }
+                    artifacts.add(new ArtifactRecord(rs.getString("id"), rs.getString("run_id"),
+                            rs.getString("type"), rs.getString("name"), rs.getString("relative_path"),
+                            rs.getLong("size"), rs.getString("sha256"), instant(rs.getString("created_at"))));
                 }
             }
         }
-        return new ToolEvidence(List.copyOf(files), List.copyOf(commands), List.copyOf(tests));
+        return new RunEvidenceDecoder(mapper).collect(calls, artifacts);
     }
 
     private JsonNode readJson(String value) {
@@ -5051,13 +5356,27 @@ public class SqliteRuntimeStore {
         }
     }
 
-    private static String jsonText(JsonNode node, String field) {
-        JsonNode value = node.path(field);
-        return value.isTextual() ? value.asText().trim() : "";
+
+    private String listJson(List<String> values) {
+        try {
+            return mapper.writeValueAsString(values == null ? List.of() : values);
+        } catch (Exception e) {
+            return "[]";
+        }
     }
 
-    private static void addDistinct(List<String> values, String value) {
-        if (value != null && !value.isBlank() && !values.contains(value)) values.add(value);
+    private List<String> jsonList(String value) {
+        try {
+            JsonNode node = mapper.readTree(value == null || value.isBlank() ? "[]" : value);
+            if (node == null || !node.isArray()) return List.of();
+            List<String> result = new ArrayList<>();
+            node.forEach(item -> {
+                if (item != null && item.isTextual() && !item.asText().isBlank()) result.add(item.asText().trim());
+            });
+            return List.copyOf(result);
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 
     private static String boundedText(String value, int limit) {
@@ -5145,13 +5464,19 @@ public class SqliteRuntimeStore {
     }
 
     private void updateTool(String id, ToolCallStatus status, String result, String error, boolean finished) {
+        updateTool(id, status, result, error, "{}", finished);
+    }
+
+    private void updateTool(String id, ToolCallStatus status, String result, String error,
+                            String metadataJson, boolean finished) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
-                "UPDATE tool_calls SET status=?, result=?, error=?, finished_at=? WHERE id=?")) {
+                "UPDATE tool_calls SET status=?, result=?, error=?, result_metadata_json=?, finished_at=? WHERE id=?")) {
             ps.setString(1, status.name());
             ps.setString(2, result);
             ps.setString(3, error);
-            ps.setString(4, finished ? Instant.now().toString() : null);
-            ps.setString(5, id);
+            ps.setString(4, metadataJson == null ? "{}" : metadataJson);
+            ps.setString(5, finished ? Instant.now().toString() : null);
+            ps.setString(6, id);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw failure("update tool", e);
@@ -5295,10 +5620,13 @@ public class SqliteRuntimeStore {
     }
 
     private static ToolCallRecord mapToolCall(ResultSet rs) throws SQLException {
+        String metadata = rs.getString("result_metadata_json");
         return new ToolCallRecord(rs.getString("id"), rs.getString("run_id"), rs.getString("provider_call_id"),
                 rs.getString("tool_name"), rs.getString("arguments"), ToolCallStatus.valueOf(rs.getString("status")),
                 rs.getString("result"), rs.getString("error"), rs.getString("idempotency_key"),
-                rs.getInt("retry_count"), instant(rs.getString("created_at")), instant(rs.getString("finished_at")));
+                rs.getInt("retry_count"), instant(rs.getString("created_at")), instant(rs.getString("finished_at")),
+                metadata == null ? "{}" : metadata, rs.getString("wait_kind"), rs.getString("wait_ref"),
+                instant(rs.getString("waiting_since")));
     }
 
     private static RunDelegationRecord mapDelegation(ResultSet rs) throws SQLException {
@@ -5364,7 +5692,6 @@ public class SqliteRuntimeStore {
                 .distinct().limit(100).toList();
     }
 
-    private record ToolEvidence(List<String> filesChanged, List<String> commandsExecuted, List<String> tests) { }
 
     public record ModelTokenUsage(int inputTokens, int outputTokens) {
         public int totalTokens() { return inputTokens + outputTokens; }

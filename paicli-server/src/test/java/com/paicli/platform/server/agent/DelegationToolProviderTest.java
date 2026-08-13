@@ -40,7 +40,10 @@ class DelegationToolProviderTest {
         CollaborationStore collaboration = new CollaborationStore(properties);
         ObjectMapper mapper = new ObjectMapper();
         DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,
-                collaboration, new DelegationEnvelopeBuilder(), new AgentResultValidator());
+                collaboration, new DelegationEnvelopeBuilder(), new AgentResultValidator(),
+                new AgentResultService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, plans, mapper)));
 
         var session = store.createSession("agent", "project-p1");
         var parent = store.createRun(session.id(), "parent task");
@@ -86,7 +89,10 @@ class DelegationToolProviderTest {
         CollaborationStore collaboration = new CollaborationStore(properties);
         ObjectMapper mapper = new ObjectMapper();
         DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,
-                collaboration, new DelegationEnvelopeBuilder(), new AgentResultValidator());
+                collaboration, new DelegationEnvelopeBuilder(), new AgentResultValidator(),
+                new AgentResultService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, plans, mapper)));
 
         var session = store.createSession("agent", "project-p1");
         var parent = store.createRun(session.id(), "parent task");
@@ -130,7 +136,10 @@ class DelegationToolProviderTest {
                 new TaskDigestService(collaboration, store, mapper),
                 new DeliveryManifestService(collaboration, store, mapper), expertThreads, envelopeBuilder);
         DelegationToolProvider provider = new DelegationToolProvider(store, productivity, mapper, plans,
-                collaboration, envelopeBuilder, validator);
+                collaboration, envelopeBuilder, validator,
+                new AgentResultService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, plans, mapper)));
 
         var root = collaboration.saveTask(null, "default", "root task", "desc", "IN_PROGRESS", 0,
                 "TEAM", "team-a", "done when green", null, 0, null, "USER");

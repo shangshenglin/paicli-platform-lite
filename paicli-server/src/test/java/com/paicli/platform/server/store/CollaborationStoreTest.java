@@ -49,6 +49,7 @@ class CollaborationStoreTest {
             assertThat(link.modelName()).isEqualTo("kimi-k3");
         });
         assertThat(store.taskForRun(run.id())).get().extracting("id").isEqualTo(task.id());
+        assertThat(store.taskForSession(session.id())).get().extracting("id").isEqualTo(task.id());
         assertThat(store.taskHistory(50)).singleElement().satisfies(history -> {
             assertThat(history.task().id()).isEqualTo(task.id());
             assertThat(history.latestSessionId()).isEqualTo(session.id());
@@ -75,6 +76,27 @@ class CollaborationStoreTest {
         assertThat(store.activities(task.id(), 0, 100)).extracting("activityType")
                 .contains("TASK_CREATED", "CONCLUSION_POSTED", "DISCUSSION_RESOLVED",
                         "RUN_TRIGGERED", "STATUS_CHANGED");
+    }
+
+    @Test
+    void initializationBackfillsContinuationRunAndReactivatesReviewTask() throws Exception {
+        SqliteRuntimeStore runtime = runtime();
+        CollaborationStore store = new CollaborationStore(properties());
+        var task = store.saveTask(null, "project-a", "Review task", "", "IN_REVIEW",
+                0, "AGENT", "agent-a", "", null, 0, null, "USER");
+        var session = runtime.createSession("collaboration", "project-a");
+        var source = runtime.createRun(session.id(), "first run");
+        runtime.completeRun(source.id());
+        store.linkRun(task.id(), source.id(), null, "TRIGGERED");
+        var continuation = runtime.createRun(session.id(), "continue run");
+
+        new SqliteRuntimeStore(properties()).initialize();
+
+        assertThat(store.taskTreeRuns(task.id())).anySatisfy(link -> {
+            assertThat(link.runId()).isEqualTo(continuation.id());
+            assertThat(link.relationship()).isEqualTo("SESSION_CONTINUATION");
+        });
+        assertThat(store.task(task.id())).get().extracting("status").isEqualTo("IN_PROGRESS");
     }
 
     @Test

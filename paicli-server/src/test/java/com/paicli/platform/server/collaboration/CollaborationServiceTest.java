@@ -42,6 +42,7 @@ class CollaborationServiceTest {
     private SandboxDriver sandboxDriver;
     private CollaborationRoutingService routing;
     private ExpertThreadService expertThreadService;
+    private DeliveryManifestService deliveryManifestService;
     private CollaborationService service;
 
     @BeforeEach
@@ -53,8 +54,9 @@ class CollaborationServiceTest {
         sandboxDriver = mock(SandboxDriver.class);
         routing = mock(CollaborationRoutingService.class);
         expertThreadService = mock(ExpertThreadService.class);
+        deliveryManifestService = mock(DeliveryManifestService.class);
         service = new CollaborationService(collaboration, runtime, productivity,
-                routing, new ObjectMapper(), modelClient, sandboxDriver, null, null, expertThreadService,
+                routing, new ObjectMapper(), modelClient, sandboxDriver, null, deliveryManifestService, expertThreadService,
                 new DelegationEnvelopeBuilder());
     }
 
@@ -76,6 +78,21 @@ class CollaborationServiceTest {
         assertThatThrownBy(() -> service.updateStatus(task.id(), "DONE", "AGENT", "agent-a", "finished"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("IN_PROGRESS or BLOCKED");
+    }
+
+    @Test
+    void sessionContinuationLinksRunAndReactivatesReviewTaskTree() {
+        var root = task("IN_REVIEW", "TEAM", "team-a");
+        var stage = stageTask("task-stage", root.id(), 1, "agent-a", "IN_REVIEW");
+        var continuation = run("run-continuation", "session-a", RunStatus.QUEUED, "agent-a");
+        when(collaboration.taskForSession(continuation.sessionId())).thenReturn(Optional.of(stage));
+        when(collaboration.task(root.id())).thenReturn(Optional.of(root));
+
+        service.attachSessionContinuation(continuation);
+
+        verify(collaboration).linkRun(stage.id(), continuation.id(), null, "SESSION_CONTINUATION");
+        verify(collaboration).updateStatus(eq(stage.id()), eq("IN_PROGRESS"), eq("SYSTEM"), eq(null), any());
+        verify(collaboration).updateStatus(eq(root.id()), eq("IN_PROGRESS"), eq("SYSTEM"), eq(null), any());
     }
 
     @Test
@@ -292,6 +309,7 @@ class CollaborationServiceTest {
 
         verify(collaboration).updateStatus(eq(stage.id()), eq("IN_REVIEW"), eq("SYSTEM"), eq(null), any());
         verify(collaboration).evaluateStageBarrier(stage.parentId(), stage.stage());
+        verify(deliveryManifestService).recordStageDelivery(stage.id(), stage.stage(), completed.id());
         verify(modelClient, org.mockito.Mockito.never()).cancel(any());
     }
 

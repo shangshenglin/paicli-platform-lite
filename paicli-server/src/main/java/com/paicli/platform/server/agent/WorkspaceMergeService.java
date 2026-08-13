@@ -37,5 +37,10 @@ public class WorkspaceMergeService {
         return !detectConflicts(children).isEmpty();
     }
 
-    public record ChildChanges(String childRunId, List<String> changedFiles) { }
+    public record ChildChanges(String childRunId, List<String> changedFiles) {
+        /** Builds a child change set from the unified Run evidence collector. */
+        public static ChildChanges of(String childRunId, RunEvidence evidence) {
+            return new ChildChanges(childRunId, evidence.changedFilePaths());
+        }
+    }
 }

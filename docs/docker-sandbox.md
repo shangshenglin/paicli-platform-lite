@@ -1,5 +1,9 @@
 # Docker Sandbox
 
+## Toolchain verification
+
+Before accepting Runs, the Server verifies the configured image in a short-lived, network-disabled container. The probe requires Bash, Git, Maven, Node/npm, Python 3, and PowerShell Core. If any runtime is absent, startup fails with an instruction to rebuild via `scripts/build-sandbox.ps1`; an old image cannot fail midway through an agent Run.
+
 ## 适用范围
 
 Docker 模式是企业级 MicroVM 池的轻量替代，可改善进程、文件系统和资源隔离，但不等同于面向敌对代码的强化执行服务。应持续更新 Docker Desktop 和基础镜像，并且绝不能把 Docker Socket 挂载进 Sandbox。默认网络为 Docker `none`；Server 的控制通道不依赖容器网络。
@@ -32,6 +36,8 @@ Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤�
 - 每容器使用随机 Bearer Token；缺少 Token 时 Sandbox Agent 拒绝启动，并使用常量时间比较。
 - 根文件系统只读，仅 Run workspace、`/tmp` tmpfs 和 `/home/sandbox` tmpfs 可写。HOME tmpfs 只对 UID/GID `10001` 开放，容量独立可配，随 Run 回收。
 - 容器显式使用非 root UID/GID `10001`，并启用 Docker init 回收孤儿进程。
+- 镜像内置 Java 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip。
+- 构建阶段通过 HTTPS Debian 源安装工具链；`apt` 请求有 20 秒超时和 3 次有限重试，降低 HTTP 响应截断或短暂网络波动导致构建失败的概率。
 - 启用 `no-new-privileges` 和 `cap-drop ALL`。
 - CPU、内存、PID、`/tmp`、HOME tmpfs 和共享内存限额可配置。
 - 只把当前 Run 工作区以读写方式挂载。
@@ -63,6 +69,11 @@ paicli:
     command-timeout-seconds: ${PAICLI_DOCKER_COMMAND_TIMEOUT_SECONDS:90}
 ```
 
+## 结构化工具证据
+
+- `write_file` 返回结构化 metadata：`path`、`changed`（写入前后 sha256 不同）、`beforeSha256`、`afterSha256`、`bytesWritten`；相同内容重写 `changed=false`，不进入 `files_changed` 证据。
+- `execute_command` 返回 `exitCode`、`timedOut`、`shell`、`cwd`、`durationMs` 等 metadata；测试族由 Server 侧 `TestCommandClassifier` 按命令精确识别（`mvn compile`、`./check-status.sh` 不算测试）。
+- metadata 随 `ToolResult.metadata` 持久化到 `tool_calls.result_metadata_json`（迁移 40），供 `RunEvidenceCollector` 作为完成验证、AgentResult 与交付清单的统一证据来源。
 ## 已知限制
 
 - Docker Desktop/WSL2 需要单独安装。
@@ -74,4 +85,13 @@ paicli:
 
 ## 验收记录
 
-Windows Docker Desktop/WSL2 端到端验收已于 2026-07-03 通过，覆盖审批恢复、经 `docker exec` 的认证执行、工作区持久化、SSE 重放、容器自动清理、无宿主端口的内部网络、只读根文件系统、`cap-drop ALL` 以及 CPU、内存和 PID 限额。2026-08-13 的默认 `none` 网络、internal 网络校验、固定非 root 用户、可写 HOME 与扩展工具链增强已通过 Server/Sandbox Agent 单元测试；当前开发终端没有 Docker CLI，尚未重建镜像进行新的端到端验收。
+Windows Docker Desktop/WSL2 端到端验收已于 2026-07-03 通过，覆盖审批恢复、经 `docker exec` 的认证执行、工作区持久化、SSE 重放、容器自动清理、无宿主端口的内部网络、只读根文件系统、`cap-drop ALL` 以及 CPU、内存和 PID 限额。2026-08-14 已成功重建扩展工具链镜像，并在禁网容器中验证 Java、Maven、Node/npm、Python/venv、Git、PowerShell、curl 和 unzip。
+
+### Completion Evidence 约束
+
+Sandbox 返回的 `execute_command` workspace fingerprint 只说明命令前后工作区是否变化；Server 会跳过已识别测试/构建命令的生成物变化，避免 `target/`、缓存或报告把测试命令标记为源码 mutation。非测试命令的明确变化仍会进入 Run 的 workspace mutation evidence；复合测试命令若包含 `||`、`;`、管道，或测试 invocation 后还有尾部命令，则不会生成 TestEvidence。
+
+- `write_file` 必须在写入前计算 `beforeSha256`，写入后计算 `afterSha256`；只有两者不同才报告 `changed=true`。
+- `execute_command` 的结果除退出码、超时、Shell 和 cwd 外，还记录执行前后的 workspace fingerprint 与 `workspaceChanged`，供 Server 判断命令是否产生真实副作用。
+- Server 不从 stdout 关键词推断完成或测试；只有 `TestCommandClassifier` 识别的高置信度测试 invocation 才生成 TestEvidence。外置工具输出的 `tool_result` Artifact 不属于业务交付物。
+- 当 `execute_command` 的 workspace fingerprint 明确变化但无法可靠列出具体文件时，Server/AgentResult 使用 `workspace_mutations` 传递变更证据，不伪造 `files_changed`；换行、单独 `&`、skip/no-run 参数的命令不计为测试 invocation。

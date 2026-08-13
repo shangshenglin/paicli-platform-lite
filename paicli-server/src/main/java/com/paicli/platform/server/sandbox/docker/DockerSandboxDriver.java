@@ -26,6 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @ConditionalOnProperty(prefix = "paicli", name = "sandbox-mode", havingValue = "docker")
 public class DockerSandboxDriver implements SandboxDriver {
     private static final String MANAGED_LABEL = "paicli.platform.managed=true";
+    private static final String TOOLCHAIN_PROBE = "command -v bash && command -v git && command -v mvn"
+            + " && command -v node && command -v npm && command -v python3 && command -v pwsh";
     private final DockerCommandExecutor docker;
     private final SandboxAgentClient agentClient;
     private final DockerSandboxProperties dockerProperties;
@@ -54,6 +56,7 @@ public class DockerSandboxDriver implements SandboxDriver {
         Files.createDirectories(workspaceRoot);
         requireSuccess(docker.execute(List.of("version", "--format", "{{.Server.Version}}"), Duration.ofSeconds(10)),
                 "Docker Desktop is unavailable");
+        verifyImageToolchain();
         ensureConfiguredNetwork();
         cleanupOrphans();
     }
@@ -168,6 +171,13 @@ public class DockerSandboxDriver implements SandboxDriver {
         requireSuccess(docker.execute(
                 List.of("network", "create", "--internal", dockerProperties.network()), Duration.ofSeconds(15)),
                 "Failed to create internal Docker network");
+    }
+
+    private void verifyImageToolchain() {
+        DockerCommandExecutor.CommandResult probe = docker.execute(List.of(
+                "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+                "--entrypoint", "/bin/sh", dockerProperties.image(), "-c", TOOLCHAIN_PROBE), Duration.ofSeconds(20));
+        requireSuccess(probe, "Sandbox image is missing a required development runtime; rebuild it with scripts/build-sandbox.ps1");
     }
 
     private void cleanupOrphans() {

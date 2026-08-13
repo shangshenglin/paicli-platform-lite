@@ -1,6 +1,7 @@
 package com.paicli.platform.server.agent;
 
 import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.server.domain.RunCompletionContractRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,9 @@ import java.util.Map;
  * the child explicitly reported evidence for that exact criterion, otherwise
  * UNVERIFIED. No summary keyword matching is performed, and UNVERIFIED does not
  * change {@code valid} yet, so existing delegation behavior is preserved.
+ *
+ * The contract-aware overload additionally rejects results that satisfy the
+ * persisted completion contract with prose only (required workspace change / tests).
  */
 @Service
 public class AgentResultValidator {
@@ -37,18 +41,16 @@ public class AgentResultValidator {
 
         if (RunStatus.COMPLETED.name().equals(statusName)) {
             boolean filesChanged = !asList(value.get("files_changed")).isEmpty();
+            boolean workspaceMutations = !asList(value.get("workspace_mutations")).isEmpty();
             boolean artifacts = !asList(value.get("artifacts")).isEmpty();
             String summary = value.get("summary") == null ? "" : String.valueOf(value.get("summary")).trim();
-            if (!filesChanged && !artifacts && summary.isBlank()) {
+            if (!filesChanged && !workspaceMutations && !artifacts && summary.isBlank()) {
                 issues.add("COMPLETED without durable evidence: no changed file, artifact, or final summary");
             }
-            boolean tests = !asList(value.get("tests")).isEmpty();
-            boolean commands = !asList(value.get("commands_executed")).isEmpty();
             String lower = summary.toLowerCase();
-            boolean claimsTests = tests || commands
-                    || ((lower.contains("test") || lower.contains("\u6d4b\u8bd5"))
+            boolean claimsTests = ((lower.contains("test") || lower.contains("\u6d4b\u8bd5"))
                     && (lower.contains("pass") || lower.contains("\u901a\u8fc7")));
-            if (claimsTests && !tests && !commands) {
+            if (claimsTests && !hasPassedTestEvidence(value)) {
                 issues.add("test pass claimed without test evidence");
             }
         } else if (RunStatus.FAILED.name().equals(statusName)) {
@@ -60,6 +62,54 @@ public class AgentResultValidator {
         }
         List<CriterionResult> criteria = criterionStatuses(doneCriteria, value);
         return new ValidationResult(issues.isEmpty(), List.copyOf(issues), List.copyOf(criteria));
+    }
+
+    /** Contract-aware validation: the contract cannot be satisfied by prose alone. */
+    public ValidationResult validate(RunRecord child, RunCompletionContractRecord contract,
+                                     Map<String, Object> result) {
+        if (contract == null) return validate(child, result, List.of());
+        ValidationResult base = validate(child, result, contract.doneCriteria());
+        if (!base.valid()) return base;
+        List<String> issues = new ArrayList<>(base.issues());
+        Map<String, Object> value = result == null ? Map.of() : result;
+        boolean filesChanged = !asList(value.get("files_changed")).isEmpty();
+        boolean workspaceMutations = !asList(value.get("workspace_mutations")).isEmpty();
+        if (contract.requiresWorkspaceChange() && !filesChanged && !workspaceMutations) {
+            issues.add("contract requires workspace change but files_changed and workspace_mutations are empty");
+        }
+        if (contract.requiresTests() && !hasRequiredTestPass(value, contract.requiredTestFamilies())) {
+            issues.add("contract requires tests but no passing test evidence for required families");
+        }
+        return new ValidationResult(issues.isEmpty(), List.copyOf(issues), base.criteria());
+    }
+
+    private static boolean hasRequiredTestPass(Map<String, Object> value, List<String> requiredFamilies) {
+        List<?> tests = asList(value.get("tests"));
+        Map<String, Boolean> passedByFamily = new LinkedHashMap<>();
+        for (Object test : tests) {
+            if (!(test instanceof Map<?, ?> map)) continue;
+            Object status = map.get("status");
+            if (!"PASSED".equals(String.valueOf(status))) continue;
+            Object family = map.get("family");
+            String familyName = family == null ? "" : String.valueOf(family);
+            passedByFamily.put(familyName, true);
+        }
+        if (requiredFamilies == null || requiredFamilies.isEmpty()) {
+            return !passedByFamily.isEmpty();
+        }
+        for (String family : requiredFamilies) {
+            if (!Boolean.TRUE.equals(passedByFamily.get(family))) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasPassedTestEvidence(Map<String, Object> value) {
+        for (Object test : asList(value.get("tests"))) {
+            if (test instanceof Map<?, ?> map && "PASSED".equals(String.valueOf(map.get("status")))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<CriterionResult> criterionStatuses(List<String> doneCriteria, Map<String, Object> value) {

@@ -77,6 +77,7 @@ paicli:
   web:
     enabled: ${PAICLI_WEB_ENABLED:false}
     search-url: ${PAICLI_WEB_SEARCH_URL:}
+    search-engines: ${PAICLI_WEB_SEARCH_ENGINES:}
     api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
     api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}
     timeout-seconds: 20

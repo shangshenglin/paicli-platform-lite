@@ -13,12 +13,19 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
 import java.util.Comparator;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.function.Function;
 
 /**
  * 开发期执行器，不提供进程隔离。生产私有部署应在 Phase 2 切换到 DockerSandboxDriver。
+ * 结构化 tool metadata（write_file 的 path/changed/beforeSha256/afterSha256）会被
+ * RunEvidenceCollector 用作真实文件变更证据，而不是解析 stdout 文本。
  */
 @Component
 @ConditionalOnProperty(prefix = "paicli", name = "sandbox-mode", havingValue = "local", matchIfMissing = true)
@@ -51,15 +58,21 @@ public class LocalSandboxDriver implements SandboxDriver {
             Files.createDirectories(runWorkspace);
             String relative = String.valueOf(request.arguments().getOrDefault("path", "."));
             Path target = resolveSafe(runWorkspace, relative);
-            String content = switch (request.name()) {
-                case "list_dir" -> listDirectory(target);
-                case "read_file" -> readFile(target);
-                case "write_file" -> writeFile(target, String.valueOf(request.arguments()
-                        .getOrDefault("content", "")));
+            String content;
+            Map<String, Object> metadata = new LinkedHashMap<>();
+            switch (request.name()) {
+                case "list_dir" -> content = listDirectory(target);
+                case "read_file" -> content = readFile(target);
+                case "write_file" -> {
+                    String before = Files.exists(target) ? sha256(target) : null;
+                    content = writeFile(target, String.valueOf(request.arguments()
+                            .getOrDefault("content", "")));
+                    metadata.putAll(writeMetadata(target, relative, before));
+                }
                 default -> throw new IllegalArgumentException(
                         "Tool is not enabled in the Phase 1 local executor: " + request.name());
-            };
-            return ToolResult.success(request.toolCallId(), content, elapsed(start));
+            }
+            return ToolResult.success(request.toolCallId(), content, elapsed(start), metadata);
         } catch (Exception e) {
             return ToolResult.failure(request.toolCallId(), e.getMessage(), elapsed(start));
         }
@@ -110,6 +123,34 @@ public class LocalSandboxDriver implements SandboxDriver {
         Files.write(path, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE);
         return "Wrote " + bytes.length + " bytes to " + path.getFileName();
+    }
+
+    /** Structured evidence for a completed write_file call. */
+    private static Map<String, Object> writeMetadata(Path target, String requestedRelative, String before) {
+        String after = sha256(target);
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("path", requestedRelative.replace('\\', '/'));
+        value.put("changed", !Objects.equals(before, after));
+        value.put("beforeSha256", before == null ? "" : before);
+        value.put("afterSha256", after == null ? "" : after);
+        try {
+            value.put("bytesWritten", Files.size(target));
+        } catch (Exception ignored) {
+            value.put("bytesWritten", 0);
+        }
+        return Map.copyOf(value);
+    }
+
+    private static String sha256(Path path) {
+        try (var in = Files.newInputStream(path)) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) >= 0) digest.update(buffer, 0, read);
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private static long elapsed(long start) {

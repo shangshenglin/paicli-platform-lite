@@ -27,23 +27,72 @@ public class DeliveryManifestService {
     private final CollaborationStore collaboration;
     private final SqliteRuntimeStore store;
     private final ObjectMapper mapper;
+    private final com.paicli.platform.server.agent.RunEvidenceCollector evidenceCollector;
 
     public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper) {
+        this(collaboration, store, mapper,
+                new com.paicli.platform.server.agent.RunEvidenceCollector(store, mapper));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public DeliveryManifestService(CollaborationStore collaboration, SqliteRuntimeStore store, ObjectMapper mapper,
+                                   com.paicli.platform.server.agent.RunEvidenceCollector evidenceCollector) {
         this.collaboration = collaboration;
         this.store = store;
         this.mapper = mapper;
+        this.evidenceCollector = evidenceCollector;
+    }
+
+    /**
+     * Records a stage delivery from the unified Run evidence collector so the
+     * manifest always reflects real changed files / commands / tests / artifacts.
+     */
+    public DeliveryRecord recordStageDelivery(String taskId, int stage, String runId) {
+        com.paicli.platform.server.agent.RunEvidence evidence = evidenceCollector.collect(runId);
+        List<String> changedFiles = evidence.changedFilePaths();
+        List<String> artifacts = evidence.businessArtifacts().stream()
+                .map(com.paicli.platform.server.agent.ArtifactEvidence::relativePath).toList();
+        List<String> testEvidence = evidence.tests().stream()
+                .map(test -> test.family().name() + "=" + test.status().name()).toList();
+        List<Map<String, Object>> workspaceMutations = evidence.workspaceMutations().stream()
+                .map(mutation -> {
+                    Map<String, Object> value = new LinkedHashMap<>();
+                    value.put("source", mutation.source());
+                    value.put("toolCallId", mutation.toolCallId());
+                    value.put("workspaceChanged", mutation.workspaceChanged());
+                    value.put("ordinal", mutation.ordinal());
+                    if (mutation.command() != null && !mutation.command().isBlank()) {
+                        value.put("command", mutation.command());
+                    }
+                    return value;
+                }).toList();
+        Map<String, Object> criteria = new LinkedHashMap<>();
+        evidence.latestTestStatusByFamily().forEach((family, status) ->
+                criteria.put(family.name(), status.name()));
+        return recordStageDelivery(taskId, stage, runId, changedFiles, artifacts, testEvidence,
+                workspaceMutations, criteria);
     }
 
     public DeliveryRecord recordStageDelivery(String taskId, int stage, String runId,
                                               List<String> changedFiles, List<String> artifacts,
                                               List<String> testEvidence, Map<String, Object> criteriaEvidence) {
+        return recordStageDelivery(taskId, stage, runId, changedFiles, artifacts, testEvidence,
+                List.of(), criteriaEvidence);
+    }
+
+    private DeliveryRecord recordStageDelivery(String taskId, int stage, String runId,
+                                               List<String> changedFiles, List<String> artifacts,
+                                               List<String> testEvidence,
+                                               List<Map<String, Object>> workspaceMutations,
+                                               Map<String, Object> criteriaEvidence) {
         int attempt = store.deliveriesForTask(taskId).stream()
                 .filter(delivery -> delivery.stage() == stage)
                 .map(DeliveryRecord::attempt).max(Comparator.naturalOrder()).orElse(0) + 1;
         String contentHash = sha256(List.of(
                 String.join("\n", changedFiles == null ? List.of() : changedFiles),
                 String.join("\n", artifacts == null ? List.of() : artifacts),
-                String.join("\n", testEvidence == null ? List.of() : testEvidence)));
+                String.join("\n", testEvidence == null ? List.of() : testEvidence),
+                write(workspaceMutations == null ? List.of() : workspaceMutations)));
         Map<String, Object> manifest = new LinkedHashMap<>();
         manifest.put("taskId", taskId);
         manifest.put("stage", stage);
@@ -52,6 +101,7 @@ public class DeliveryManifestService {
         manifest.put("changedFiles", changedFiles == null ? List.of() : changedFiles);
         manifest.put("artifacts", artifacts == null ? List.of() : artifacts);
         manifest.put("testEvidence", testEvidence == null ? List.of() : testEvidence);
+        manifest.put("workspaceMutations", workspaceMutations == null ? List.of() : workspaceMutations);
         manifest.put("criteriaEvidence", criteriaEvidence == null ? Map.of() : criteriaEvidence);
         manifest.put("knownLimitations", List.of());
         manifest.put("contentHash", contentHash);

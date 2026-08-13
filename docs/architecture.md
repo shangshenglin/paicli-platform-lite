@@ -1,5 +1,9 @@
 # 架构说明
 
+## Completion budget safety
+
+A Run that exhausts its step, token, tool-call, or elapsed-time budget always terminates as `FAILED`. Its terminal event keeps the complete budget snapshot for diagnosis, but partial results are never persisted as `COMPLETED`. For a collaboration Run, the completion contract is derived from the structured current task envelope (title, description, acceptance criteria, and instruction), excluding historical digest text so old analysis notes cannot downgrade a repair task to `TEXT_ONLY`.
+
 ## 部署边界
 
 平台由一个 Spring Boot Server、一个 SQLite 数据库和可选的 Docker Sandbox 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界。
@@ -114,7 +118,7 @@ Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`r
 
 ## 持久化协作工作层
 
-Collaboration Runtime 位于 Plan 与 Run 之外，解决“工作项跨多次执行持续存在”的问题。`collaboration_tasks` 保存标题、说明、状态、优先级、Agent/AgentTeam 负责人、可选完成条件、父任务、阶段和可选 Plan 引用；`collaboration_task_runs` 把一次 Trigger Run 或 delegated child Run 关联回任务。每个根任务派生稳定的 task workspace owner；所有 Trigger Leader Run、默认阶段 Run 和委派后代在创建时继承该 owner，因此阶段 Barrier 即使通过新 Session/new Run 唤醒 Leader，仍读取同一目录。显式逻辑 `workspace_ref` 保留为有意隔离边界，不自动合并；若模型误传包含当前 collaboration workspace owner 的文件系统路径，则规范化为继承，避免元数据声称共享而子 Run 实际挂载空目录。Run 终态仅表示一次执行结束；阶段进入 `IN_REVIEW` 前还必须存在归属于该 Run 的写文件证据、Artifact 或阶段评论，空模型终态与只读检查不能推进 Barrier，最终只有人工 `ACCEPT` 可以进入 `DONE`。
+Collaboration Runtime 位于 Plan 与 Run 之外，解决“工作项跨多次执行持续存在”的问题。`collaboration_tasks` 保存标题、说明、状态、优先级、Agent/AgentTeam 负责人、可选完成条件、父任务、阶段和可选 Plan 引用；`collaboration_task_runs` 把 Trigger Run、delegated child Run 与同一协作会话中由普通对话入口新建或重试的续作 Run 关联回任务。后者会把尚在 `IN_REVIEW` 的当前任务及根任务恢复为 `IN_PROGRESS`，因此前端始终以完整 Run 树显示执行中状态。每个根任务派生稳定的 task workspace owner；所有 Trigger Leader Run、默认阶段 Run 和委派后代在创建时继承该 owner，因此阶段 Barrier 即使通过新 Session/new Run 唤醒 Leader，仍读取同一目录。显式逻辑 `workspace_ref` 保留为有意隔离边界，不自动合并；若模型误传包含当前 collaboration workspace owner 的文件系统路径，则规范化为继承，避免元数据声称共享而子 Run 实际挂载空目录。Run 终态仅表示一次执行结束；阶段进入 `IN_REVIEW` 前还必须存在归属于该 Run 的写文件证据、Artifact 或阶段评论，空模型终态与只读检查不能推进 Barrier，最终只有人工 `ACCEPT` 可以进入 `DONE`。
 
 评论、回复、子专家终态和 Stage Barrier 都可能要求唤醒同一负责人。调度前按任务树和最终 Agent 身份检查活跃 Run：目标已经处于非终态时只保留持久评论/阶段状态，由现有父 Run 消费子结果，不并发创建第二个 Leader 或专家 Run；父 Run 在子 Run 终态后原地恢复并继续推进，提示词明确禁止在未派发下一阶段或未发布结论时空转结束。若 Leader Run 仍提前终态且未发布结论，平台对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次幂等唤醒，仍无进展才置 `BLOCKED`。没有活跃目标时才创建幂等 Trigger。根 Team Leader 的 `conclusion=true` 还携带当前 Run id 校验，只有其他阶段、委派和并行 Run 全部终态后才允许持久化，防止“最终验收”评论早于审查或测试交付。历史重复 Run 继续保留用于审计，不在 Console 中伪装折叠。
 
@@ -172,7 +176,7 @@ ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计�
 - 简单问答不创建计划：工具不在普通路径自动触发，只有模型调用 `update_working_plan` 才落库；该工具加入核心上下文工具，且在 Agent Profile 业务 Tool allowlist 非空时作为唯一额外常驻的 WorkingPlan Harness 工具直接保留；其他未授权基础工具仍不会因此进入 allowlist。
 - 与 Formal Plan 的分界：Formal Plan 仍保留多步依赖、跨时长、并行、人工节点、失败回流与严格验收；WorkingPlan 不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。
 
-语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答）。协作任务复唤醒的 Leader Run 同样遵守。
+语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答），并在动态上下文末端、当前 Run 的 assistant/tool 消息之前再次附加该约束，使英文工具结果、参考资料或历史回答不改变本轮输出语言，同时保留最后一条真实会话消息的既有模型语义。协作任务复唤醒的 Leader Run 同样遵守。
 
 完成验证（PR2）：最终答案先经 `RunVerificationService` 校验再完成。写操作无工作区变化、或测试命令失败时判定 `REPAIRABLE`，验证结果写入 `run.verification` Event 并作为 `<verification>` 用户消息注入下一轮重新排队；连续 2 次仍不过才 `FAILED`。普通问答（TEXT_ONLY）行为不变。
 
@@ -190,6 +194,18 @@ ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计�
 
 专家线程（PR9）：迁移 38 新增 `collaboration_expert_threads`（root_task_id + agent_profile_id + thread_role 唯一，`latest_run_id` 带 `ON DELETE SET NULL` 外键）与 `collaboration_expert_thread_runs`（thread_id + run_id + ordinal）。`ExpertThreadService` 提供幂等 `getOrCreate`/`attachRun`/`findByRun`/`refreshDigest`；`attachRun` 在单个 `BEGIN IMMEDIATE` 事务内完成“Run 未被其他线程绑定校验 + ordinal 分配 + INSERT + latest_run_id 更新”，并发安全、重复挂载幂等、跨线程挂载抛错。`ExpertThreadDigestBuilder` 只消费本专家可审计证据：阶段按 `assigneeId` 过滤，changed_files 只取该 Run 自己的 DeliveryManifest 记录，artifact/test 引用按 Run 隔离，latest human instruction 取根任务最近人工评论。`CollaborationService.trigger` 与 `createAndDispatchSubtask` 都在 Run 输入注入 `<expert_thread_resume>`（阶段再派先 getOrCreate 线程再构建输入），`onRunTerminal` 终态后刷新 Digest；后续 Run 不加载旧 Run 历史。Active Run 竞态保护：`PreparedContext.maxMessageSequence` 记录上下文构建时的 Session 最大 active sequence，`RunProcessor` 通过 `commitFinalAssistantAndComplete(..., expectedSequence)` 在单个事务内“比对 + 置 COMPLETED”，有新输入则整体回滚，再由 `commitIntermediateAssistantAndRequeue` 单事务持久化 `run.new_input_during_model`（含 `staleAssistantArchived:true`）并把旧模型回答保存为 **archived** assistant 消息——审计保留；`maxMessageSequence` 只统计 `archived=0`，避免归档消息被误判为新输入。archived 语义统一为“保留事实、任何 Agent 语义链路不再消费”：ContextManager 用 `activeMessages`，ExpertThread Digest 用新增的 `activeMessagesForRun`，`get_agent_result` 的最终回答/摘要用 `activeMessages`，Memory 提取 source snapshot 查询 `archived=0`。评论投递用 `appendUserMessageIfRunActive` 事务内重确认，Run 恰好终态时回退创建新 Trigger/Run。永久删除终态 Run 时清理线程绑定、重选 `latest_run_id` 并置空受影响摘要。线程角色：仅 TEAM leaderAgentProfileId 使用 `LEADER`（TaskDigest 连续性），单 Agent 被指派 Agent 与团队专家均使用 `EXPERT` 线程并获得 Resume。`AgentResultValidator.validate(child, result, doneCriteria)` 从 `delegation.envelopeJson` 读取派遣时持久化的 done_criteria（`spawn_agent` 与协作阶段派遣 `createAndDispatchSubtask` 都通过 `DelegationEnvelopeBuilder` 写入），`get_agent_result` 返回逐 criterion 的确定性证据状态（显式且非空的 `criterion_evidence` → EVIDENCED，否则 UNVERIFIED；空字符串/空 List/空 Map 不算证据，不做关键词匹配，UNVERIFIED 不改 `valid`）；PlanStep 的 `doneCriteriaJson` 按 JSON array 解析为 `List<String>` 再作为 envelope fallback。
 
+## 完成合同、执行证据与 Deferred 工具调用（Harness Loop v2 · PR10）
+
+Harness 从“行为驱动”升级为“任务要求驱动”：模型负责策略与代码生成，系统环境提供真实执行事实，Harness 用机器可验证的 **合同 vs 证据** 决定是否完成。
+
+- **结构化工具证据（迁移 40）**：`tool_calls.result_metadata_json` 持久化 ToolResult.metadata；`write_file`（Local 与 Docker/Sandbox 代理）统一返回 `path/changed/beforeSha256/afterSha256/bytesWritten`，`execute_command` 返回 `exitCode/timedOut/shell/cwd/durationMs`。证据以持久化 metadata 为准，不解析 stdout 文本。
+- **测试族分类**：`TestCommandClassifier`/`TestFamily` 高精度识别测试命令（`mvn test`、`npm test`、`pytest`、`go test`、`cargo test`、`node --test`、Shell test 脚本等）；`mvn compile`、`./check-status.sh` 不算测试。不同 TestFamily 独立维护最新状态、互不覆盖。
+- **统一证据收集**：`RunEvidenceCollector` 通过纯 `RunEvidenceDecoder` 产出 `RunEvidence`（filesChanged/commandsExecuted/tests/artifacts/workspaceMutations/lastMutationOrdinal）；相同 Decoder 也供 SQLite child terminal envelope 使用，因此 `RunVerificationService`、`AgentResultService`、持久化 delegation result、`DeliveryManifestService`、`WorkspaceMergeService` 不会各自解析 metadata；`lastMutationOrdinal` 只由真实 mutation 决定。
+- **完成合同**：`run_completion_contracts`（迁移 40）保存 `CompletionMode`（TEXT_ONLY/MUTATION_REQUIRED/TEST_REQUIRED/MUTATION_AND_TEST）、requires_workspace_change、requires_tests、required_test_families、writeScope、doneCriteria。来源按可靠性排序：DelegationEnvelope（resource_write_set/done_criteria）→ Formal PlanStep（resource_write_set/done_criteria）→ WorkingPlan `completion` 结构化声明 → Root 保守分类器（`CompletionRequirementClassifier`，问答/解释默认 TEXT_ONLY）。合同**只可加强**（false→true 允许，true→false 禁止），模型不能静默降低验收标准；WorkingPlan completion 是“模型对任务要求的结构化声明”，不是完成证据。
+- **合同驱动验证**：`RunVerificationService.verify(run, finalAnswer, contract, evidence)` 为纯逻辑；required test families 必须在最后一次真实 mutation 之后通过，否则 REPAIRABLE（注入 `<verification>` 重试，2 次后 FAILED）。
+- **AgentResult 证据闭环**：`AgentResultService` 自动归集 child 的 `files_changed/workspace_mutations/commands_executed/tests/artifacts/completion_contract/evidence`；`AgentResultValidator` 增加 contract-aware 校验（contract 要求 workspace change/tests 而无真实证据 → invalid）；`DeliveryManifestService.recordStageDelivery(taskId, stage, runId)`、实际阶段交付门禁与 `WorkspaceMergeService.ChildChanges.of` 都复用同一证据。
+- **Deferred get_agent_result**：`ToolCallStatus.WAITING_EXTERNAL`；`tool_calls.wait_kind/wait_ref/waiting_since` 记录等待外部条件（`CHILD_RUN`）。child 未终态时 `get_agent_result` 返回 deferred metadata，RunProcessor 把 ToolCall 标记为 WAITING_EXTERNAL、Parent 进入 WAITING_AGENT（不追加最终 tool 消息、不占用模型轮次）；child 终态由 `DeferredAgentResultService` 在单个幂等事务内完成原始 ToolCall + 追加 ToolResult + 重排队 Parent。Lost Wakeup 双边保护（设置等待后立即复查 child 终态；resolve 用 `WHERE status=WAITING_EXTERNAL` 保证只有一个 resolver 成功）；`@PostConstruct` 启动恢复补齐 Server 重启期间的等待，重复终态回调幂等。
+- **事件/审计**：`tool.deferred`、`tool.deferred.resolved`、`agent.result.validated`、`run.evidence.collected`、`run.completion_contract.created/strengthened` 等事件只用于 SSE/诊断/重放展示，业务事实仍保存在业务表。
 ## Prompt Cache 命中率优化
 
 优化前观测样本为 `8,714,118` 输入 Token、`544,640` 缓存命中 Token，累计命中率约 `6.25%`。旧组装顺序在历史消息之前注入每轮变化的 `Instant.now()`、运行工作区、RAG 和 Memory；Prompt Cache 按共同前缀复用，因此任一早期动态值变化都会让其后的长会话失去复用机会。
@@ -217,7 +233,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 39：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定，39 增加私有仓库 fixture/grader、不可变 Trial Case 快照和 Baseline Grader 详情。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 41：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定，39 增加私有仓库 fixture/grader、不可变 Trial Case 快照和 Baseline Grader 详情，40 增加完成合同、结构化工具证据和 Deferred 外部工具调用，41 补偿关联协作会话遗漏的续作 Run。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 
@@ -230,7 +246,7 @@ RAG、历史会话检索、Skill、联网、MCP 和 Multi-Agent 委派都通过�
 - Skill 只从受控全局/项目目录发现，稳定排序并按需加载；Git 导入先预检文件与权限声明，再暂存并校验符号链接、文件数和字符预算，不执行仓库代码。生命周期元数据和单级回滚备份均留在受控 Skill 根目录。
 - RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构，BM25 与真实 Embedding 独立排序后以 RRF 融合、去重和限额。检索时会生成轻量 Query Plan，识别代码路径、符号、排障、决策和架构类查询；SearchHit 返回 citation、文档版本、BM25 分、检索策略和命中原因，便于 UI 解释和后续排序调参。
 - `session_search` 只在 Agent 调用时检索当前项目的用户可见历史消息，排除当前 Run，并按会话生成抽取式摘要。
-- 联网默认关闭；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
+- 联网默认关闭；启用时必须提供可访问的 SearXNG-compatible 搜索端点。`web_search` 将端点连接/超时转换为含脱敏端点和 `PAICLI_WEB_SEARCH_URL` 的操作性错误，并可通过 `PAICLI_WEB_SEARCH_ENGINES` 将固定引擎集合透传给 SearXNG，规避默认聚合集合中被限流、验证码或超时的引擎；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
 - MCP Header 只能直接填写非敏感值或引用 `env:VARIABLE_NAME`，真实密钥不写入配置也不回显；Schema、参数和响应都有预算，连续失败触发短时熔断；全部 MCP 工具强制审批。
 - `spawn_agent` 经审批后原子创建委派和内部子 Session/Run，以父 ToolCall 幂等，并限制深度、子数量和级联取消。委派可绑定 `plan_id`/`plan_step_id`，并持久化包含 scope、允许文件/工具、输入 artifact、输出契约、验收标准、预算、deadline、依赖和禁止操作的 envelope；`get_agent_result` 会把子 Run 摘要、Artifact、Token 用量、失败分类和证据写回 delegation result，供恢复、审计和最终聚合使用。
 
@@ -257,3 +273,12 @@ Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定
 容器强制以 UID/GID `10001` 运行并启用 init、只读根文件系统、`no-new-privileges`、`cap-drop ALL`、CPU/内存/PID/共享内存限制。只有 Run workspace、受限 `/tmp` 和只对该用户开放的 HOME tmpfs 可写；HOME 为 Maven、Gradle、npm、pip、NuGet、Go/Rust 等工具提供临时缓存，随 Run 容器回收，不进入持久化工作区。镜像包含 JDK 17、Maven、Node.js/npm、Python/pip/venv、Git、Bash 和 PowerShell Core。
 
 命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、临时工具缓存、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。`execute_command` 在 ToolCall 原子持久化后按已落库的 `command` 分类：读取、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署等风险命令在任何容器调用前创建持久化 Approval。批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作；无法解析或缺少命令时按风险命令处理。服务初始化会重新分类历史未决命令，安全命令原 Approval 自动批准并重新排队，危险命令保持等待。全部 MCP 工具和 Provider 自行声明的危险工具仍强制审批。
+## Completion Contract 与证据闭环
+
+`get_agent_result` 虽然读取持久化结果，但可能把父 Run 停在 `WAITING_AGENT`，因此不进入同轮只读工具并行前缀；它先完成原子停放，子 Run 终态再幂等唤醒父 Run。`RunEvidenceCollector` 与 SQLite terminal envelope 共用 `RunEvidenceDecoder`，将高置信度测试 invocation 与 workspace mutation 分开：测试/构建生成物的 fingerprint 不会把测试本身设置为最后一次源码 mutation，非测试命令的显式 workspace mutation 则可作为变更证据。含 `||`、`;`、管道，或测试后仍有尾部命令的复合命令不计入 TestEvidence。
+
+Run 在开始处理前建立持久化 Completion Contract，来源按 Delegation Envelope、绑定 `plan_steps.run_id` 的 Formal PlanStep、WorkingPlan 声明和根任务分类确定，后续 WorkingPlan 只能 strengthen。最终验证统一消费 `RunEvidenceCollector`：文件变更必须有 pre/post 哈希，`execute_command` 可用 workspace fingerprint 证明副作用，测试必须来自高置信度的真实测试 invocation。
+
+Deferred `get_agent_result` 的 ToolCall `WAITING_EXTERNAL` 与父 Run `WAITING_AGENT` 在同一个 SQLite 事务中提交；子 Run 终态解析保持幂等。业务交付和 AgentResult 只消费非 `tool_result` Artifact，SQLite 的 child terminal result 也使用同一过滤；预算停止也必须先通过 CompletionVerifier，否则 Run 失败并保留可审计的预算事件。
+
+`RunEvidence.workspaceMutations` 是文件路径未知时的统一变更证据：`AgentResultService`、SQLite 终态 delegation envelope 与 DeliveryManifest 都输出或消费 `workspace_mutations`，`AgentResultValidator`、`RunVerificationService` 和协作阶段交付门禁使用相同语义；不得把命令修改伪造成 `files_changed`，不得用共享 workspace 的时间戳推断 Run 归属。测试分类对换行、单独 `&`、Maven skip、pytest collect-only、cargo `--no-run`、孤立 Maven selector（如 `-Dtest=Foo`）以及 Gradle `testClasses`/`checkstyle*` 保守拒绝。

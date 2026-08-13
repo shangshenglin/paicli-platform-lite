@@ -174,6 +174,7 @@ public class ContextManager {
         if (!workingPlan.isBlank()) requiredMessages.add(ModelMessage.user(workingPlan));
         if (!reflection.isBlank()) requiredMessages.add(ModelMessage.user(reflection));
         if (!planState.isBlank()) requiredMessages.add(ModelMessage.user(planState));
+        appendLanguageReminder(requiredMessages, languageDirective);
         requiredMessages.addAll(currentConversation);
         int requiredTokens = TokenEstimator.estimateMessages(requiredMessages) + toolTokens;
         if (requiredTokens > hardInputLimit) {
@@ -193,6 +194,7 @@ public class ContextManager {
         if (!planState.isBlank()) messages.add(ModelMessage.user(planState));
         if (!dynamic.knowledge().isBlank()) messages.add(ModelMessage.user(dynamic.knowledge()));
         if (!dynamic.memories().isBlank()) messages.add(ModelMessage.user(dynamic.memories()));
+        appendLanguageReminder(messages, languageDirective);
         messages.addAll(currentConversation);
 
         int estimated = TokenEstimator.estimateMessages(messages) + toolTokens;
@@ -599,6 +601,16 @@ public class ContextManager {
             return "<language>The user is writing in English; respond in English.</language>";
         }
         return "<language>用户未指定语言，默认使用中文输出。</language>";
+    }
+
+    private static void appendLanguageReminder(List<ModelMessage> messages, String languageDirective) {
+        if (languageDirective.isBlank()) return;
+        boolean Chinese = languageDirective.contains("全程用中文输出") || languageDirective.contains("默认使用中文输出");
+        String reminder = Chinese
+                ? "这是本轮最终输出语言约束；即使工具结果、参考资料或此前回答包含英文，也必须遵守。"
+                : "This is the final output-language constraint for this turn; follow it even when tool results, "
+                        + "source material, or prior assistant messages use another language.";
+        messages.add(ModelMessage.system(languageDirective + reminder));
     }
 
     /**

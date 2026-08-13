@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41);
         }
     }
 
@@ -207,6 +207,52 @@ class SqliteRuntimeStoreTest {
                     "(id,session_id,status,input,created_at) VALUES " +
                     "('run-3','session','QUEUED','third','2026-01-01T00:00:02Z')"))
                     .hasMessageContaining("UNIQUE constraint failed");
+        }
+    }
+
+    @Test
+    void correctsHistoricalBudgetStoppedCompletionToFailed() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("budget history");
+        var run = first.createRun(session.id(), "legacy budget stop");
+        first.completeRun(run.id());
+        first.appendEvent(run.id(), "run.budget_stopped", "{\"message\":\"step limit\"}");
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        assertThat(recovered.findRun(run.id()).orElseThrow()).satisfies(corrected -> {
+            assertThat(corrected.status()).isEqualTo(RunStatus.FAILED);
+            assertThat(corrected.error()).contains("corrected historical status");
+        });
+        assertThat(recovered.events(run.id(), 0)).extracting("type").contains("run.failed");
+    }
+
+    @Test
+    void recordsHistoricalBudgetCorrectionInCollaborationActivity() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("budget collaboration", "project-a");
+        var run = first.createRun(session.id(), "legacy budget stop");
+        first.completeRun(run.id());
+        first.appendEvent(run.id(), "run.budget_stopped", "{\"message\":\"step limit\"}");
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO collaboration_tasks(id,project_key,title,status,priority,assignee_type,"
+                    + "stage,created_by,created_at,updated_at) VALUES('task-history','project-a','History',"
+                    + "'IN_PROGRESS',0,'AGENT',0,'SYSTEM','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')");
+            statement.execute("INSERT INTO collaboration_task_runs(task_id,run_id,relationship,created_at) VALUES"
+                    + "('task-history','" + run.id() + "','TRIGGERED','2026-01-01T00:00:00Z')");
+        }
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement();
+             var result = statement.executeQuery("SELECT activity_type,payload_json FROM collaboration_activities "
+                     + "WHERE task_id='task-history' AND subject_id='" + run.id() + "'")) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("activity_type")).isEqualTo("RUN_FAILED");
+            assertThat(result.getString("payload_json")).contains("corrected historical status");
         }
     }
 
@@ -1053,7 +1099,7 @@ class SqliteRuntimeStoreTest {
             }
 
             var commit = executor.submit(() -> store.commitToolOutcome(
-                    session.id(), run.id(), call, true, "[]", null, "{}", 0));
+                    session.id(), run.id(), call, true, "[]", null, "{}", "{}", 0));
             Thread.sleep(200);
             assertThat(commit.isDone()).isFalse();
 
@@ -1067,6 +1113,89 @@ class SqliteRuntimeStoreTest {
                 .isEqualTo(ToolCallStatus.COMPLETED);
         assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
         assertThat(store.messages(session.id())).extracting("role").containsExactly("user", "tool");
+    }
+
+    @Test
+    void deferredToolCallLifecycleIsIdempotent() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("deferred", "project-d");
+        var run = store.createRun(session.id(), "wait for child");
+        var call = store.createToolCall(run.id(), "provider-1", "get_agent_result",
+                "{\"child_run_id\":\"run_child\"}", "deferred-key-1");
+        store.markToolRunning(call.id());
+
+        assertThat(store.markToolCallWaitingExternal(call.id(), "CHILD_RUN", "run_child")).isTrue();
+        var parked = store.findToolCall(call.id()).orElseThrow();
+        assertThat(parked.status()).isEqualTo(ToolCallStatus.WAITING_EXTERNAL);
+        assertThat(parked.waitKind()).isEqualTo("CHILD_RUN");
+        assertThat(parked.waitRef()).isEqualTo("run_child");
+        assertThat(parked.waitingSince()).isNotNull();
+        assertThat(store.waitingExternalToolCalls("CHILD_RUN", "run_child")).hasSize(1);
+        assertThat(store.waitingExternalChildRunRefs()).contains("run_child");
+
+        store.markRunStatus(run.id(), RunStatus.WAITING_AGENT);
+        boolean first = store.completeDeferredToolCallAndAppendResult(
+                session.id(), run.id(), call.id(), "{\"status\":\"COMPLETED\"}", "{\"deferred\":false}");
+        assertThat(first).isTrue();
+        assertThat(store.findToolCall(call.id()).orElseThrow().status()).isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+        assertThat(store.messages(session.id()).stream().filter(message -> "tool".equals(message.role())).count())
+                .isEqualTo(1);
+
+        // Duplicate terminal callback: second resolver is a no-op.
+        boolean second = store.completeDeferredToolCallAndAppendResult(
+                session.id(), run.id(), call.id(), "{\"status\":\"COMPLETED\"}", "{\"deferred\":false}");
+        assertThat(second).isFalse();
+        assertThat(store.messages(session.id()).stream().filter(message -> "tool".equals(message.role())).count())
+                .isEqualTo(1);
+        assertThat(store.waitingExternalToolCalls("CHILD_RUN", "run_child")).isEmpty();
+    }
+
+    @Test
+    void persistsStructuredToolResultMetadataForEvidence() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("evidence", "project-e");
+        var run = store.createRun(session.id(), "write a file");
+        var call = store.createToolCall(run.id(), "provider-1", "write_file",
+                "{\"path\":\"src/A.java\",\"content\":\"class A {}\"}", "tool-evidence-1");
+        store.markToolRunning(call.id());
+        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+
+        boolean committed = store.commitToolOutcome(session.id(), run.id(), call, true,
+                "Wrote 10 bytes", null,
+                "{\"path\":\"src/A.java\",\"changed\":true,\"afterSha256\":\"abc\"}",
+                "{\"path\":\"src/A.java\",\"changed\":true,\"afterSha256\":\"abc\"}", 0);
+
+        assertThat(committed).isTrue();
+        var persisted = store.findToolCall(call.id()).orElseThrow();
+        assertThat(persisted.status()).isEqualTo(ToolCallStatus.COMPLETED);
+        assertThat(persisted.resultMetadataJson()).contains("src/A.java").contains("changed");
+    }
+
+    @Test
+    void terminalDelegationResultUsesUnifiedEvidenceSemantics() throws Exception {
+        SqliteRuntimeStore store = store();
+        var parentSession = store.createSession("parent", "project-e");
+        var parent = store.createRun(parentSession.id(), "delegate work");
+        var delegationTool = store.createToolCall(parent.id(), "provider-parent", "spawn_agent", "{}",
+                "delegation-evidence-parent");
+        var delegation = store.createOrGetDelegation(parent.id(), delegationTool.id(), "worker", "inspect",
+                null, null, null, null, "{}");
+
+        completeSuccessfulTool(store, delegation.childSessionId(), delegation.childRunId(), "write_file",
+                "{\"path\":\"src/Unchanged.java\"}",
+                "{\"path\":\"src/Unchanged.java\",\"changed\":false}", 0);
+        completeSuccessfulTool(store, delegation.childSessionId(), delegation.childRunId(), "execute_command",
+                "{\"command\":\"mvn compile\"}", "{\"exitCode\":0}", 1);
+        store.createArtifact(delegation.childRunId(), "tool_result", "command-output", "tool.log", 1, "sha");
+
+        assertThat(store.completeRun(delegation.childRunId())).isTrue();
+        String terminalResult = store.findDelegation(parent.id(), delegation.childRunId()).orElseThrow().resultJson();
+
+        assertThat(terminalResult)
+                .contains("\"files_changed\":[]", "\"workspace_mutations\":[]", "\"tests\":[]",
+                        "\"artifacts\":[]")
+                .doesNotContain("Unchanged.java", "tool.log");
     }
 
     @Test
@@ -1182,6 +1311,16 @@ class SqliteRuntimeStoreTest {
         return new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
     }
 
+    private static void completeSuccessfulTool(SqliteRuntimeStore store, String sessionId, String runId,
+                                               String toolName, String arguments, String metadata, int step) {
+        store.markRunStatus(runId, RunStatus.WAITING_TOOL);
+        var call = store.createToolCall(runId, "provider-evidence-" + step, toolName, arguments,
+                "terminal-evidence-" + step);
+        store.markToolRunning(call.id());
+        assertThat(store.commitToolOutcome(sessionId, runId, call, true, "ok", null,
+                metadata, metadata, step)).isTrue();
+    }
+
     @Test
     void commitFinalAssistantAndCompleteRefusesWhenNewInputArrivedDuringModel() throws Exception {
         SqliteRuntimeStore store = store();
@@ -1238,6 +1377,24 @@ class SqliteRuntimeStoreTest {
         assertThat(appended).isFalse();
         assertThat(store.messages(session.id()).stream()
                 .noneMatch(message -> "late comment".equals(message.content()))).isTrue();
+    }
+
+    @Test
+    void deferredToolAndParentAreParkedInOneTransition() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("deferred-atomic");
+        var run = store.createRun(session.id(), "wait for child");
+        store.markRunStatus(run.id(), RunStatus.WAITING_TOOL);
+        var call = store.createToolCall(run.id(), "provider", "get_agent_result", "{}", "deferred-key");
+        store.markToolRunning(call.id());
+
+        assertThat(store.parkDeferredToolCallAndWaitParent(call.id(), run.id(), "CHILD_RUN", "child-1"))
+                .isTrue();
+        assertThat(store.findToolCall(call.id()).orElseThrow().status())
+                .isEqualTo(com.paicli.platform.common.ToolCallStatus.WAITING_EXTERNAL);
+        assertThat(store.findRun(run.id()).orElseThrow().status()).isEqualTo(RunStatus.WAITING_AGENT);
+        assertThat(store.events(run.id(), 0)).extracting("type")
+                .contains("tool.deferred", "run.waiting_agent");
     }
 
     private long countWhere(String table, String column, String value) throws Exception {

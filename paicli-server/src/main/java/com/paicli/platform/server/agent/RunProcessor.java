@@ -61,6 +61,7 @@ public class RunProcessor {
     private final CollaborationService collaboration;
     private final RunVerificationService runVerification;
     private final ReflectionService reflectionService;
+    private final DeferredAgentResultService deferredAgentResultService;
 
     @Autowired
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -72,7 +73,8 @@ public class RunProcessor {
                         CompletionNotificationService notifications,
                         CollaborationService collaboration,
                         RunVerificationService runVerification,
-                        ReflectionService reflectionService) {
+                        ReflectionService reflectionService,
+                        DeferredAgentResultService deferredAgentResultService) {
         this.store = store;
         this.modelClient = modelClient;
         this.toolRouter = toolRouter;
@@ -89,6 +91,7 @@ public class RunProcessor {
         this.collaboration = collaboration;
         this.runVerification = runVerification;
         this.reflectionService = reflectionService;
+        this.deferredAgentResultService = deferredAgentResultService;
     }
 
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -97,7 +100,7 @@ public class RunProcessor {
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -105,10 +108,11 @@ public class RunProcessor {
                  ApprovalService approvalService, AuditService auditService,
                  ContextManager contextManager, ToolResultMaterializer resultMaterializer,
                  ModelProperties modelProperties,
-                 RunVerificationService runVerification, ReflectionService reflectionService) {
+                 RunVerificationService runVerification, ReflectionService reflectionService,
+                 DeferredAgentResultService deferredAgentResultService) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, modelProperties, null, null, null, null,
-                runVerification, reflectionService);
+                runVerification, reflectionService, deferredAgentResultService);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -120,7 +124,7 @@ public class RunProcessor {
                  CompletionNotificationService notifications) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, memoryService, modelProperties, metrics,
-                productivity, notifications, null, null, null);
+                productivity, notifications, null, null, null, null);
     }
 
     public void process(RunRecord claimedRun) {
@@ -139,6 +143,7 @@ public class RunProcessor {
         String budgetReservationKey = null;
         if (run.status() == RunStatus.CANCELED) return;
         try {
+            if (runVerification != null) runVerification.ensureContract(run.id());
             var resumableTool = store.findResumableToolCall(run.id());
             if (resumableTool.isPresent()) {
                 handleTool(run, resumableTool.get());
@@ -258,6 +263,7 @@ public class RunProcessor {
                     toolRouter.release(run.id());
                     return;
                 }
+                resolveDeferredChild(run.id());
                 notify(run, "COMPLETED", "任务已完成");
                 store.recordMemoryOutcome(run.id(), "RUN_COMPLETED");
                 if (memoryService != null) {
@@ -317,6 +323,7 @@ public class RunProcessor {
             }
             store.failRun(run.id(), e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+            resolveDeferredChild(run.id());
             store.requeueWaitingParentRuns(run.id());
             notify(run, "FAILED", e.getMessage());
             if (metrics != null) metrics.failed(System.nanoTime() - processStarted);
@@ -366,8 +373,43 @@ public class RunProcessor {
         store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
         String content = "Execution stopped because this run reached its configured budget.\n\n"
                 + "Budget snapshot: " + budget.message().replace("run execution budget exceeded: ", "") + "\n\n"
-                + "No further model calls were made. Use the completed child run, artifacts, and previous tool "
-                + "results as the available partial result, or retry with a larger run budget.";
+                + "No further model calls were made. This Run failed without a completed result; retry it with a "
+                + "larger budget after reviewing the available tool results and artifacts.";
+        if (runVerification != null) {
+            RunVerificationService.VerificationResult verification = runVerification.verify(run, content);
+            if (verification.status() != RunVerificationService.Status.PASS) {
+                String error = "budget exceeded before completion contract was satisfied: "
+                        + String.join("; ", verification.failedCriteria());
+                store.failRun(run.id(), error);
+                store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+                store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
+                        "status", "FAILED", "message", error,
+                        "tokens", budget.tokens(), "maxTokens", budget.maxTokens())));
+                resolveDeferredChild(run.id());
+                store.requeueWaitingParentRuns(run.id());
+                toolRouter.release(run.id());
+                notify(run, "FAILED", error);
+                return true;
+            }
+        }
+        if (budget.exceeded()) {
+            String error = "run execution budget exceeded before completion: "
+                    + budget.message().replace("run execution budget exceeded: ", "");
+            store.appendMessage(run.sessionId(), run.id(), "assistant", content);
+            store.failRun(run.id(), error);
+            store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+            store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
+                    "status", "FAILED", "message", error,
+                    "step", budget.step(), "maxSteps", budget.maxSteps(),
+                    "tokens", budget.tokens(), "maxTokens", budget.maxTokens(),
+                    "toolCalls", budget.toolCalls(), "maxToolCalls", budget.maxToolCalls(),
+                    "elapsedSeconds", budget.elapsedSeconds(), "maxElapsedSeconds", budget.maxElapsedSeconds())));
+            resolveDeferredChild(run.id());
+            store.requeueWaitingParentRuns(run.id());
+            toolRouter.release(run.id());
+            notify(run, "FAILED", error);
+            return true;
+        }
         boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(), content, "",
                 json(Map.of("status", "BUDGET_STOPPED",
                         "step", budget.step(), "maxSteps", budget.maxSteps(),
@@ -380,6 +422,7 @@ public class RunProcessor {
                 "message", budget.message(),
                 "tokens", budget.tokens(),
                 "maxTokens", budget.maxTokens())));
+        resolveDeferredChild(run.id());
         store.requeueWaitingParentRuns(run.id());
         toolRouter.release(run.id());
         notify(run, "COMPLETED", "任务已达到运行预算并停止，已保留可用的部分结果");
@@ -466,6 +509,10 @@ public class RunProcessor {
             toolRouter.release(run.id());
             return;
         }
+        if (isDeferredResult(result)) {
+            parkForDeferredResult(run, call, result);
+            return;
+        }
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
@@ -477,7 +524,8 @@ public class RunProcessor {
                     materialized.artifact() == null ? "" : materialized.artifact().id());
             completedEvent.put("content", materialized.modelContent());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, true,
-                    materialized.modelContent(), null, json(completedEvent), run.currentStep());
+                    materialized.modelContent(), null, json(evidenceMetadata(result)),
+                    json(completedEvent), run.currentStep());
             if (!committed) return;
             if (isActiveAgentResult(call, materialized.modelContent())
                     || "create_collaboration_subtask".equals(call.toolName())) {
@@ -498,7 +546,8 @@ public class RunProcessor {
             failedEvent.put("durationMs", result.durationMs());
             failedEvent.put("error", result.error());
             boolean committed = store.commitToolOutcome(run.sessionId(), run.id(), call, false,
-                    observation, result.error(), json(failedEvent), run.currentStep());
+                    observation, result.error(), json(evidenceMetadata(result)),
+                    json(failedEvent), run.currentStep());
             if (!committed) return;
             auditService.record("tool.failed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
@@ -506,6 +555,12 @@ public class RunProcessor {
         }
     }
 
+    /** Persisted structured metadata for evidence: tool metadata plus real duration. */
+    private static Map<String, Object> evidenceMetadata(ToolResult result) {
+        Map<String, Object> value = new LinkedHashMap<>(result.metadata());
+        value.put("durationMs", result.durationMs());
+        return value;
+    }
     /** PR4: executes the leading read-only prefix in parallel, committing outcomes in model order. */
     private void executeReadOnlyBatch(RunRecord run, List<ToolCallRecord> calls) throws Exception {
         if (!store.markRunStatus(run.id(), RunStatus.WAITING_TOOL)) return;
@@ -541,6 +596,10 @@ public class RunProcessor {
             store.failTool(call.id(), "Run canceled");
             return false;
         }
+        if (isDeferredResult(result)) {
+            parkForDeferredResult(run, call, result);
+            return true;
+        }
         if (result.success()) {
             ToolResultMaterializer.MaterializedResult materialized = resultMaterializer.materialize(
                     run.id(), call.toolName(), result.content());
@@ -552,7 +611,7 @@ public class RunProcessor {
                     materialized.artifact() == null ? "" : materialized.artifact().id());
             completedEvent.put("content", materialized.modelContent());
             store.commitToolMessage(run.sessionId(), run.id(), call, true,
-                    materialized.modelContent(), null, json(completedEvent));
+                    materialized.modelContent(), null, json(evidenceMetadata(result)), json(completedEvent));
             auditService.record("tool.completed", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "durationMs", result.durationMs(), "result", result.content()));
             return isActiveAgentResult(call, materialized.modelContent())
@@ -569,7 +628,7 @@ public class RunProcessor {
         failedEvent.put("durationMs", result.durationMs());
         failedEvent.put("error", result.error());
         store.commitToolMessage(run.sessionId(), run.id(), call, false,
-                observation, result.error(), json(failedEvent));
+                observation, result.error(), json(evidenceMetadata(result)), json(failedEvent));
         auditService.record("tool.failed", run.id(), call.id(), Map.of(
                 "tool", call.toolName(), "durationMs", result.durationMs(), "error", result.error()));
         recordToolFailureReflection(run, call, result);
@@ -579,7 +638,8 @@ public class RunProcessor {
     private List<ToolCallRecord> readOnlyPrefix(List<ToolCallRecord> calls) {
         List<ToolCallRecord> batch = new ArrayList<>();
         for (ToolCallRecord call : calls) {
-            if (toolRouter.effect(call.toolName()) == ToolEffect.READ_ONLY
+            if (!"get_agent_result".equals(call.toolName())
+                    && toolRouter.effect(call.toolName()) == ToolEffect.READ_ONLY
                     && !approvalService.requiresApproval(call)) {
                 batch.add(call);
             } else {
@@ -614,6 +674,40 @@ public class RunProcessor {
         return Map.copyOf(arguments);
     }
 
+    /** A tool result that defers its final output to an external future condition. */
+    private static boolean isDeferredResult(ToolResult result) {
+        return Boolean.TRUE.equals(result.metadata().get("deferred"));
+    }
+
+    /** Parks the run and marks the tool call WAITING_EXTERNAL without a final tool message. */
+    private void parkForDeferredResult(RunRecord run, ToolCallRecord call, ToolResult result) {
+        String waitKind = String.valueOf(result.metadata().getOrDefault("waitKind", ""));
+        String waitRef = String.valueOf(result.metadata().getOrDefault("waitRef", ""));
+        if (!store.parkDeferredToolCallAndWaitParent(call.id(), run.id(), waitKind, waitRef)) {
+            return;
+        }
+        // Lost-wakeup guard: if the child became terminal just before we parked, resolve now.
+        if ("CHILD_RUN".equals(waitKind) && waitRef != null && !waitRef.isBlank()) {
+            RunRecord child = store.findRun(waitRef).orElse(null);
+            if (child != null && child.status().terminal()) resolveDeferredChild(waitRef);
+        }
+        toolRouter.release(run.id());
+    }
+
+    /** Resolves deferred get_agent_result calls parked on this run once it is terminal. */
+    private void resolveDeferredChild(String childRunId) {
+        if (deferredAgentResultService == null) return;
+        try {
+            deferredAgentResultService.resolveChildTerminal(childRunId);
+        } catch (Exception e) {
+            store.appendEvent(childRunId, "tool.deferred.resolve_failed", json(Map.of(
+                    "error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage())));
+        }
+    }
+
+    private static boolean isBlankOrUnknown(String value) {
+        return value == null || value.isBlank() || "null".equals(value) || "".equals(value);
+    }
     private boolean isActiveAgentResult(ToolCallRecord call, String content) {
         if (!"get_agent_result".equals(call.toolName())) return false;
         try {

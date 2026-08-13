@@ -22,6 +22,7 @@ import com.paicli.platform.server.model.ModelMessage;
 import com.paicli.platform.server.model.ModelStreamListener;
 import com.paicli.platform.server.prompt.PromptAssembler;
 import com.paicli.platform.server.sandbox.LocalSandboxDriver;
+import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.tool.ToolCatalog;
@@ -344,6 +345,51 @@ class RunProcessorTest {
     }
 
     @Test
+    void budgetExhaustionFailsInsteadOfCompletingWithPartialResult() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        LocalArtifactStore artifacts = new LocalArtifactStore(properties, store);
+        ToolRouter router = new ToolRouter(new LocalSandboxDriver(properties), artifacts);
+        AuditService audit = new AuditService(mapper, properties);
+        ModelProperties modelProperties = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "", 3, 500, 60, "", 1, 0);
+        ContextManager context = new ContextManager(store, new PromptAssembler(properties), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
+                modelProperties, properties, mapper);
+        ModelClient toolModel = new ModelClient() {
+            @Override
+            public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
+                return ModelResponse.tool("inspect", "list_dir", Map.of("path", "."));
+            }
+
+            @Override public String name() { return "budget-test"; }
+        };
+        RunProcessor processor = new RunProcessor(store, toolModel, router, mapper,
+                new ApprovalService(store, audit, router), audit, context,
+                new ToolResultMaterializer(artifacts, modelProperties), null, modelProperties,
+                null, null, null);
+        var session = store.createSession("budget exhaustion");
+        var run = store.createRun(session.id(), "inspect then exceed the step budget");
+
+        processor.process(store.claimNextRun().orElseThrow());
+        processor.process(store.claimNextRun().orElseThrow());
+
+        assertThat(store.findRun(run.id()).orElseThrow()).satisfies(failed -> {
+            assertThat(failed.status()).isEqualTo(RunStatus.FAILED);
+            assertThat(failed.error()).contains("run execution budget exceeded before completion", "step=1/1");
+        });
+        assertThat(store.events(run.id(), 0)).extracting("type")
+                .contains("run.budget_stopped").doesNotContain("run.completed");
+        assertThat(store.messages(session.id()).stream()
+                .filter(message -> "assistant".equals(message.role()))
+                .map(message -> message.content()))
+                .anyMatch(content -> content.contains("This Run failed without a completed result"));
+    }
+
+    @Test
     void executesReadOnlyToolBatchInOnePassInModelOrder() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
@@ -375,7 +421,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, batchModel, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("batch");
         var run = store.createRun(session.id(), "read several files");
 
@@ -407,13 +456,9 @@ class RunProcessorTest {
                 new ConversationCompactor(store, new ExtractiveSummarizer(), modelProperties, mapper),
                 modelProperties, properties, mapper);
         ModelClient model = new ModelClient() {
-            int calls = 0;
             @Override
             public ModelResponse complete(String runId, ModelRequest request, ModelStreamListener listener) {
-                calls++;
-                if (calls == 1) {
-                    return ModelResponse.tool("c1", "write_file", Map.of("path", "x.txt", "content", "hello"));
-                }
+                // Case 02: the task requires a file change but the model never writes anything.
                 return ModelResponse.text("done");
             }
             @Override public String name() { return "verify-model-test"; }
@@ -421,7 +466,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, model, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("verify");
         var run = store.createRun(session.id(), "change a file");
 
@@ -463,7 +511,10 @@ class RunProcessorTest {
         RunProcessor processor = new RunProcessor(store, model, router, mapper,
                 new ApprovalService(store, audit, router), audit, context,
                 new ToolResultMaterializer(artifacts, modelProperties), modelProperties,
-                new RunVerificationService(store), new ReflectionService(store, mapper));
+                new RunVerificationService(store,
+                        new RunEvidenceCollector(store, mapper),
+                        new CompletionContractService(store, new PlanStore(properties), mapper)),
+                new ReflectionService(store, mapper), null);
         var session = store.createSession("loop");
         var run = store.createRun(session.id(), "avoid loops");
 

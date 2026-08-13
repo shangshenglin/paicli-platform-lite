@@ -52,7 +52,16 @@ public class WorkingPlanToolProvider implements ServerToolProvider {
                                 "evidenceRefs", Map.of("type", "array", "items", Map.of("type", "string"))),
                                 "required", List.of("id", "title", "status"))),
                         "reason", Map.of("type", "string",
-                                "description", "Why the plan changed; visible as a durable update reason")),
+                                "description", "Why the plan changed; visible as a durable update reason"),
+                        "completion", Map.of("type", "object", "properties", Map.of(
+                                "requires_workspace_change", Map.of("type", "boolean",
+                                        "description", "Structured claim that the task requires real workspace changes"),
+                                "requires_tests", Map.of("type", "boolean",
+                                        "description", "Structured claim that the task requires tests"),
+                                "required_test_families", Map.of("type", "array",
+                                        "items", Map.of("type", "string"),
+                                        "description", "Required test families, e.g. MAVEN/NPM/PYTEST")),
+                                "description", "Optional structured completion claim; the harness still verifies real evidence")),
                         "required", List.of("objective", "items"))));
     }
 
@@ -72,8 +81,11 @@ public class WorkingPlanToolProvider implements ServerToolProvider {
         try {
             Map<String, Object> args = request.arguments();
             List<WorkingPlanService.WorkingPlanItem> items = items(args.get("items"));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completion = args.get("completion") instanceof Map<?, ?> completionMap
+                    ? (Map<String, Object>) completionMap : null;
             WorkingPlanRecord plan = service.update(request.runId(),
-                    string(args.get("objective")), items, string(args.get("reason")));
+                    string(args.get("objective")), items, string(args.get("reason")), completion);
             Map<String, Object> view = new LinkedHashMap<>();
             view.put("run_id", plan.runId());
             view.put("revision", plan.revision());

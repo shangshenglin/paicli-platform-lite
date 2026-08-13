@@ -25,7 +25,7 @@ public class ToolRouter {
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
             "list_dir", "read_file", "read_artifact", "load_skill", "read_skill_resource",
             "search_knowledge", "web_search", "web_fetch", "github_repo_fetch", "session_search",
-            "get_agent_result", "list_agents", "list_agent_profiles", "tool_search");
+            "list_agents", "list_agent_profiles", "tool_search");
 
     @Autowired
     public ToolRouter(SandboxDriver sandboxDriver, ArtifactStore artifactStore,
@@ -132,6 +132,9 @@ public class ToolRouter {
     }
 
     public ToolEffect effect(String toolName) {
+        // Reading a child result may park the parent Run and later wake it. It
+        // is not safe to mix it into the parallel read-only prefix.
+        if ("get_agent_result".equals(toolName)) return ToolEffect.NON_IDEMPOTENT_WRITE;
         if (READ_ONLY_TOOLS.contains(toolName)) return ToolEffect.READ_ONLY;
         if ("write_file".equals(toolName)) return ToolEffect.IDEMPOTENT_WRITE;
         for (ServerToolProvider provider : providers) {

@@ -64,4 +64,19 @@ class SandboxSecurityTest {
         assertThat(environment.get("PATH")).startsWith("/home/sandbox/.local/bin:/workspace/node_modules/.bin:");
         assertThat(environment).doesNotContainKey("SANDBOX_AGENT_TOKEN");
     }
+
+    @Test
+    void writeFileEvidenceUsesThePreWriteHash() throws Exception {
+        SandboxAgentProperties properties = new SandboxAgentProperties(workspace, "sandbox-secret", 10);
+        SandboxToolService service = new SandboxToolService(properties);
+        service.initialize();
+
+        ToolRequest first = new ToolRequest("tool-write-1", "run-1", "write_file",
+                Map.of("path", "src/A.txt", "content", "before"), "key-write-1");
+        ToolRequest second = new ToolRequest("tool-write-2", "run-1", "write_file",
+                Map.of("path", "src/A.txt", "content", "after"), "key-write-2");
+
+        assertThat(service.execute(first).metadata()).containsEntry("changed", true);
+        assertThat(service.execute(second).metadata()).containsEntry("changed", true);
+    }
 }

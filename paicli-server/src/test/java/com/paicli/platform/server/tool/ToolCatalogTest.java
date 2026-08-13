@@ -16,7 +16,7 @@ class ToolCatalogTest {
     @Test
     void exposesWebToolsByDefaultWhenWebEnabled() {
         WebProperties webProperties = new WebProperties(
-                true, "http://127.0.0.1:8888/search", "", "Authorization", 20, 100_000);
+                true, "http://127.0.0.1:8888/search", "", "", "Authorization", 20, 100_000);
         WebToolProvider web = new WebToolProvider(
                 new WebAccessService(webProperties, new ObjectMapper()), new ObjectMapper());
         ToolCatalog catalog = new ToolCatalog(List.of(web));
@@ -29,7 +29,7 @@ class ToolCatalogTest {
 
     @Test
     void hidesWebToolsWhenWebDisabled() {
-        WebProperties webProperties = new WebProperties(false, "", "", "Authorization", 20, 100_000);
+        WebProperties webProperties = new WebProperties(false, "", "", "", "Authorization", 20, 100_000);
         WebToolProvider web = new WebToolProvider(
                 new WebAccessService(webProperties, new ObjectMapper()), new ObjectMapper());
         ToolCatalog catalog = new ToolCatalog(List.of(web));

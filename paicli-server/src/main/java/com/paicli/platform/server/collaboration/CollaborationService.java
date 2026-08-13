@@ -2,6 +2,7 @@ package com.paicli.platform.server.collaboration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.agent.DelegationEnvelopeBuilder;
+import com.paicli.platform.server.agent.RunEvidenceCollector;
 import com.paicli.platform.common.SandboxDriver;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.domain.RunRecord;
@@ -38,6 +39,7 @@ public class CollaborationService {
     private final DeliveryManifestService deliveryManifestService;
     private final ExpertThreadService expertThreadService;
     private final DelegationEnvelopeBuilder delegationEnvelopeBuilder;
+    private final RunEvidenceCollector evidenceCollector;
 
     public CollaborationService(CollaborationStore collaboration, SqliteRuntimeStore runtime,
                                 ProductivityStore productivity, CollaborationRoutingService routing,
@@ -56,6 +58,7 @@ public class CollaborationService {
         this.deliveryManifestService = deliveryManifestService;
         this.expertThreadService = expertThreadService;
         this.delegationEnvelopeBuilder = delegationEnvelopeBuilder;
+        this.evidenceCollector = new RunEvidenceCollector(runtime, mapper);
     }
 
     public CollaborationStore.CollaborationTask saveTask(String id, TaskCommand command) {
@@ -137,6 +140,17 @@ public class CollaborationService {
         return routing.preview(projectKey, input, targetType, targetId);
     }
 
+    /**
+     * A user can continue a collaboration Session from the ordinary chat surface. Keep that new
+     * Run in the task tree instead of treating it as an unrelated conversation.
+     */
+    public void attachSessionContinuation(RunRecord run) {
+        collaboration.taskForSession(run.sessionId()).ifPresent(task -> {
+            collaboration.linkRun(task.id(), run.id(), null, "SESSION_CONTINUATION");
+            reactivateReviewTasks(task, run.id(), "session continuation");
+        });
+    }
+
     public TriggerExecution trigger(String taskId, String triggerType, String sourceId,
                                     String targetType, String targetId, String instruction,
                                     String idempotencyKey) {
@@ -198,6 +212,18 @@ public class CollaborationService {
             throw error instanceof RuntimeException runtimeError ? runtimeError
                     : new IllegalStateException("failed to trigger collaboration run", error);
         }
+    }
+
+    private void reactivateReviewTasks(CollaborationStore.CollaborationTask task, String runId, String reason) {
+        reactivateReviewTask(task, runId, reason);
+        CollaborationStore.CollaborationTask root = rootTask(task);
+        if (!root.id().equals(task.id())) reactivateReviewTask(root, runId, reason);
+    }
+
+    private void reactivateReviewTask(CollaborationStore.CollaborationTask task, String runId, String reason) {
+        if (!"IN_REVIEW".equals(task.status())) return;
+        collaboration.updateStatus(task.id(), "IN_PROGRESS", "SYSTEM", null,
+                write(Map.of("runId", runId, "reason", reason)));
     }
 
     public CommentResult comment(String taskId, String parentCommentId, String authorType,
@@ -581,13 +607,9 @@ public class CollaborationService {
     }
 
     private boolean hasStageDeliveryEvidence(CollaborationStore.CollaborationTask task, RunRecord run) {
-        // Only real delivery artifacts count; "tool_result" artifacts are read-externalizations
-        // (large read_file/execute_command outputs) and are NOT evidence of a stage delivery.
-        if (runtime.artifactsForRun(run.id()).stream()
-                .anyMatch(artifact -> !"tool_result".equals(artifact.type()))) return true;
+        var evidence = evidenceCollector.collect(run.id());
+        if (!evidence.businessArtifacts().isEmpty() || evidence.hasWorkspaceMutationEvidence()) return true;
         Instant threshold = run.createdAt().minusSeconds(1);
-        if (runtime.hasCompletedMutatingToolCall(run.id()) && runtime.workspaceFiles(run.id(), 200).stream()
-                .anyMatch(file -> !file.modifiedAt().isBefore(threshold))) return true;
         return collaboration.comments(task.id()).stream().anyMatch(comment ->
                 !blank(comment.content()) && !comment.createdAt().isBefore(threshold));
     }
@@ -595,18 +617,7 @@ public class CollaborationService {
     private void recordStageDeliveryManifest(CollaborationStore.CollaborationTask task, RunRecord run) {
         if (deliveryManifestService == null) return;
         try {
-            Instant threshold = run.createdAt().minusSeconds(1);
-            List<String> changedFiles = runtime.workspaceFiles(run.id(), 200).stream()
-                    .filter(file -> file.modifiedAt() != null && !file.modifiedAt().isBefore(threshold))
-                    .map(file -> file.path()).toList();
-            List<String> artifacts = runtime.artifactsForRun(run.id()).stream()
-                    .map(artifact -> artifact.id()).toList();
-            List<String> testEvidence = runtime.toolCallsForRun(run.id()).stream()
-                    .filter(call -> "execute_command".equals(call.toolName())
-                            && call.arguments() != null && call.arguments().toLowerCase().contains("test"))
-                    .map(call -> call.status().name() + ":" + (call.error() == null ? "" : call.error())).toList();
-            deliveryManifestService.recordStageDelivery(task.id(), task.stage(), run.id(),
-                    changedFiles, artifacts, testEvidence, Map.of());
+            deliveryManifestService.recordStageDelivery(task.id(), task.stage(), run.id());
         } catch (Exception error) {
             log.warn("Unable to record stage delivery manifest task={} run={}", task.id(), run.id(), error);
         }

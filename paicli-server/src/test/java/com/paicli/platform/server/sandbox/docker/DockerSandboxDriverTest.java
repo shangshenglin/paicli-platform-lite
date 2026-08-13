@@ -37,8 +37,9 @@ class DockerSandboxDriverTest {
         assertThat(second.success()).isTrue();
         assertThat(canceled).isTrue();
         assertThat(agent.calls).isEqualTo(2);
-        assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(1);
-        List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")).findFirst().orElseThrow();
+        assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(2);
+        List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")
+                && !command.contains("--rm")).findFirst().orElseThrow();
         assertThat(run).contains("--read-only", "--cap-drop", "ALL", "--pids-limit", "128",
                 "--network", "none", "--security-opt", "no-new-privileges", "--init",
                 "--user", "10001:10001", "--shm-size", "64m",
@@ -49,6 +50,20 @@ class DockerSandboxDriverTest {
         assertThat(docker.commands).noneMatch(command -> command.get(0).equals("network"));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "container-123")));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "orphan-1")));
+        assertThat(docker.commands).anyMatch(command -> command.containsAll(List.of(
+                "--entrypoint", "/bin/sh", "sandbox:test", "command -v bash && command -v git && command -v mvn"
+                        + " && command -v node && command -v npm && command -v python3 && command -v pwsh")));
+    }
+
+    @Test
+    void rejectsAnImageWithoutTheRequiredToolchain() {
+        FakeDocker docker = new FakeDocker(true);
+        DockerSandboxDriver driver = new DockerSandboxDriver(docker, new FakeAgentClient(), dockerProperties(), platformProperties());
+
+        assertThatThrownBy(driver::initialize)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("missing a required development runtime");
+        assertThat(docker.commands).noneMatch(command -> command.get(0).equals("network"));
     }
 
     @Test
@@ -93,13 +108,23 @@ class DockerSandboxDriverTest {
     private static final class FakeDocker implements DockerCommandExecutor {
         private final List<List<String>> commands = new ArrayList<>();
         private final String networkInspectOutput;
+        private final boolean failToolchainProbe;
 
         private FakeDocker() {
-            this(null);
+            this(null, false);
         }
 
         private FakeDocker(String networkInspectOutput) {
+            this(networkInspectOutput, false);
+        }
+
+        private FakeDocker(boolean failToolchainProbe) {
+            this(null, failToolchainProbe);
+        }
+
+        private FakeDocker(String networkInspectOutput, boolean failToolchainProbe) {
             this.networkInspectOutput = networkInspectOutput;
+            this.failToolchainProbe = failToolchainProbe;
         }
 
         @Override
@@ -112,6 +137,9 @@ class DockerSandboxDriverTest {
                         : new CommandResult(0, networkInspectOutput);
             }
             if (arguments.get(0).equals("ps")) return new CommandResult(0, "orphan-1");
+            if (arguments.get(0).equals("run") && arguments.contains("--rm")) {
+                return new CommandResult(failToolchainProbe ? 1 : 0, failToolchainProbe ? "node: not found" : "");
+            }
             if (arguments.get(0).equals("run")) return new CommandResult(0, "container-123");
             if (arguments.get(0).equals("rm")) return new CommandResult(0, "container-123");
             return new CommandResult(0, "");
