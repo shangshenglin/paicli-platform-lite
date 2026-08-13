@@ -358,6 +358,33 @@ class ContextManagerTest {
                 .map(message -> message.content()).toList();
         assertThat(en).anyMatch(value -> value.contains("<language>") && value.contains("English"));
     }
+
+    @Test
+    void placesLanguageDirectiveBeforeCurrentRunMessages() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper);
+        var session = store.createSession("language-reminder", "alpha");
+        var run = store.createRun(session.id(), "请联网查询并用中文说明结果");
+        store.appendAssistantMessage(session.id(), run.id(), "I will search in English.", "");
+        store.appendToolResult(session.id(), run.id(), "call_web", "English search result");
+
+        var messages = manager.prepare(session.id(), run.id()).request().messages();
+
+        int currentUserMessage = java.util.stream.IntStream.range(0, messages.size())
+                .filter(index -> messages.get(index).content().contains("请联网查询并用中文说明结果"))
+                .findFirst().orElseThrow();
+        var reminder = messages.get(currentUserMessage - 1);
+        assertThat(reminder.role()).isEqualTo("system");
+        assertThat(reminder.content()).contains("<language>", "全程用中文输出", "最终输出语言约束");
+        assertThat(messages.get(currentUserMessage).role()).isEqualTo("user");
+        assertThat(messages.get(currentUserMessage + 1).role()).isEqualTo("assistant");
+    }
     @Test
     void languageDirectiveUsesUserIntentNotCollaborationWrapperScaffolding() throws Exception {
         PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");

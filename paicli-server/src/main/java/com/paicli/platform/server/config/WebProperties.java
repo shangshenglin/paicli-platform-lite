@@ -8,6 +8,7 @@ import java.net.URI;
 public record WebProperties(
         boolean enabled,
         String searchUrl,
+        String searchEngines,
         String apiKey,
         String apiKeyHeader,
         int timeoutSeconds,
@@ -15,6 +16,7 @@ public record WebProperties(
 ) {
     public WebProperties {
         searchUrl = searchUrl == null ? "" : searchUrl.trim();
+        searchEngines = searchEngines == null ? "" : searchEngines.trim();
         apiKey = apiKey == null ? "" : apiKey.trim();
         apiKeyHeader = apiKeyHeader == null || apiKeyHeader.isBlank() ? "Authorization" : apiKeyHeader.trim();
         timeoutSeconds = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);

@@ -140,6 +140,17 @@ public class CollaborationService {
         return routing.preview(projectKey, input, targetType, targetId);
     }
 
+    /**
+     * A user can continue a collaboration Session from the ordinary chat surface. Keep that new
+     * Run in the task tree instead of treating it as an unrelated conversation.
+     */
+    public void attachSessionContinuation(RunRecord run) {
+        collaboration.taskForSession(run.sessionId()).ifPresent(task -> {
+            collaboration.linkRun(task.id(), run.id(), null, "SESSION_CONTINUATION");
+            reactivateReviewTasks(task, run.id(), "session continuation");
+        });
+    }
+
     public TriggerExecution trigger(String taskId, String triggerType, String sourceId,
                                     String targetType, String targetId, String instruction,
                                     String idempotencyKey) {
@@ -201,6 +212,18 @@ public class CollaborationService {
             throw error instanceof RuntimeException runtimeError ? runtimeError
                     : new IllegalStateException("failed to trigger collaboration run", error);
         }
+    }
+
+    private void reactivateReviewTasks(CollaborationStore.CollaborationTask task, String runId, String reason) {
+        reactivateReviewTask(task, runId, reason);
+        CollaborationStore.CollaborationTask root = rootTask(task);
+        if (!root.id().equals(task.id())) reactivateReviewTask(root, runId, reason);
+    }
+
+    private void reactivateReviewTask(CollaborationStore.CollaborationTask task, String runId, String reason) {
+        if (!"IN_REVIEW".equals(task.status())) return;
+        collaboration.updateStatus(task.id(), "IN_PROGRESS", "SYSTEM", null,
+                write(Map.of("runId", runId, "reason", reason)));
     }
 
     public CommentResult comment(String taskId, String parentCommentId, String authorType,

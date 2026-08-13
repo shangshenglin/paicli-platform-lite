@@ -15,6 +15,7 @@ import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
 import com.paicli.platform.server.plan.PlanService;
+import com.paicli.platform.server.collaboration.CollaborationService;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
 import io.swagger.v3.oas.annotations.Operation;
@@ -56,11 +57,12 @@ public class RunController {
     private final PlanService plans;
     private final PlanStore planStore;
     private final Path workspaceRoot;
+    private final CollaborationService collaborationService;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
                          CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans,
-                         PlanStore planStore, PlatformProperties properties) {
+                         PlanStore planStore, PlatformProperties properties, CollaborationService collaborationService) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -71,13 +73,16 @@ public class RunController {
         this.plans = plans;
         this.planStore = planStore;
         this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
+        this.collaborationService = collaborationService;
     }
 
     @PostMapping("/sessions/{sessionId}/runs")
     @ResponseStatus(HttpStatus.ACCEPTED)
     @Operation(summary = "Create a durable Agent Run",
             description = "Queues a Run after persisting its input and execution settings. executionShell accepts "
-                    + "sh, bash, or powershell; an Agent Profile executionShell takes precedence.")
+                    + "sh, bash, or powershell; an Agent Profile executionShell takes precedence. When the Session "
+                    + "already belongs to a collaboration task, the new Run is linked to that task and reactivates "
+                    + "a task awaiting human review.")
     public RunRecord createRun(@PathVariable String sessionId,
                                @Valid @RequestBody ApiDtos.CreateRunRequest request) {
         var session = store.findSession(sessionId).orElseThrow(() ->
@@ -137,6 +142,7 @@ public class RunController {
             saveCollaborationPolicy(run.id(), session.projectKey(), options);
             plans.createAutomaticCollaborationPlan(sessionId, run.id(), session.projectKey(), request.input());
         }
+        collaborationService.attachSessionContinuation(run);
         return run;
     }
 
@@ -258,6 +264,9 @@ public class RunController {
 
     @PostMapping("/runs/{runId}/retry")
     @ResponseStatus(HttpStatus.ACCEPTED)
+    @Operation(summary = "Retry a terminal Run",
+            description = "Reuses the original Session unless branch=true. A retry in an existing collaboration "
+                    + "Session is linked back to its task and reactivates a task awaiting human review.")
     public Map<String, Object> retry(@PathVariable String runId,
                                      @RequestBody(required = false) ApiDtos.RetryRunRequest request) {
         RunRecord source = requireRun(runId);
@@ -287,6 +296,7 @@ public class RunController {
                 agent != null && !blank(agent.executionShell()) ? agent.executionShell()
                         : request == null || blank(request.executionShell())
                         ? source.executionShell() : request.executionShell());
+        collaborationService.attachSessionContinuation(retried);
         return Map.of("run", retried, "sessionId", sessionId, "branchCreated", branch);
     }
 

@@ -81,6 +81,21 @@ class CollaborationServiceTest {
     }
 
     @Test
+    void sessionContinuationLinksRunAndReactivatesReviewTaskTree() {
+        var root = task("IN_REVIEW", "TEAM", "team-a");
+        var stage = stageTask("task-stage", root.id(), 1, "agent-a", "IN_REVIEW");
+        var continuation = run("run-continuation", "session-a", RunStatus.QUEUED, "agent-a");
+        when(collaboration.taskForSession(continuation.sessionId())).thenReturn(Optional.of(stage));
+        when(collaboration.task(root.id())).thenReturn(Optional.of(root));
+
+        service.attachSessionContinuation(continuation);
+
+        verify(collaboration).linkRun(stage.id(), continuation.id(), null, "SESSION_CONTINUATION");
+        verify(collaboration).updateStatus(eq(stage.id()), eq("IN_PROGRESS"), eq("SYSTEM"), eq(null), any());
+        verify(collaboration).updateStatus(eq(root.id()), eq("IN_PROGRESS"), eq("SYSTEM"), eq(null), any());
+    }
+
+    @Test
     void assignedAgentCannotSubmitTaskForHumanReviewBeforeRunTreeTerminates() {
         var task = task("IN_PROGRESS", "AGENT", "agent-a");
         when(collaboration.task(task.id())).thenReturn(Optional.of(task));

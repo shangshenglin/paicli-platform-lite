@@ -1,5 +1,42 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-14
+
+### Docker Sandbox apt 下载可靠性
+
+- 变更：Sandbox 镜像构建改用 HTTPS Debian 源，并为 `apt-get update` 配置 20 秒请求超时与 3 次有限重试；避免 HTTP 主仓库响应截断时以 exit code 100 中断镜像构建。
+- 思路：工具链包名和基底镜像均可用，故只加固外部依赖下载边界，不改变镜像内工具集、运行时权限或 Sandbox 执行语义。
+- 验证：在 `mcr.microsoft.com/dotnet/sdk:8.0` 临时容器中验证 HTTPS `apt-get update` 成功；随后完成真实 Docker 镜像构建，并在禁网容器中验证 Java、Maven、Node/npm、Python/venv、Git、PowerShell、curl 和 unzip。API、数据库 Schema、产品站点与阶段范围未变，OpenAPI、架构和阶段文档不适用。
+
+## 2026-08-14
+
+### Harness budget and collaboration completion hardening
+- Change: budget exhaustion now fails the Run rather than committing a partial-result assistant message as `COMPLETED`; the failure event retains the complete step, token, tool-call, and elapsed-time snapshot. Collaboration completion contracts now derive from the structured current task envelope rather than its historical digest, preventing historical analysis notes from downgrading a repair task to `TEXT_ONLY`. Docker Sandbox startup now probes the configured image for Bash, Git, Maven, Node/npm, Python 3, and PowerShell Core in a network-disabled disposable container and fails early with a rebuild instruction when a stale image is missing a required runtime.
+- Rationale: a 50-step collaboration Run exhausted its budget while debugging temporary scripts, yet a `TEXT_ONLY` misclassification allowed the Harness to report it as completed. The same Run used an old Sandbox image without Node, which pushed the model away from the existing test suite. This change makes all three conditions explicit and terminal instead of allowing a false success signal.
+- Verification: targeted RunProcessor, CompletionContractService, DockerSandboxDriver, and SqliteRuntimeStore tests cover the regression, including idempotent historical correction of the linked collaboration activity. README, architecture, and Docker Sandbox documentation are updated; phases, REST/OpenAPI, and product-site documentation are not applicable because no user-facing API or delivery scope changed.
+
+## 2026-08-14
+
+### Docker Sandbox 内置工具链补齐
+
+- 变更：Sandbox 镜像在构建阶段安装 Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、curl 和 unzip，并保留 Java 17 与 PowerShell Core；运行时为 `/home/sandbox` 增加可写 tmpfs，同时设置 HOME、XDG 和 .NET CLI 缓存目录，避免只读根文件系统导致 PowerShell 或构建工具启动失败。
+- 思路：把稳定的工具链放进版本化镜像，把缓存放进 Run 生命周期内的临时目录；继续保留只读根文件系统、内部网络、非 root 用户和能力收缩约束。
+- 验证：Sandbox Agent 模块 Maven 测试通过（common 3 项、sandbox-agent 4 项），`git diff --check` 通过；本机 Docker 构建因容器访问 Debian 软件源在超时内未完成，尚未用新镜像做端到端版本探针，需网络恢复后执行构建与容器验证。
+
+## 2026-08-11
+
+### 协作会话续作状态回填
+
+- 变更：普通会话入口新建 Run 与终态 Run 重试时，若 Session 已关联协作任务，自动写入 `collaboration_task_runs` 并标记为 `SESSION_CONTINUATION`；待验收的当前阶段及根任务同步恢复为 `IN_PROGRESS`。新增 schema migration 40，在服务启动时补偿历史同会话但未关联的 Run，再以完整任务树的活跃 Run 恢复根任务状态；协作任务详情因此可返回并前端可显示所有运行中的续作 Run。OpenAPI、README 与架构文档同步说明该 API 语义。
+- 思路：本机任务 `task_30f3f61bee4f46aa` 仍为 `IN_REVIEW`，而 `run_25e90df011ce4030` 处于 `QUEUED` 且使用同一协作 Session，却未出现在 `collaboration_task_runs`。既有修复只处理 Trigger 创建的 Run 和启动时已经关联的活跃树，普通聊天入口的续作没有调用关联逻辑，因此状态修复并未被撤销，而是遗漏了一条创建路径。
+- 验证：`CollaborationServiceTest`、`CollaborationStoreTest` 与 `WebSecurityIntegrationTest` 定向回归通过（共 61 项）；覆盖会话续作关联、当前/根任务从待验收恢复进行中、启动补偿历史漏关联记录和 `POST /v1/sessions/{sessionId}/runs` 的实际接口行为。全量 `clean test` 的 Surefire 报告共 304 项、零失败零错误；外层命令在 Maven 收尾时达到桌面 124 秒时限，随后 `package -DskipTests` 构建成功。新 JAR 已实际启动，`GET /v1/system/info` 返回 200；本机 `run_25e90df011ce4030` 已回填为 `SESSION_CONTINUATION`，其本身在本次启动前已经 `COMPLETED`，故根任务维持 `IN_REVIEW` 符合状态机。未修改 Sandbox、阶段范围或产品站，相关文档不适用。
+
+### 联网端点诊断与中文输出约束加固
+
+- 变更：将 `PAICLI_WEB_ENABLED` 的默认值改为 `false`，与可选联网的产品边界保持一致；搜索端点连接失败或超时时，`web_search` 返回包含端点和 `PAICLI_WEB_SEARCH_URL` 的明确诊断，不再只暴露 `ConnectException`。新增可选 `PAICLI_WEB_SEARCH_ENGINES`，将指定引擎透传给 SearXNG，以避开默认聚合中被限流、验证码或超时的引擎。`ContextManager` 在动态上下文末端、当前 Run 的 assistant/tool 消息之前重复最终语言约束，避免英文工具输出或历史回答造成中文任务的中英文夹杂，同时不改变模型最后一条实际会话消息。移除 `WebProperties` 的重载构造函数，保留唯一的 record 规范构造函数，使 Spring Boot 能继续进行 `@ConfigurationProperties` 构造绑定；同时修正 `mvnw.cmd` 对普通 `.m2` 目录空符号链接目标的错误索引。
+- 思路：最新 `run_44dbf4e0fd52434c` 的三次 `web_search` 和一次 `web_fetch` 都记录为 `ConnectException`，而本机 `127.0.0.1:8888` 未监听；根因是配置的本地 SearXNG 容器已停止，并非 Web 工具未注册。恢复容器后默认搜索仍为空，日志显示多个默认引擎被验证码、限流或超时影响，而单独使用 Bing 可返回结果，因此提供受配置控制的引擎选择。该 Run 的中文任务曾直接生成英文段落，说明稳定前缀中的语言指令距离当前工具上下文过远，因此在每轮请求尾部追加同一硬约束。新增重载构造函数后，Spring 无法再唯一识别 record 的构造绑定入口并尝试无参实例化，故打包服务启动失败；改为让调用方传完整参数以恢复绑定。随后发现 Wrapper 在普通 `.m2` 路径上访问 `$null.Target[0]`，使打包命令在 Maven 启动前失败，故改为先判空后再读取链接目标。
+- 验证：`mvnw.cmd test -pl paicli-server -am -Dtest=PaiCliServerApplicationTest,ContextManagerTest,ToolCatalogTest,WebAccessServiceTest -Dsurefire.failIfNoSpecifiedTests=false` 通过（20 项），其中 `PaiCliServerApplicationTest` 已实际创建完整 Spring ApplicationContext，覆盖 record 配置绑定与所有 Server Tool Provider 装配。调整语言约束位置后，`mvnw.cmd clean test` 全量通过（`paicli-common` 3 项、`paicli-server` 294 项、`paicli-sandbox-agent` 4 项）；`mvnw.cmd clean package` 全量通过。使用打包后的 Server JAR 以 local Sandbox 启动，日志确认 ApplicationContext 与 Tomcat 8080 完成初始化，`GET /v1/system/info` 返回 200。`start-local.ps1` 的重复 Maven 构建在当前桌面子进程的受限网络环境中无法下载父 POM，不影响已获授权的完整打包，也不影响 JAR 实际启动。本地 SearXNG 恢复后 HTTP 探测返回 200，指定 Bing 曾返回 10 条结果，但后续同一引擎探测为空，确认其上游可用性仍有波动。未修改 REST/OpenAPI、Sandbox、阶段范围或产品站，相关文档不适用。
+
 ## 2026-08-10
 
 ### 撤回 PRD Analysis Agent

@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DockerSandboxDriverTest {
     @TempDir
@@ -36,14 +37,29 @@ class DockerSandboxDriverTest {
         assertThat(second.success()).isTrue();
         assertThat(canceled).isTrue();
         assertThat(agent.calls).isEqualTo(2);
-        assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(1);
-        List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")).findFirst().orElseThrow();
+        assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(2);
+        List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")
+                && !command.contains("--rm")).findFirst().orElseThrow();
         assertThat(run).contains("--read-only", "--cap-drop", "ALL", "--pids-limit", "128",
                 "--network", "paicli-test-network", "--security-opt", "no-new-privileges",
                 "SANDBOX_COMMAND_TIMEOUT_SECONDS=10");
         assertThat(run).doesNotContain("-p");
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "container-123")));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "orphan-1")));
+        assertThat(docker.commands).anyMatch(command -> command.containsAll(List.of(
+                "--entrypoint", "/bin/sh", "sandbox:test", "command -v bash && command -v git && command -v mvn"
+                        + " && command -v node && command -v npm && command -v python3 && command -v pwsh")));
+    }
+
+    @Test
+    void rejectsAnImageWithoutTheRequiredToolchain() {
+        FakeDocker docker = new FakeDocker(true);
+        DockerSandboxDriver driver = new DockerSandboxDriver(docker, new FakeAgentClient(), dockerProperties(), platformProperties());
+
+        assertThatThrownBy(driver::initialize)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("missing a required development runtime");
+        assertThat(docker.commands).noneMatch(command -> command.get(0).equals("network"));
     }
 
     private PlatformProperties platformProperties() {
@@ -57,6 +73,15 @@ class DockerSandboxDriverTest {
 
     private static final class FakeDocker implements DockerCommandExecutor {
         private final List<List<String>> commands = new ArrayList<>();
+        private final boolean failToolchainProbe;
+
+        private FakeDocker() {
+            this(false);
+        }
+
+        private FakeDocker(boolean failToolchainProbe) {
+            this.failToolchainProbe = failToolchainProbe;
+        }
 
         @Override
         public CommandResult execute(List<String> arguments, Duration timeout) {
@@ -66,6 +91,9 @@ class DockerSandboxDriverTest {
                 return new CommandResult(0, "[]");
             }
             if (arguments.get(0).equals("ps")) return new CommandResult(0, "orphan-1");
+            if (arguments.get(0).equals("run") && arguments.contains("--rm")) {
+                return new CommandResult(failToolchainProbe ? 1 : 0, failToolchainProbe ? "node: not found" : "");
+            }
             if (arguments.get(0).equals("run")) return new CommandResult(0, "container-123");
             if (arguments.get(0).equals("rm")) return new CommandResult(0, "container-123");
             return new CommandResult(0, "");

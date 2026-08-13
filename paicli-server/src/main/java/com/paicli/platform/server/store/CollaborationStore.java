@@ -476,6 +476,20 @@ public class CollaborationStore {
         } catch (SQLException e) { throw failure("find task for run", e); }
     }
 
+    /** Finds the collaboration task that owns an existing Session before its next Run is linked. */
+    public Optional<CollaborationTask> taskForSession(String sessionId) {
+        if (blank(sessionId)) return Optional.empty();
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
+                "SELECT task.* FROM collaboration_tasks task JOIN collaboration_task_runs link ON link.task_id=task.id "
+                        + "JOIN runs ON runs.id=link.run_id WHERE runs.session_id=? "
+                        + "ORDER BY runs.created_at DESC,link.created_at DESC,task.id LIMIT 1")) {
+            ps.setString(1, sessionId.trim());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(task(rs)) : Optional.empty();
+            }
+        } catch (SQLException e) { throw failure("find task for session", e); }
+    }
+
     public Optional<ExpertThread> expertThread(String id) {
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
                 "SELECT * FROM collaboration_expert_threads WHERE id=?")) {

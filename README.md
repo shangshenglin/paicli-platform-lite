@@ -1,5 +1,11 @@
 # PaiCLI Platform Lite
 
+## Run completion and Docker toolchain safeguards
+
+A Run that exhausts its step, token, tool-call, or elapsed-time budget is recorded as `FAILED`; its budget snapshot remains available for diagnosis, but partial output is never reported as `COMPLETED`. For collaboration Runs, the completion contract is derived from the structured current task envelope instead of historical digest text, so old analysis context cannot weaken a repair or test requirement.
+
+Before Docker Sandbox accepts Runs, the Server starts a disposable network-disabled container and verifies Bash, Git, Maven, Node/npm, Python 3, and PowerShell Core. If any runtime is missing, startup fails with a rebuild instruction: `scripts/build-sandbox.ps1`.
+
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
 当前已完成阶段 1–24，并补齐 Memory/RAG/Plan/Agent Harness、持久化 CollaborationTask、结构化团队路由、事件驱动 Leader 唤醒、受控并行、多 Shell 执行和 Context/Memory 认知控制层；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
@@ -29,7 +35,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 模型与上下文 | OpenAI-compatible 流式模型、DeepSeek reasoning、多 ToolCall、结构化工作记忆、Context Manifest、统一 Token 预算、按需工具 Schema、Artifact、项目规则 |
 | Plan / Graph Runtime | 持久化 Plan/Step/类型化 Edge、确定性条件分支、有限失败回流、PlanState 快照、Human Node 决策、DAG 校验、Step 调度复用普通 ReAct Run、Validation Gate 与受控并行 |
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
-| 协作工作层 | 增强 AgentTeam、结构化 Route Decision、持久化 CollaborationTask、评论/提及/时间线、Task-Run 关联、阶段屏障与 Leader 唤醒 |
+| 协作工作层 | 增强 AgentTeam、结构化 Route Decision、持久化 CollaborationTask、评论/提及/时间线、Task-Run 与会话续作关联、阶段屏障与 Leader 唤醒 |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
 | 质量闭环 | 官方入门评测集、Context/Memory Harness 专项集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
 | 运维交付 | API Key、OpenAPI、Actuator 指标、WAL 维护、保留策略、备份恢复、CI、Dependabot、SBOM |
@@ -88,6 +94,8 @@ paicli-server（Agent Runtime / 脑）
 
 启动脚本会在加载 `.env` 前按 Windows 规则合并仅大小写不同的进程环境变量，例如 `NO_PROXY/no_proxy`、`HTTP_PROXY/http_proxy` 和 `PATH/Path`。这可避免代理工具、IDE 或 Agent Runtime 重复注入变量后，PowerShell `Start-Process` 抛出 `Item has already been added`。
 
+`mvnw.cmd` 同时支持普通目录与符号链接形式的 Maven 用户目录；普通 `C:\Users\<user>\.m2` 没有链接目标时会使用其自身的 `wrapper/dists`，不会因空链接目标中断打包或启动。
+
 默认使用无需模型 Key 的 `DemoModelClient`，访问：
 
 - Console：`http://127.0.0.1:8080/`
@@ -127,6 +135,8 @@ java -jar .\paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar `
 ```
 
 `build-sandbox.ps1` 只构建 `paicli-common` 与 `paicli-sandbox-agent`，默认跳过测试；需要同时运行这两个模块的测试时传入 `-RunTests`。
+
+Sandbox 镜像内置 Java 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip。镜像构建时通过 HTTPS Debian 源下载工具链，并对临时下载故障有限重试；容器运行时使用只读根文件系统，并将 `/tmp` 与 `/home/sandbox` 挂载为可写临时目录，保证 Maven、pip、PowerShell 等工具可以使用缓存而不修改镜像层。
 
 详细边界见 [docs/docker-sandbox.md](docs/docker-sandbox.md)。
 
@@ -258,7 +268,7 @@ X-API-Key: your-key
 ### 轻量 WorkingPlan 与语言一致性
 
 - **WorkingPlan**：普通 Run 内可维护一个轻量工作清单（目标 + TODO/IN_PROGRESS/COMPLETED/BLOCKED 条目）。主 Agent 通过 `update_working_plan` 创建/修订；`run_working_plans` 每 Run 单行、revision 自增，`ContextManager` 每轮只注入最新修订，随 Run 结束自然归档。它不是 Formal Plan：不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。简单问答不产生计划，避免额外 Token 与状态负担；复杂多步任务由模型按需建立。该工具属于 Run 内部 Harness 能力，即使 Agent Profile 配置业务 Tool allowlist，也始终保留在模型 Tool Definitions 中；allowlist 仍不会因此放开其他未授权基础工具。
-- **语言一致性**：系统提示不再固定用中文作答，而是要求与用户最近一条消息语言一致，并显式要求“用户中文时全程中文（代码/命令/标识符/专有名词除外）”；`ContextManager` 按当前 Run 用户消息的中/英占比注入显式 `<language>` 指令（中文问中文答、英文问英文答，短中文指令也覆盖），协作任务复唤醒的 Leader Run 同样遵守。前端展示固定为中文。
+- **语言一致性**：系统提示不再固定用中文作答，而是要求与用户最近一条消息语言一致，并显式要求“用户中文时全程中文（代码/命令/标识符/专有名词除外）”；`ContextManager` 按当前 Run 用户消息的中/英占比注入显式 `<language>` 指令（中文问中文答、英文问英文答，短中文指令也覆盖），并在动态上下文末端、当前 Run 的模型/工具消息之前重复该硬约束，避免英文工具结果或历史回答带偏本轮输出，同时保持模型最后一条实际会话消息不变；协作任务复唤醒的 Leader Run 同样遵守。前端展示固定为中文。
 
 ### 完成验证、失败反思与只读工具批次（Harness Loop v2 PR2–PR4）
 
@@ -397,6 +407,7 @@ data/workspaces/{runId}/PAI.md
 
 - `session_search` 仅在 Agent 主动调用时，对当前项目的用户可见历史消息执行 BM25 检索，排除内部子会话与当前 Run。
 - 联网默认关闭。启用 `PAICLI_WEB_ENABLED` 和 SearXNG-compatible 搜索端点后提供 `web_search`、`web_fetch`、`github_repo_fetch`，并在普通会话中**默认直接可见**（无需先 `tool_search`），仍受 Server 侧 SSRF 防护（`web_fetch` 只允许公网 HTTP(S)，私有/内网目标被阻断）。
+- 当已启用的搜索端点无法连接或超时时，`web_search` 返回包含脱敏端点与 `PAICLI_WEB_SEARCH_URL` 的可操作错误；先启动本地 SearXNG 或改为可访问的 SearXNG-compatible 端点，再重新发起 Run。可选的 `PAICLI_WEB_SEARCH_ENGINES` 会透传 SearXNG `engines` 参数，用于在默认引擎被限流、验证码或超时影响时选择已验证可用的引擎，例如 `bing`。
 - 网页抓取限制响应大小，并在每次重定向时重新拒绝 loopback、链路本地和私网地址；GitHub 仓库首页会优先走 GitHub API，`github.com/.../blob/...` 会优先转换为 `raw.githubusercontent.com`，避免抓取 GitHub HTML 页面。
 
 #### MCP
@@ -539,7 +550,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–39：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性），39 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）。
+SQLite `schema_migrations` 当前记录版本 1–40：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28 增强 AgentTeam 并为评测 Execution 增加团队执行者，29 增加 CollaborationTask、评论、活动、Trigger、Mention、Task-Run 与 Route Decision，30 增加幂等事件触发和阶段屏障，31 将小队的有效并发持久化到协作 Run 树并在领取队列时执行，32 会关闭已终态 Run 遗留的待审批记录，33 会把仍有活跃阶段 Run 的历史根任务从错误的 `IN_REVIEW` 恢复为 `IN_PROGRESS`，34 将同一根协作任务的历史 Run/委派树归并到稳定任务工作区，并启用阶段交付证据门禁，35 为每个 Run 增加轻量 WorkingPlan（单行 upsert、revision 自增），36 增加持久化 Run 反思（结构化失败分类与决策，不含隐藏思维链），37 增加协作任务摘要、阶段交付清单与人工验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定（同一专家在同一协作任务内的逻辑连续性），39 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`），40 补偿同一协作会话内历史遗漏关联的续作 Run，并恢复仍有活跃 Run 的根任务执行状态。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
@@ -800,7 +811,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 |---|---|
 | `PAICLI_SERVER_ADDRESS`、`PAICLI_API_KEY`、`PAICLI_SECURITY_*` | 回环监听默认值、REST、Actuator、OpenAPI 认证和生产启动门禁 |
 | `PAICLI_MODEL_*` | Provider、端点、模型、Key、上下文/输出、思考、重试、流空闲超时、熔断、限流、Fallback、Run/工具预算和相同工具参数循环上限 |
-| `PAICLI_WEB_*` | 可选 SearXNG 搜索和 Server 侧 Web 工具 |
+| `PAICLI_WEB_*` | 可选 SearXNG 搜索、引擎选择和 Server 侧 Web 工具 |
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |

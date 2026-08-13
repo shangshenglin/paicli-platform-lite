@@ -1,5 +1,9 @@
 # 架构说明
 
+## Completion budget safety
+
+A Run that exhausts its step, token, tool-call, or elapsed-time budget always terminates as `FAILED`. Its terminal event keeps the complete budget snapshot for diagnosis, but partial results are never persisted as `COMPLETED`. For a collaboration Run, the completion contract is derived from the structured current task envelope (title, description, acceptance criteria, and instruction), excluding historical digest text so old analysis notes cannot downgrade a repair task to `TEXT_ONLY`.
+
 ## 部署边界
 
 平台由一个 Spring Boot Server、一个 SQLite 数据库和可选的 Docker Sandbox 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界。
@@ -108,7 +112,7 @@ Delegation Graph 使用 `run_delegation_dependencies` 保存有向依赖边，`r
 
 ## 持久化协作工作层
 
-Collaboration Runtime 位于 Plan 与 Run 之外，解决“工作项跨多次执行持续存在”的问题。`collaboration_tasks` 保存标题、说明、状态、优先级、Agent/AgentTeam 负责人、可选完成条件、父任务、阶段和可选 Plan 引用；`collaboration_task_runs` 把一次 Trigger Run 或 delegated child Run 关联回任务。每个根任务派生稳定的 task workspace owner；所有 Trigger Leader Run、默认阶段 Run 和委派后代在创建时继承该 owner，因此阶段 Barrier 即使通过新 Session/new Run 唤醒 Leader，仍读取同一目录。显式逻辑 `workspace_ref` 保留为有意隔离边界，不自动合并；若模型误传包含当前 collaboration workspace owner 的文件系统路径，则规范化为继承，避免元数据声称共享而子 Run 实际挂载空目录。Run 终态仅表示一次执行结束；阶段进入 `IN_REVIEW` 前还必须存在归属于该 Run 的写文件证据、Artifact 或阶段评论，空模型终态与只读检查不能推进 Barrier，最终只有人工 `ACCEPT` 可以进入 `DONE`。
+Collaboration Runtime 位于 Plan 与 Run 之外，解决“工作项跨多次执行持续存在”的问题。`collaboration_tasks` 保存标题、说明、状态、优先级、Agent/AgentTeam 负责人、可选完成条件、父任务、阶段和可选 Plan 引用；`collaboration_task_runs` 把 Trigger Run、delegated child Run 与同一协作会话中由普通对话入口新建或重试的续作 Run 关联回任务。后者会把尚在 `IN_REVIEW` 的当前任务及根任务恢复为 `IN_PROGRESS`，因此前端始终以完整 Run 树显示执行中状态。每个根任务派生稳定的 task workspace owner；所有 Trigger Leader Run、默认阶段 Run 和委派后代在创建时继承该 owner，因此阶段 Barrier 即使通过新 Session/new Run 唤醒 Leader，仍读取同一目录。显式逻辑 `workspace_ref` 保留为有意隔离边界，不自动合并；若模型误传包含当前 collaboration workspace owner 的文件系统路径，则规范化为继承，避免元数据声称共享而子 Run 实际挂载空目录。Run 终态仅表示一次执行结束；阶段进入 `IN_REVIEW` 前还必须存在归属于该 Run 的写文件证据、Artifact 或阶段评论，空模型终态与只读检查不能推进 Barrier，最终只有人工 `ACCEPT` 可以进入 `DONE`。
 
 评论、回复、子专家终态和 Stage Barrier 都可能要求唤醒同一负责人。调度前按任务树和最终 Agent 身份检查活跃 Run：目标已经处于非终态时只保留持久评论/阶段状态，由现有父 Run 消费子结果，不并发创建第二个 Leader 或专家 Run；父 Run 在子 Run 终态后原地恢复并继续推进，提示词明确禁止在未派发下一阶段或未发布结论时空转结束。若 Leader Run 仍提前终态且未发布结论，平台对已完成但缺失 `STAGE_BARRIER` Trigger 的 Barrier 补发一次幂等唤醒，仍无进展才置 `BLOCKED`。没有活跃目标时才创建幂等 Trigger。根 Team Leader 的 `conclusion=true` 还携带当前 Run id 校验，只有其他阶段、委派和并行 Run 全部终态后才允许持久化，防止“最终验收”评论早于审查或测试交付。历史重复 Run 继续保留用于审计，不在 Console 中伪装折叠。
 
@@ -166,7 +170,7 @@ ConversationCompactor 的工作记忆固定为八节：目标与硬约束、计�
 - 简单问答不创建计划：工具不在普通路径自动触发，只有模型调用 `update_working_plan` 才落库；该工具加入核心上下文工具，且在 Agent Profile 业务 Tool allowlist 非空时作为唯一额外常驻的 WorkingPlan Harness 工具直接保留；其他未授权基础工具仍不会因此进入 allowlist。
 - 与 Formal Plan 的分界：Formal Plan 仍保留多步依赖、跨时长、并行、人工节点、失败回流与严格验收；WorkingPlan 不创建 PlanStep、不经过 PlanWorker、无 DAG、无 PlanValidator。
 
-语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答）。协作任务复唤醒的 Leader Run 同样遵守。
+语言一致性：系统提示不再硬编码中文，改为“与用户最近一条消息语言一致”；`ContextManager` 按当前 Run 用户消息的汉字/拉丁字符占比注入显式 `<language>` 指令（中文问中文答、英文问英文答），并在动态上下文末端、当前 Run 的 assistant/tool 消息之前再次附加该约束，使英文工具结果、参考资料或历史回答不改变本轮输出语言，同时保留最后一条真实会话消息的既有模型语义。协作任务复唤醒的 Leader Run 同样遵守。
 
 完成验证（PR2）：最终答案先经 `RunVerificationService` 校验再完成。写操作无工作区变化、或测试命令失败时判定 `REPAIRABLE`，验证结果写入 `run.verification` Event 并作为 `<verification>` 用户消息注入下一轮重新排队；连续 2 次仍不过才 `FAILED`。普通问答（TEXT_ONLY）行为不变。
 
@@ -236,7 +240,7 @@ RAG、历史会话检索、Skill、联网、MCP 和 Multi-Agent 委派都通过�
 - Skill 只从受控全局/项目目录发现，稳定排序并按需加载；Git 导入先预检文件与权限声明，再暂存并校验符号链接、文件数和字符预算，不执行仓库代码。生命周期元数据和单级回滚备份均留在受控 Skill 根目录。
 - RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构，BM25 与真实 Embedding 独立排序后以 RRF 融合、去重和限额。检索时会生成轻量 Query Plan，识别代码路径、符号、排障、决策和架构类查询；SearchHit 返回 citation、文档版本、BM25 分、检索策略和命中原因，便于 UI 解释和后续排序调参。
 - `session_search` 只在 Agent 调用时检索当前项目的用户可见历史消息，排除当前 Run，并按会话生成抽取式摘要。
-- 联网默认关闭；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
+- 联网默认关闭；启用时必须提供可访问的 SearXNG-compatible 搜索端点。`web_search` 将端点连接/超时转换为含脱敏端点和 `PAICLI_WEB_SEARCH_URL` 的操作性错误，并可通过 `PAICLI_WEB_SEARCH_ENGINES` 将固定引擎集合透传给 SearXNG，规避默认聚合集合中被限流、验证码或超时的引擎；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
 - MCP Header 只能直接填写非敏感值或引用 `env:VARIABLE_NAME`，真实密钥不写入配置也不回显；Schema、参数和响应都有预算，连续失败触发短时熔断；全部 MCP 工具强制审批。
 - `spawn_agent` 经审批后原子创建委派和内部子 Session/Run，以父 ToolCall 幂等，并限制深度、子数量和级联取消。委派可绑定 `plan_id`/`plan_step_id`，并持久化包含 scope、允许文件/工具、输入 artifact、输出契约、验收标准、预算、deadline、依赖和禁止操作的 envelope；`get_agent_result` 会把子 Run 摘要、Artifact、Token 用量、失败分类和证据写回 delegation result，供恢复、审计和最终聚合使用。
 

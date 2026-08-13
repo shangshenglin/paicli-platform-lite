@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40);
         }
     }
 
@@ -207,6 +207,52 @@ class SqliteRuntimeStoreTest {
                     "(id,session_id,status,input,created_at) VALUES " +
                     "('run-3','session','QUEUED','third','2026-01-01T00:00:02Z')"))
                     .hasMessageContaining("UNIQUE constraint failed");
+        }
+    }
+
+    @Test
+    void correctsHistoricalBudgetStoppedCompletionToFailed() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("budget history");
+        var run = first.createRun(session.id(), "legacy budget stop");
+        first.completeRun(run.id());
+        first.appendEvent(run.id(), "run.budget_stopped", "{\"message\":\"step limit\"}");
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        assertThat(recovered.findRun(run.id()).orElseThrow()).satisfies(corrected -> {
+            assertThat(corrected.status()).isEqualTo(RunStatus.FAILED);
+            assertThat(corrected.error()).contains("corrected historical status");
+        });
+        assertThat(recovered.events(run.id(), 0)).extracting("type").contains("run.failed");
+    }
+
+    @Test
+    void recordsHistoricalBudgetCorrectionInCollaborationActivity() throws Exception {
+        SqliteRuntimeStore first = store();
+        var session = first.createSession("budget collaboration", "project-a");
+        var run = first.createRun(session.id(), "legacy budget stop");
+        first.completeRun(run.id());
+        first.appendEvent(run.id(), "run.budget_stopped", "{\"message\":\"step limit\"}");
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO collaboration_tasks(id,project_key,title,status,priority,assignee_type,"
+                    + "stage,created_by,created_at,updated_at) VALUES('task-history','project-a','History',"
+                    + "'IN_PROGRESS',0,'AGENT',0,'SYSTEM','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')");
+            statement.execute("INSERT INTO collaboration_task_runs(task_id,run_id,relationship,created_at) VALUES"
+                    + "('task-history','" + run.id() + "','TRIGGERED','2026-01-01T00:00:00Z')");
+        }
+
+        SqliteRuntimeStore recovered = new SqliteRuntimeStore(properties());
+        recovered.initialize();
+
+        try (var connection = DriverManager.getConnection(url); var statement = connection.createStatement();
+             var result = statement.executeQuery("SELECT activity_type,payload_json FROM collaboration_activities "
+                     + "WHERE task_id='task-history' AND subject_id='" + run.id() + "'")) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("activity_type")).isEqualTo("RUN_FAILED");
+            assertThat(result.getString("payload_json")).contains("corrected historical status");
         }
     }
 

@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.ConnectException;
 import java.net.http.HttpTimeoutException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -45,15 +46,23 @@ public class WebAccessService {
         if (value.isBlank()) throw new IllegalArgumentException("query must not be blank");
         int limit = Math.max(1, Math.min(requestedLimit, 10));
         String separator = properties.searchUrl().contains("?") ? "&" : "?";
+        String engines = properties.searchEngines().isBlank() ? "" : "&engines="
+                + URLEncoder.encode(properties.searchEngines(), StandardCharsets.UTF_8);
         URI uri = URI.create(properties.searchUrl() + separator + "q="
-                + URLEncoder.encode(value, StandardCharsets.UTF_8) + "&format=json");
+                + URLEncoder.encode(value, StandardCharsets.UTF_8) + "&format=json" + engines);
         HttpRequest.Builder builder = HttpRequest.newBuilder(uri).GET()
                 .timeout(Duration.ofSeconds(properties.timeoutSeconds()))
                 .header("Accept", "application/json").header("User-Agent", "PaiCLI-Platform-Lite/0.7");
         if (!properties.apiKey().isBlank()) {
             builder.header(properties.apiKeyHeader(), properties.apiKey());
         }
-        byte[] body = sendBounded(builder.build());
+        byte[] body;
+        try {
+            body = sendBounded(builder.build());
+        } catch (ConnectException | HttpTimeoutException e) {
+            throw new IllegalStateException("web search provider is unavailable at " + searchEndpoint()
+                    + "; start or configure the SearXNG-compatible endpoint in PAICLI_WEB_SEARCH_URL", e);
+        }
         JsonNode root = mapper.readTree(body);
         JsonNode results = root.path("results");
         if (!results.isArray()) throw new IllegalStateException("search provider response has no results array");
@@ -176,6 +185,16 @@ public class WebAccessService {
             throw new IllegalStateException("search response exceeds configured size limit");
         }
         return bytes;
+    }
+
+    private String searchEndpoint() {
+        URI configured = URI.create(properties.searchUrl());
+        try {
+            return new URI(configured.getScheme(), null, configured.getHost(), configured.getPort(),
+                    configured.getPath(), null, null).toString();
+        } catch (Exception ignored) {
+            return properties.searchUrl();
+        }
     }
 
     private static String htmlToText(String html) {

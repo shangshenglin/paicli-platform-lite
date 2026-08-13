@@ -18,6 +18,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Builds and persists the deterministic completion contract for a Run. Contract
@@ -29,6 +31,11 @@ import java.util.Optional;
 @Service
 public class CompletionContractService {
     private static final TypeReference<Map<String, Object>> OBJECT_MAP = new TypeReference<>() { };
+    private static final Pattern COLLABORATION_TASK_INTENT = Pattern.compile(
+            "(?ms)^title:\\s*(.*?)\\Rstatus:.*?^description:\\s*(.*?)\\Racceptance_criteria:\\s*(.*?)\\Rtrigger:.*?^instruction:\\s*(.*?)(?:\\R{2,}|\\z)");
+    private static final Pattern CODE_TASK_SIGNAL = Pattern.compile(
+            "(?i)\\b(bug|code|source|java|javascript|typescript|python|game|api|service|class|function)\\b|"
+                    + "代码|程序|游戏|接口|服务|功能");
 
     private final SqliteRuntimeStore store;
     private final PlanStore plans;
@@ -113,14 +120,26 @@ public class CompletionContractService {
     }
 
     private RunCompletionContractRecord fromRootClassifier(RunRecord run) {
+        String taskIntent = rootTaskIntent(run.input());
         CompletionRequirementClassifier.Requirements requirements =
-                CompletionRequirementClassifier.classify(run.input());
+                CompletionRequirementClassifier.classify(taskIntent);
+        boolean collaborationTask = !taskIntent.equals(run.input());
+        boolean requiresTests = requirements.requiresTests()
+                || (collaborationTask && requirements.requiresWorkspaceChange()
+                && CODE_TASK_SIGNAL.matcher(taskIntent).find());
         RunCompletionContractRecord base = new RunCompletionContractRecord(run.id(),
-                mode(requirements.requiresWorkspaceChange(), requirements.requiresTests()),
-                requirements.requiresWorkspaceChange(), requirements.requiresTests(),
+                mode(requirements.requiresWorkspaceChange(), requiresTests),
+                requirements.requiresWorkspaceChange(), requiresTests,
                 List.of(), List.of(), List.of(), "root_classifier", "conservative root task classification",
                 Instant.now(), Instant.now());
         return applyWorkingPlanCompletion(base);
+    }
+
+    private static String rootTaskIntent(String input) {
+        if (input == null || input.isBlank()) return "";
+        Matcher matcher = COLLABORATION_TASK_INTENT.matcher(input);
+        if (!matcher.find()) return input;
+        return String.join("\n", matcher.group(1), matcher.group(2), matcher.group(3), matcher.group(4));
     }
 
     private RunCompletionContractRecord applyWorkingPlanCompletion(RunCompletionContractRecord base) {

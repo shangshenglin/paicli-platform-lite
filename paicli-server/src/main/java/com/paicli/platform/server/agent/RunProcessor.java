@@ -373,8 +373,8 @@ public class RunProcessor {
         store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
         String content = "Execution stopped because this run reached its configured budget.\n\n"
                 + "Budget snapshot: " + budget.message().replace("run execution budget exceeded: ", "") + "\n\n"
-                + "No further model calls were made. Use the completed child run, artifacts, and previous tool "
-                + "results as the available partial result, or retry with a larger run budget.";
+                + "No further model calls were made. This Run failed without a completed result; retry it with a "
+                + "larger budget after reviewing the available tool results and artifacts.";
         if (runVerification != null) {
             RunVerificationService.VerificationResult verification = runVerification.verify(run, content);
             if (verification.status() != RunVerificationService.Status.PASS) {
@@ -391,6 +391,24 @@ public class RunProcessor {
                 notify(run, "FAILED", error);
                 return true;
             }
+        }
+        if (budget.exceeded()) {
+            String error = "run execution budget exceeded before completion: "
+                    + budget.message().replace("run execution budget exceeded: ", "");
+            store.appendMessage(run.sessionId(), run.id(), "assistant", content);
+            store.failRun(run.id(), error);
+            store.recordMemoryOutcome(run.id(), "RUN_FAILED");
+            store.appendEvent(run.id(), "run.budget_stopped", json(Map.of(
+                    "status", "FAILED", "message", error,
+                    "step", budget.step(), "maxSteps", budget.maxSteps(),
+                    "tokens", budget.tokens(), "maxTokens", budget.maxTokens(),
+                    "toolCalls", budget.toolCalls(), "maxToolCalls", budget.maxToolCalls(),
+                    "elapsedSeconds", budget.elapsedSeconds(), "maxElapsedSeconds", budget.maxElapsedSeconds())));
+            resolveDeferredChild(run.id());
+            store.requeueWaitingParentRuns(run.id());
+            toolRouter.release(run.id());
+            notify(run, "FAILED", error);
+            return true;
         }
         boolean completed = store.commitFinalAssistantAndComplete(run.sessionId(), run.id(), content, "",
                 json(Map.of("status", "BUDGET_STOPPED",

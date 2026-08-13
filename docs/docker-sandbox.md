@@ -1,5 +1,9 @@
 # Docker Sandbox
 
+## Toolchain verification
+
+Before accepting Runs, the Server verifies the configured image in a short-lived, network-disabled container. The probe requires Bash, Git, Maven, Node/npm, Python 3, and PowerShell Core. If any runtime is absent, startup fails with an instruction to rebuild via `scripts/build-sandbox.ps1`; an old image cannot fail midway through an agent Run.
+
 ## 适用范围
 
 Docker 模式是企业级 MicroVM 池的轻量替代，可改善进程、文件系统和资源隔离，但不等同于面向敌对代码的强化执行服务。应持续更新 Docker Desktop 和基础镜像，并且绝不能把 Docker Socket 挂载进 Sandbox。
@@ -31,6 +35,9 @@ Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤�
 - 控制通道是 `docker exec` 加容器 `127.0.0.1:8081` 上的带认证 HTTP。
 - 每容器使用随机 Bearer Token；缺少 Token 时 Sandbox Agent 拒绝启动，并使用常量时间比较。
 - 根文件系统只读，仅 `/tmp` tmpfs 可写。
+- 镜像内置 Java 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip。
+- 构建阶段通过 HTTPS Debian 源安装工具链；`apt` 请求有 20 秒超时和 3 次有限重试，降低 HTTP 响应截断或短暂网络波动导致构建失败的概率。
+- `/tmp` 与 `/home/sandbox` 使用可写 tmpfs；后者用于 PowerShell、.NET、Maven 等工具的用户缓存，容器销毁后不保留工具缓存。
 - 启用 `no-new-privileges` 和 `cap-drop ALL`。
 - CPU、内存和 PID 限额可配置。
 - 只把当前 Run 工作区以读写方式挂载。

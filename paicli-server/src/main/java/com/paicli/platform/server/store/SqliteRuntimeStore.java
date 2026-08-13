@@ -689,10 +689,21 @@ public class SqliteRuntimeStore {
                     "finished_at='" + Instant.now() + "',version=version+1 WHERE id IN " +
                     "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
                     "('COMPLETED','FAILED','CANCELED')");
+            reconcileBudgetStoppedCompletions(connection);
             SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE approvals SET status='DENIED',resolved_at='" + Instant.now()
                     + "' WHERE status='PENDING' AND run_id IN "
                     + "(SELECT id FROM runs WHERE status IN ('COMPLETED','FAILED','CANCELED'))");
+            statement.execute("INSERT OR IGNORE INTO collaboration_task_runs(task_id,run_id,trigger_id,relationship,created_at) "
+                    + "SELECT (SELECT existing_link.task_id FROM collaboration_task_runs existing_link "
+                    + "JOIN runs existing_run ON existing_run.id=existing_link.run_id "
+                    + "WHERE existing_run.session_id=continuation.session_id "
+                    + "ORDER BY existing_run.created_at DESC,existing_link.created_at DESC,existing_link.task_id LIMIT 1),"
+                    + "continuation.id,NULL,'SESSION_CONTINUATION',continuation.created_at FROM runs continuation "
+                    + "WHERE NOT EXISTS (SELECT 1 FROM collaboration_task_runs current_link "
+                    + "WHERE current_link.run_id=continuation.id) AND EXISTS (SELECT 1 "
+                    + "FROM collaboration_task_runs existing_link JOIN runs existing_run "
+                    + "ON existing_run.id=existing_link.run_id WHERE existing_run.session_id=continuation.session_id)");
             statement.execute("WITH RECURSIVE task_tree(root_id,task_id) AS ("
                     + "SELECT id,id FROM collaboration_tasks WHERE parent_id IS NULL OR parent_id='' "
                     + "UNION ALL SELECT task_tree.root_id,child.id FROM collaboration_tasks child "
@@ -706,6 +717,44 @@ public class SqliteRuntimeStore {
         }
         reconcileCollaborationTaskWorkspaces();
         recoverInterruptedRuns();
+    }
+
+    private void reconcileBudgetStoppedCompletions(Connection connection) throws SQLException {
+        String error = "run execution budget exceeded before completion (corrected historical status)";
+        String now = Instant.now().toString();
+        try (PreparedStatement event = connection.prepareStatement(
+                "INSERT INTO run_events(run_id,event_type,event_data,sequence,created_at) "
+                        + "SELECT r.id,'run.failed',?,COALESCE((SELECT MAX(e.sequence) FROM run_events e "
+                        + "WHERE e.run_id=r.id),0)+1,? FROM runs r WHERE r.status='COMPLETED' "
+                        + "AND EXISTS (SELECT 1 FROM run_events stopped WHERE stopped.run_id=r.id "
+                        + "AND stopped.event_type='run.budget_stopped') "
+                        + "AND NOT EXISTS (SELECT 1 FROM run_events failed WHERE failed.run_id=r.id "
+                        + "AND failed.event_type='run.failed' AND failed.event_data LIKE '%corrected historical status%')")) {
+            event.setString(1, "{\"status\":\"FAILED\",\"error\":\"" + escape(error) + "\"}");
+            event.setString(2, now);
+            event.executeUpdate();
+        }
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE runs SET status='FAILED',error=?,finished_at=COALESCE(finished_at,?),version=version+1 "
+                        + "WHERE status='COMPLETED' AND EXISTS (SELECT 1 FROM run_events stopped "
+                        + "WHERE stopped.run_id=runs.id AND stopped.event_type='run.budget_stopped')")) {
+            update.setString(1, error);
+            update.setString(2, now);
+            update.executeUpdate();
+        }
+        try (PreparedStatement activity = connection.prepareStatement(
+                "INSERT INTO collaboration_activities(task_id,activity_type,actor_type,actor_id,subject_id,"
+                        + "payload_json,created_at) SELECT link.task_id,'RUN_FAILED','SYSTEM',NULL,r.id,?,? "
+                        + "FROM runs r JOIN collaboration_task_runs link ON link.run_id=r.id "
+                        + "WHERE r.status='FAILED' AND r.error=? AND NOT EXISTS "
+                        + "(SELECT 1 FROM collaboration_activities existing WHERE existing.task_id=link.task_id "
+                        + "AND existing.activity_type='RUN_FAILED' AND existing.subject_id=r.id "
+                        + "AND existing.payload_json LIKE '%corrected historical status%')")) {
+            activity.setString(1, "{\"status\":\"FAILED\",\"error\":\"" + escape(error) + "\"}");
+            activity.setString(2, now);
+            activity.setString(3, error);
+            activity.executeUpdate();
+        }
     }
 
     public SessionRecord createSession(String title) {

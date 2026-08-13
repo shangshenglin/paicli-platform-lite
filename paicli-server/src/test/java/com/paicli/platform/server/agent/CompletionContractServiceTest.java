@@ -64,6 +64,40 @@ class CompletionContractServiceTest {
     }
 
     @Test
+    void collaborationIntentIsNotDowngradedByHistoricalDigest() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties);
+        store.initialize();
+        CompletionContractService service = service(store, new PlanStore(properties));
+
+        var session = store.createSession("collaboration", "project-c");
+        var run = store.createRun(session.id(), """
+                You are handling a persistent collaboration task.
+                task_id: task-1
+                title: Fix the solitaire dealing bug
+                status: TODO
+                description:
+                The deal clusters ranks and must be fixed.
+                acceptance_criteria:
+                The game runs and the distribution is valid.
+                trigger: MENTION
+                instruction:
+                Fix the dealing implementation and run its tests.
+
+                <task_digest>
+                Stage 1 analysis is historical context only.
+                </task_digest>
+                """);
+
+        var contract = service.ensureForRun(run.id());
+
+        assertThat(contract.mode()).isEqualTo(CompletionMode.MUTATION_AND_TEST);
+        assertThat(contract.requiresWorkspaceChange()).isTrue();
+        assertThat(contract.requiresTests()).isTrue();
+    }
+
+    @Test
     void delegationEnvelopeDrivesChildContract() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");

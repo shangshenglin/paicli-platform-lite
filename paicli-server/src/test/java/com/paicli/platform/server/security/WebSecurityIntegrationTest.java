@@ -3,6 +3,7 @@ package com.paicli.platform.server.security;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.common.ToolRequest;
 import com.paicli.platform.server.agent.DelegationToolProvider;
+import com.paicli.platform.server.store.CollaborationStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +44,9 @@ class WebSecurityIntegrationTest {
 
     @Autowired
     SqliteRuntimeStore store;
+
+    @Autowired
+    CollaborationStore collaboration;
 
     @Autowired
     DelegationToolProvider delegationTools;
@@ -359,6 +363,29 @@ class WebSecurityIntegrationTest {
         org.assertj.core.api.Assertions.assertThat(store.messages(branchSessionId))
                 .extracting("content")
                 .containsExactly("first", "first answer");
+    }
+
+    @Test
+    void continuingCollaborationSessionLinksRunAndReactivatesReviewTask() throws Exception {
+        String projectKey = "collaboration-continuation-" + System.nanoTime();
+        var task = collaboration.saveTask(null, projectKey, "Review task", "", "IN_REVIEW",
+                0, "AGENT", "agent-a", "", null, 0, null, "USER");
+        var session = store.createSession("collaboration", projectKey);
+        var previous = store.createRun(session.id(), "first");
+        store.completeRun(previous.id());
+        collaboration.linkRun(task.id(), previous.id(), null, "TRIGGERED");
+
+        mvc.perform(post("/v1/sessions/{sessionId}/runs", session.id())
+                        .header("X-API-Key", "test-secret")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"input\":\"继续处理\"}"))
+                .andExpect(status().isAccepted());
+
+        org.assertj.core.api.Assertions.assertThat(collaboration.task(task.id())).get()
+                .extracting("status").isEqualTo("IN_PROGRESS");
+        org.assertj.core.api.Assertions.assertThat(collaboration.taskTreeRuns(task.id()))
+                .extracting(CollaborationStore.TaskRun::relationship)
+                .contains("SESSION_CONTINUATION");
     }
 
     @Test
