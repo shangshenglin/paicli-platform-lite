@@ -63,16 +63,19 @@ paicli:
     max-tool-calls-per-run: ${PAICLI_MODEL_MAX_TOOL_CALLS_PER_RUN:100}
     max-identical-tool-calls-per-run: ${PAICLI_MODEL_MAX_IDENTICAL_TOOL_CALLS_PER_RUN:3}
   docker:
-    executable: docker
-    image: paicli-sandbox-agent:0.6.0
-    network: paicli-sandbox-internal
-    memory: 1g
-    cpus: 1.0
-    pids-limit: 128
-    startup-timeout-seconds: 30
-    command-timeout-seconds: 90
+    executable: ${PAICLI_DOCKER_EXECUTABLE:docker}
+    image: ${PAICLI_DOCKER_IMAGE:paicli-sandbox-agent:0.6.0}
+    network: ${PAICLI_DOCKER_NETWORK:none}
+    memory: ${PAICLI_DOCKER_MEMORY:1g}
+    cpus: ${PAICLI_DOCKER_CPUS:1.0}
+    pids-limit: ${PAICLI_DOCKER_PIDS_LIMIT:128}
+    tmpfs-size: ${PAICLI_DOCKER_TMPFS_SIZE:256m}
+    home-tmpfs-size: ${PAICLI_DOCKER_HOME_TMPFS_SIZE:512m}
+    shm-size: ${PAICLI_DOCKER_SHM_SIZE:64m}
+    startup-timeout-seconds: ${PAICLI_DOCKER_STARTUP_TIMEOUT_SECONDS:30}
+    command-timeout-seconds: ${PAICLI_DOCKER_COMMAND_TIMEOUT_SECONDS:90}
   web:
-    enabled: ${PAICLI_WEB_ENABLED:true}
+    enabled: ${PAICLI_WEB_ENABLED:false}
     search-url: ${PAICLI_WEB_SEARCH_URL:}
     api-key: ${PAICLI_WEB_SEARCH_API_KEY:}
     api-key-header: ${PAICLI_WEB_SEARCH_API_KEY_HEADER:Authorization}

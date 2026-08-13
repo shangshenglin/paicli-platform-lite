@@ -128,6 +128,8 @@ java -jar .\paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar `
 
 `build-sandbox.ps1` 只构建 `paicli-common` 与 `paicli-sandbox-agent`，默认跳过测试；需要同时运行这两个模块的测试时传入 `-RunTests`。
 
+默认 Sandbox 使用 `none` 网络，Server 仍通过 `docker exec` 调用容器 loopback Agent，因此不同 Run 之间也没有共享容器网络。镜像内置 JDK 17、Maven、Node.js/npm、Python/pip/venv、Git、Bash 和 PowerShell Core；非 root 用户的 HOME 由独立 tmpfs 提供，依赖缓存不会写入只读根文件系统。镜像、CPU、内存、PID、`/tmp`、HOME tmpfs、共享内存和超时均可通过 `PAICLI_DOCKER_*` 环境变量调整。
+
 详细边界见 [docs/docker-sandbox.md](docs/docker-sandbox.md)。
 
 ### 4. 使用真实模型
@@ -310,8 +312,9 @@ X-API-Key: your-key
 ### 阶段 2：Docker 执行边界
 
 - 每个活跃 Run 使用一个可复用 Docker 容器，Run 结束后强制回收。
-- 容器使用内部网络且不暴露宿主端口；Server 通过 `docker exec` 调用 loopback HTTP Agent。
-- 使用每容器随机 Bearer Token、只读根文件系统、工作区挂载、CPU/内存/PID/capability/超时限制。
+- 容器默认使用 Docker `none` 网络且不暴露宿主端口；Server 通过 `docker exec` 调用 loopback HTTP Agent。显式配置的自定义网络必须是 Docker internal network。
+- 使用每容器随机 Bearer Token、固定非 root UID、init 进程、只读根文件系统、工作区挂载、受限 `/tmp` 与 HOME tmpfs，以及 CPU/内存/PID/capability/共享内存/超时限制。
+- Sandbox 镜像提供 JDK 17、Maven、Node.js/npm、Python/pip/venv、Git、Bash 和 PowerShell Core；Maven、Gradle、npm、pip、NuGet、Go/Rust 等缓存路径统一落到临时 HOME，Run 结束随容器回收。
 - `execute_command` 支持固定白名单 `sh`、`bash`、`powershell`（PowerShell Core / `pwsh`），并支持受控 `cwd`、请求级 `timeoutSeconds`、`maxOutputBytes` 与显式非敏感 `env`；不接受任意解释器路径。
 - Run 和 Agent Profile 都持久化默认 Shell。模型省略 `shell` 时，Server 会在同轮 ToolCall 原子落库前补入 Run 默认值，使 Approval、幂等键与恢复执行复用同一组最终参数。
 - stdout/stderr 分开收集并持续排空，结果记录实际 Shell、退出码、耗时、超时、字节数和截断状态；超过模型内联预算的输出由既有 Artifact Store 保存并可通过 `read_artifact` 分段读取。
@@ -804,7 +807,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
-| `paicli.docker.command-timeout-seconds` | Docker 命令请求的最大超时，同时注入 Sandbox Agent 作为请求级 `timeoutSeconds` 上限；默认 90 秒 |
+| `PAICLI_DOCKER_*` | Docker 可执行文件/镜像、默认 `none` 网络、CPU/内存/PID、`/tmp`/HOME tmpfs、共享内存、启动与命令超时；命令超时同时是请求级 `timeoutSeconds` 上限 |
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
 
@@ -832,7 +835,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 
 此外已完成：
 
-- Docker Desktop / WSL2 真实容器验收：审批恢复、命令执行、工作区挂载、SSE 重放、资源限制和容器回收。
+- Docker Desktop / WSL2 真实容器验收：审批恢复、命令执行、工作区挂载、SSE 重放、资源限制和容器回收。2026-08-13 的 `none` 网络、可写 HOME 与扩展工具链增强已通过 Java 单元测试，仍需在具备 Docker CLI 的环境重建镜像并补一次端到端验收。
 - Agent 评测真实 REST 冒烟：创建 Suite/Case、双 Trial、Execution 完成、100 分报告和 Baseline 晋升。
 
 ## 已知边界

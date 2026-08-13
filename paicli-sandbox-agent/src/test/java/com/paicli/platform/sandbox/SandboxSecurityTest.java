@@ -49,4 +49,19 @@ class SandboxSecurityTest {
         assertThat(sensitiveEnvironment.success()).isFalse();
         assertThat(sensitiveEnvironment.error()).contains("sensitive environment variable");
     }
+
+    @Test
+    void commandEnvironmentUsesWritableEphemeralHomeAndToolCaches() {
+        Map<String, String> environment = SandboxToolService.commandEnvironment();
+
+        assertThat(environment).containsEntry("HOME", "/home/sandbox")
+                .containsEntry("MAVEN_CONFIG", "/home/sandbox/.m2")
+                .containsEntry("GRADLE_USER_HOME", "/home/sandbox/.gradle")
+                .containsEntry("NPM_CONFIG_CACHE", "/home/sandbox/.npm")
+                .containsEntry("PIP_CACHE_DIR", "/home/sandbox/.cache/pip")
+                .containsEntry("NUGET_PACKAGES", "/home/sandbox/.nuget/packages")
+                .containsEntry("TMPDIR", "/tmp");
+        assertThat(environment.get("PATH")).startsWith("/home/sandbox/.local/bin:/workspace/node_modules/.bin:");
+        assertThat(environment).doesNotContainKey("SANDBOX_AGENT_TOKEN");
+    }
 }

@@ -54,7 +54,7 @@ public class DockerSandboxDriver implements SandboxDriver {
         Files.createDirectories(workspaceRoot);
         requireSuccess(docker.execute(List.of("version", "--format", "{{.Server.Version}}"), Duration.ofSeconds(10)),
                 "Docker Desktop is unavailable");
-        ensureInternalNetwork();
+        ensureConfiguredNetwork();
         cleanupOrphans();
     }
 
@@ -112,12 +112,17 @@ public class DockerSandboxDriver implements SandboxDriver {
                 "run", "-d", "--name", name,
                 "--label", MANAGED_LABEL,
                 "--label", "paicli.platform.run-id=" + runId,
+                "--init",
+                "--user", "10001:10001",
                 "--network", dockerProperties.network(),
                 "--memory", dockerProperties.memory(),
                 "--cpus", Double.toString(dockerProperties.cpus()),
                 "--pids-limit", Integer.toString(dockerProperties.pidsLimit()),
                 "--read-only",
-                "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+                "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + dockerProperties.tmpfsSize(),
+                "--tmpfs", "/home/sandbox:rw,nosuid,nodev,size="
+                        + dockerProperties.homeTmpfsSize() + ",uid=10001,gid=10001,mode=0700",
+                "--shm-size", dockerProperties.shmSize(),
                 "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL",
                 "-e", "SANDBOX_AGENT_TOKEN=" + token,
@@ -150,10 +155,16 @@ public class DockerSandboxDriver implements SandboxDriver {
         throw new IllegalStateException("Sandbox Agent did not become healthy");
     }
 
-    private void ensureInternalNetwork() {
+    private void ensureConfiguredNetwork() {
+        if ("none".equals(dockerProperties.network())) return;
         DockerCommandExecutor.CommandResult inspect = docker.execute(
-                List.of("network", "inspect", dockerProperties.network()), Duration.ofSeconds(10));
-        if (inspect.successful()) return;
+                List.of("network", "inspect", "--format", "{{.Internal}}", dockerProperties.network()),
+                Duration.ofSeconds(10));
+        if (inspect.successful()) {
+            if ("true".equalsIgnoreCase(inspect.output().trim())) return;
+            throw new IllegalStateException("Configured Docker network must be internal: "
+                    + dockerProperties.network());
+        }
         requireSuccess(docker.execute(
                 List.of("network", "create", "--internal", dockerProperties.network()), Duration.ofSeconds(15)),
                 "Failed to create internal Docker network");

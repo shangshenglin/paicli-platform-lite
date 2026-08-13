@@ -244,8 +244,10 @@ Console 每轮最多暂存 4 张 PNG/JPEG/GIF 和 4 个文档。Server 校验真
 
 ## Sandbox 边界
 
-`LocalSandboxDriver` 仅用于开发，不是安全沙箱。Docker 模式按活跃 Run 创建受限容器，工作区留在宿主机，容器使用无外部路由的内部网络且不发布端口；Server 通过 `docker exec` 调用容器 loopback 的带令牌 HTTP Agent。
+`LocalSandboxDriver` 仅用于开发，不是安全沙箱。Docker 模式按活跃 Run 创建受限容器，工作区留在宿主机。容器默认使用 Docker `none` 网络且不发布端口，消除不同 Run 之间的共享容器网络；Server 通过 `docker exec` 调用容器 loopback 的带令牌 HTTP Agent，因此控制面不依赖容器网络。部署如显式选择自定义网络，启动时必须确认它是 internal network，否则拒绝启动。
 
 Sandbox Agent 缺少每容器随机令牌时拒绝启动。命令只允许固定映射到 `/bin/sh -lc`、`/bin/bash -lc` 或 `/usr/bin/pwsh -NoLogo -NoProfile -NonInteractive -Command`，模型不能传解释器路径。Run 与 Agent Profile 持久化默认 Shell；RunProcessor 在同轮 ToolCall 原子落库前补齐缺省 Shell，因此审批参数、幂等键和恢复执行一致。
 
-命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。`execute_command` 在 ToolCall 原子持久化后按已落库的 `command` 分类：读取、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署等风险命令在任何容器调用前创建持久化 Approval。批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作；无法解析或缺少命令时按风险命令处理。服务初始化会重新分类历史未决命令，安全命令原 Approval 自动批准并重新排队，危险命令保持等待。全部 MCP 工具和 Provider 自行声明的危险工具仍强制审批。
+容器强制以 UID/GID `10001` 运行并启用 init、只读根文件系统、`no-new-privileges`、`cap-drop ALL`、CPU/内存/PID/共享内存限制。只有 Run workspace、受限 `/tmp` 和只对该用户开放的 HOME tmpfs 可写；HOME 为 Maven、Gradle、npm、pip、NuGet、Go/Rust 等工具提供临时缓存，随 Run 容器回收，不进入持久化工作区。镜像包含 JDK 17、Maven、Node.js/npm、Python/pip/venv、Git、Bash 和 PowerShell Core。
+
+命令工作目录必须位于 workspace 内。进程环境从空集合开始，只加入固定 PATH/HOME/LANG、临时工具缓存、PowerShell 遥测关闭变量和通过名称/数量/长度/敏感词检查的显式 `env`。stdout/stderr 使用独立限额缓冲区持续排空，结果返回退出码、耗时、超时、字节数和截断状态；超过模型内联预算的结果写入 Artifact。超时会终止进程及后代；Run 取消会销毁独占容器，从而中断活跃命令。`execute_command` 在 ToolCall 原子持久化后按已落库的 `command` 分类：读取、构建和测试命令直接进入 Sandbox，删除/清空、提权/权限修改、进程/系统控制、破坏性 Git/数据库操作、下载安装、远程执行、发布和部署等风险命令在任何容器调用前创建持久化 Approval。批准后继续执行同一个 ToolCall 和同一组参数，不要求模型重新生成动作；无法解析或缺少命令时按风险命令处理。服务初始化会重新分类历史未决命令，安全命令原 Approval 自动批准并重新排队，危险命令保持等待。全部 MCP 工具和 Provider 自行声明的危险工具仍强制审批。

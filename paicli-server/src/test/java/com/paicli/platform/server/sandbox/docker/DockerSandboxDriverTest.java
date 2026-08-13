@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DockerSandboxDriverTest {
     @TempDir
@@ -39,11 +40,41 @@ class DockerSandboxDriverTest {
         assertThat(docker.commands.stream().filter(command -> command.get(0).equals("run"))).hasSize(1);
         List<String> run = docker.commands.stream().filter(command -> command.get(0).equals("run")).findFirst().orElseThrow();
         assertThat(run).contains("--read-only", "--cap-drop", "ALL", "--pids-limit", "128",
-                "--network", "paicli-test-network", "--security-opt", "no-new-privileges",
+                "--network", "none", "--security-opt", "no-new-privileges", "--init",
+                "--user", "10001:10001", "--shm-size", "64m",
+                "/tmp:rw,noexec,nosuid,nodev,size=256m",
+                "/home/sandbox:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700",
                 "SANDBOX_COMMAND_TIMEOUT_SECONDS=10");
         assertThat(run).doesNotContain("-p");
+        assertThat(docker.commands).noneMatch(command -> command.get(0).equals("network"));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "container-123")));
         assertThat(docker.commands).anyMatch(command -> command.equals(List.of("rm", "-f", "orphan-1")));
+    }
+
+    @Test
+    void createsConfiguredNetworkAsInternal() throws Exception {
+        FakeDocker docker = new FakeDocker();
+        DockerSandboxDriver driver = new DockerSandboxDriver(
+                docker, new FakeAgentClient(), dockerProperties("paicli-test-network"), platformProperties());
+
+        driver.initialize();
+
+        assertThat(docker.commands).contains(
+                List.of("network", "inspect", "--format", "{{.Internal}}", "paicli-test-network"),
+                List.of("network", "create", "--internal", "paicli-test-network"));
+    }
+
+    @Test
+    void rejectsConfiguredNetworkThatIsNotInternal() {
+        FakeDocker docker = new FakeDocker("false");
+        DockerSandboxDriver driver = new DockerSandboxDriver(
+                docker, new FakeAgentClient(), dockerProperties("bridge"), platformProperties());
+
+        assertThatThrownBy(driver::initialize)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must be internal");
+        assertThat(docker.commands).noneMatch(command -> command.equals(
+                List.of("network", "create", "--internal", "bridge")));
     }
 
     private PlatformProperties platformProperties() {
@@ -51,19 +82,34 @@ class DockerSandboxDriverTest {
     }
 
     private DockerSandboxProperties dockerProperties() {
-        return new DockerSandboxProperties("docker", "sandbox:test", "paicli-test-network",
-                "1g", 1.0, 128, 2, 10);
+        return dockerProperties("none");
+    }
+
+    private DockerSandboxProperties dockerProperties(String network) {
+        return new DockerSandboxProperties("docker", "sandbox:test", network,
+                "1g", 1.0, 128, "256m", "512m", "64m", 2, 10);
     }
 
     private static final class FakeDocker implements DockerCommandExecutor {
         private final List<List<String>> commands = new ArrayList<>();
+        private final String networkInspectOutput;
+
+        private FakeDocker() {
+            this(null);
+        }
+
+        private FakeDocker(String networkInspectOutput) {
+            this.networkInspectOutput = networkInspectOutput;
+        }
 
         @Override
         public CommandResult execute(List<String> arguments, Duration timeout) {
             commands.add(List.copyOf(arguments));
             if (arguments.get(0).equals("version")) return new CommandResult(0, "27.0");
             if (arguments.size() > 1 && arguments.get(0).equals("network") && arguments.get(1).equals("inspect")) {
-                return new CommandResult(0, "[]");
+                return networkInspectOutput == null
+                        ? new CommandResult(1, "not found")
+                        : new CommandResult(0, networkInspectOutput);
             }
             if (arguments.get(0).equals("ps")) return new CommandResult(0, "orphan-1");
             if (arguments.get(0).equals("run")) return new CommandResult(0, "container-123");

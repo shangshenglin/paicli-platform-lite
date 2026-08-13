@@ -104,14 +104,7 @@ public class SandboxToolService {
         ProcessBuilder builder = new ProcessBuilder(shell.command(command)).directory(cwd.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
-        environment.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-        environment.put("HOME", "/home/sandbox");
-        environment.put("LANG", "C.UTF-8");
-        environment.put("POWERSHELL_TELEMETRY_OPTOUT", "1");
-        environment.put("DOTNET_CLI_HOME", "/tmp/dotnet");
-        environment.put("XDG_CACHE_HOME", "/tmp/cache");
-        environment.put("XDG_CONFIG_HOME", "/tmp/config");
-        environment.put("XDG_DATA_HOME", "/tmp/data");
+        environment.putAll(commandEnvironment());
         environment.putAll(environment(request));
         Process process = builder.start();
         BoundedOutputBuffer stdout = new BoundedOutputBuffer(outputLimit);
@@ -132,6 +125,32 @@ public class SandboxToolService {
         String content = commandOutput(process.exitValue(), shell, cwd, stdout, stderr);
         return ToolResult.success(request.toolCallId(), content, elapsed(start),
                 commandMetadata(shell, cwd, process.exitValue(), false, stdout, stderr));
+    }
+
+    static Map<String, String> commandEnvironment() {
+        Map<String, String> environment = new LinkedHashMap<>();
+        environment.put("PATH", "/home/sandbox/.local/bin:/workspace/node_modules/.bin:"
+                + "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        environment.put("HOME", "/home/sandbox");
+        environment.put("LANG", "C.UTF-8");
+        environment.put("TMPDIR", "/tmp");
+        environment.put("MAVEN_CONFIG", "/home/sandbox/.m2");
+        environment.put("GRADLE_USER_HOME", "/home/sandbox/.gradle");
+        environment.put("NPM_CONFIG_CACHE", "/home/sandbox/.npm");
+        environment.put("PIP_CACHE_DIR", "/home/sandbox/.cache/pip");
+        environment.put("PYTHONPYCACHEPREFIX", "/tmp/pycache");
+        environment.put("CARGO_HOME", "/home/sandbox/.cargo");
+        environment.put("RUSTUP_HOME", "/home/sandbox/.rustup");
+        environment.put("GOPATH", "/home/sandbox/go");
+        environment.put("GOCACHE", "/home/sandbox/.cache/go-build");
+        environment.put("GOMODCACHE", "/home/sandbox/go/pkg/mod");
+        environment.put("POWERSHELL_TELEMETRY_OPTOUT", "1");
+        environment.put("DOTNET_CLI_HOME", "/tmp/dotnet");
+        environment.put("NUGET_PACKAGES", "/home/sandbox/.nuget/packages");
+        environment.put("XDG_CACHE_HOME", "/tmp/cache");
+        environment.put("XDG_CONFIG_HOME", "/tmp/config");
+        environment.put("XDG_DATA_HOME", "/tmp/data");
+        return Map.copyOf(environment);
     }
 
     private static Thread drainer(java.io.InputStream input, OutputStream output, String name) {
