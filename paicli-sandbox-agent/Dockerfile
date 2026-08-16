@@ -1,8 +1,8 @@
-FROM eclipse-temurin:17-jdk AS java-runtime
+FROM mcr.microsoft.com/openjdk/jdk:17-ubuntu AS java-runtime
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0
 
-COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
+COPY --from=java-runtime /usr/lib/jvm/msopenjdk-17 /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 ENV HOME=/home/sandbox

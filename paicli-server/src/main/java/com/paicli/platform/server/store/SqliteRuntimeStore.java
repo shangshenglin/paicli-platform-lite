@@ -238,6 +238,9 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "duration_ms", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "retry_count", "INTEGER NOT NULL DEFAULT 0");
             SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "local_model", "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "reusable_prefix_tokens",
+                    "INTEGER NOT NULL DEFAULT 0");
+            SqliteSchemaMigrator.ensureColumn(connection, "model_usage", "ttft_ms", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("CREATE TABLE IF NOT EXISTS model_attempts (" +
                     "id TEXT PRIMARY KEY,run_id TEXT NOT NULL,provider TEXT NOT NULL,model_name TEXT NOT NULL," +
                     "attempt_ordinal INTEGER NOT NULL,status TEXT NOT NULL,http_status INTEGER,error TEXT," +
@@ -3342,10 +3345,18 @@ public class SqliteRuntimeStore {
     public void recordModelUsage(String runId, String provider, String modelName, int estimatedInputTokens,
                                  int inputTokens, int outputTokens, int cachedInputTokens,
                                  long durationMs, int retryCount, boolean localModel, String reservationKey) {
+        recordModelUsage(runId, provider, modelName, estimatedInputTokens, inputTokens, outputTokens,
+                cachedInputTokens, durationMs, retryCount, localModel, reservationKey, 0, 0);
+    }
+
+    public void recordModelUsage(String runId, String provider, String modelName, int estimatedInputTokens,
+                                 int inputTokens, int outputTokens, int cachedInputTokens,
+                                 long durationMs, int retryCount, boolean localModel, String reservationKey,
+                                 int reusablePrefixTokens, long ttftMs) {
         try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
                 "INSERT INTO model_usage(run_id,provider,estimated_input_tokens,input_tokens," +
-                        "output_tokens,cached_input_tokens,model_name,duration_ms,retry_count,local_model,created_at) " +
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?)")) {
+                        "output_tokens,cached_input_tokens,model_name,duration_ms,retry_count,local_model," +
+                        "reusable_prefix_tokens,ttft_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             connection.setAutoCommit(false);
             ps.setString(1, runId);
             ps.setString(2, provider == null ? "unknown" : provider);
@@ -3357,7 +3368,9 @@ public class SqliteRuntimeStore {
             ps.setLong(8, Math.max(0, durationMs));
             ps.setInt(9, Math.max(0, retryCount));
             ps.setInt(10, localModel ? 1 : 0);
-            ps.setString(11, Instant.now().toString());
+            ps.setInt(11, Math.max(0, Math.min(reusablePrefixTokens, Math.max(0, estimatedInputTokens))));
+            ps.setLong(12, Math.max(0, ttftMs));
+            ps.setString(13, Instant.now().toString());
             ps.executeUpdate();
             if (reservationKey != null && !reservationKey.isBlank()) {
                 try (PreparedStatement release = connection.prepareStatement(

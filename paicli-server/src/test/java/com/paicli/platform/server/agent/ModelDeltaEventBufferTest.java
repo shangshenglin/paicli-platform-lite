@@ -23,9 +23,10 @@ class ModelDeltaEventBufferTest {
         var session = store.createSession("delta-buffer");
         var run = store.createRun(session.id(), "hello");
 
-        try (var buffer = new ModelDeltaEventBuffer(store, new ObjectMapper(), run.id())) {
+        try (var buffer = new ModelDeltaEventBuffer(store, new ObjectMapper(), run.id(), System.nanoTime())) {
             for (int index = 0; index < 100; index++) buffer.onContentDelta("字");
             for (int index = 0; index < 100; index++) buffer.onReasoningDelta("想");
+            assertThat(buffer.timeToFirstTokenMs()).isPositive();
         }
 
         var events = store.events(run.id(), 0);

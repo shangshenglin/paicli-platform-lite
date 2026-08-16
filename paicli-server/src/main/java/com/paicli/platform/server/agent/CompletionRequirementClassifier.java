@@ -2,6 +2,7 @@ package com.paicli.platform.server.agent;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * Conservative classifier for Root Run natural-language task requirements. Only
@@ -11,6 +12,10 @@ import java.util.Locale;
  * completion) outrank it and cannot be silently downgraded by the model.
  */
 public final class CompletionRequirementClassifier {
+    private static final Pattern CLAUSE_BOUNDARY = Pattern.compile("[，。；！？\\n\\r,.!?;]+");
+    private static final List<String> NEGATION_MARKERS = List.of(
+            "不要", "不得", "无需", "不需要", "不必", "禁止", "避免", "不能",
+            "do not", "don't", "must not", "without", "never");
     private static final List<String> MUTATION_POSITIVE = List.of(
             "修改", "实现", "修复", "新增", "添加", "删除", "更新", "重构", "替换", "调整",
             "改成", "改为", "编写", "创建", "补丁", "实现功能", "加个字段", "加字段",
@@ -39,11 +44,21 @@ public final class CompletionRequirementClassifier {
     public static Requirements classify(String task) {
         if (task == null || task.isBlank()) return new Requirements(false, false);
         String value = " " + task.trim().toLowerCase(Locale.ROOT) + " ";
-        boolean mutation = !containsAny(value, MUTATION_NEGATIVE)
-                && containsAny(value, MUTATION_POSITIVE);
-        boolean test = !containsAny(value, TEST_NEGATIVE)
-                && containsAny(value, TEST_POSITIVE);
+        String affirmative = affirmativeClauses(value);
+        boolean mutation = !containsAny(affirmative, MUTATION_NEGATIVE)
+                && containsAny(affirmative, MUTATION_POSITIVE);
+        boolean test = !containsAny(affirmative, TEST_NEGATIVE)
+                && containsAny(affirmative, TEST_POSITIVE);
         return new Requirements(mutation, test);
+    }
+
+    private static String affirmativeClauses(String value) {
+        StringBuilder result = new StringBuilder();
+        for (String clause : CLAUSE_BOUNDARY.split(value)) {
+            if (clause.isBlank() || containsAny(clause, NEGATION_MARKERS)) continue;
+            result.append(' ').append(clause);
+        }
+        return result.toString();
     }
 
     private static boolean containsAny(String value, List<String> tokens) {

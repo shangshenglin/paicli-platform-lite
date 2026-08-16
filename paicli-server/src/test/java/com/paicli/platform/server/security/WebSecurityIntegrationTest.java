@@ -151,6 +151,8 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "renderCollaborationBoard")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "if (!cases.some(value => value.enabled))")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "conciseTaskName")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "primeRunEventCursor")))

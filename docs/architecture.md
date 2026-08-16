@@ -58,7 +58,7 @@ PaiCLI Server
 
 - 任务模板把 Prompt、模型方案、附件要求和工具权限保存到项目级或全局配置；提交前在 Server 端解析 `${repository}`、`${outputFormat}` 等变量。内置 `/review`、`/summarize`、`/research` 快捷入口，Console 草稿按 Session 自动保存。内置 Agent Profile 使用 `template_key + template_version` 治理：读取专家目录时，旧版本绑定项升级到当前提示词和最小工具集，但保留模型、思考档位、Shell 与启用状态，避免历史宽白名单长期展开无关 MCP Schema。模板、模型方案、定时任务和通知均通过一次性结构化表单创建，避免连续弹窗导致上下文丢失或半途取消。
 - 模型方案保存用途、端点、模型、后备模型、上下文上限、输出上限和单价。项目可设置默认方案；每个 Run 固化所用方案，失败重试可切到后备方案，本地模型允许不配置 API Key。
-- `model_usage` 记录模型名、输入/输出 Token、缓存命中、耗时、重试和本地模型标志。预算策略按项目限制日/月 Token、日/月费用与最大并发，提交前提供上下文、输出和费用风险估算。
+- `model_usage` 记录模型名、输入/输出 Token、缓存命中、Context Manifest 可复用前缀 Token、首个 content/reasoning delta 的 TTFT、总耗时、重试和本地模型标志。用量聚合按窗口计算 cache hit、reusable prefix、uncached input、平均 TTFT 与费用/成功 Run；预算策略仍按项目限制日/月 Token、日/月费用与最大并发。
 - Run 队列按优先级领取，并在项目最大并发约束下进行公平调度；Console 可调整优先级、批量取消、重新排队，并查看当前状态、耗时和重试次数。效率工作台对终态 Run、Memory、Artifact 和持久化审批策略提供批量永久删除：单批 ID 先完整校验，再在 SQLite 单事务中删除；任一缺失 ID、非终态 Run，或目标 Run 的关联委派树仍有活跃执行，都会回滚整批。Run 删除显式清理运行记录及其消息、ToolCall、Approval、Event、模型用量、委派关系和 Artifact 元数据，并在提交后清理不再共享的 workspace、Artifact 与绑定附件文件；Artifact 独立批删同步清理对象存储文件。
 - 定时任务通过下拉框引用当前项目已保存模板，支持一次性、每日、每周和 Cron，并按周期动态收集时间字段；Cron 的首次与后续执行均按服务端系统时区计算。任务可独立持久化模型方案，以及执行专家或执行小队（二选一）；调度时模型优先级为任务显式选择、执行专家模型、模板模型、服务端默认。小队会固化 Leader 与成员策略为协作 Run 和可恢复计划。调度器创建普通 Session/Run，因此继续复用审批、审计、预算、恢复和通知链路。
 - 完成通知支持浏览器通知，以及由 Server 读取环境变量密钥的 Webhook、邮件网关或企业 IM 网关，事件覆盖完成、失败、等待审批和预算不足。
@@ -70,7 +70,7 @@ PaiCLI Server
 
 评测层不实现第二套 Agent Loop。`evaluation_suites` 和 `evaluation_cases` 保存项目级输入、工具/回答约束、资源上限与通过阈值；启动 Execution 后，每个 Case/Trial 创建隐藏的内部 Session 和普通 Run，因此继续复用现有队列、模型方案、ToolCall 持久化、审批、Event、Audit、Artifact 和恢复边界。Execution 可选持久化 `agent_team_id`：未选择时保持单 Agent 基线，选择后使用团队 Leader 创建 Trial Run，并把成员、并发、深度和 Reviewer/Runner 要求固化为 Collaboration Policy。内部评测 Run 不参与自动 Memory 提取，避免测试内容污染长期记忆。危险工具仍创建持久化 Approval；评测报告暴露待审批项供人工单次允许或拒绝，不为追求自动化而扩大权限。
 
-`EvaluationService` 在读取报告时同步终态 Trial，并从 Run、Message、ToolCall 和 ModelUsage 构建结构化评分快照。Case 的 `maxTokens` 明确定义为输出 Token，报告同时保留输入、输出和总 Token；工具数、输出 Token、耗时上限属于硬门禁，避免“超预算扣 10 分后仍刚好达到阈值”。Execution 只有在全部 Trial 达到阈值且通过资源门禁时通过；运行中报告保持可刷新，不阻塞 Worker 等待。
+`EvaluationService` 在读取报告时同步终态 Trial，并从 Run、Message、ToolCall 和 ModelUsage 构建结构化评分快照。Case 的 `maxTokens` 明确定义为输出 Token，报告同时保留输入、输出和总 Token；必需工具只接受 `COMPLETED` ToolCall，必需/禁止工具、回答规则以及工具数、输出 Token、耗时上限都属于硬门禁，避免失败调用或“扣分后刚好达到阈值”被误判通过。Execution 只有在全部 Trial 达到阈值且通过规则/资源门禁时通过；运行中报告保持可刷新，不阻塞 Worker 等待。
 
 Case 分为 `RULE` 与 `REPOSITORY`。`RULE` 保持原有工具/回答/资源确定性评分；`REPOSITORY` 借鉴 SWE-bench 的执行式方法，只使用私有 fixture。`data/evaluation-fixtures/{fixtureRef}/workspace` 是固定缺陷快照，`hidden` 是模型不可见的 Grader 文件源。启动 Trial 前，`RepositoryEvaluationService` 校验覆盖 `workspace` 与 `hidden` 的目录级 SHA-256，在 Run 入队前复制公开工作区到唯一 workspace owner，并把 fixture 摘要、Grader Spec 与 Patch Policy 冻结到 `evaluation_trials.case_snapshot_json`；评分前再次复核摘要，因此 Case 后续编辑或 fixture 中途漂移都不能静默改变正在执行或历史 Trial。
 
@@ -80,9 +80,9 @@ Case 分为 `RULE` 与 `REPOSITORY`。`RULE` 保持原有工具/回答/资源确
 
 `evaluation_baselines` 只接受已通过 Trial，保存人工确认的来源 Run、最终回答、工具名称序列、Token 口径、耗时和 Trial Grader 详情。新基线使用输出 Token；迁移前基线以 `TOTAL` 标记并继续按总 Token 比较。`RULE` 继续检查关键工具保留；`REPOSITORY` 不要求重复相同工具路径，而是比较 resolved，并分别显示输出 Token 150% 与耗时 200% 回归线。基线不持久化为新的模型上下文，也不把原始 reasoning 作为严格相等条件；这避免模型升级时因合法路径变化产生大量伪回归。
 
-版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
+版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。`RULE` Trial 启动前由 `RuleEvaluationFixtureService` 在唯一 workspace owner 下生成确定性 README、AGENTS 和 tests 说明文件，不复制宿主仓库、不携带密钥；依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
 
-评测中心从效率工作台中抽离为首页一级入口。宽屏使用“套件/报告”双栏布局，套件用例默认折叠，两栏各自限高滚动；窄屏降级为上下两块独立滚动区域。这样套件、Case 和 Trial 增长时不会形成一条无限延长的单列页面。
+评测中心从效率工作台中抽离为首页一级入口。宽屏使用“套件/报告”双栏布局，套件用例默认折叠，两栏各自限高滚动；窄屏降级为上下两块独立滚动区域。这样套件、Case 和 Trial 增长时不会形成一条无限延长的单列页面。没有启用 Case 的套件在 Console 中显示“先启用用例”；点击只展开案例与前置条件提示，不创建无 Trial 的 Execution，后端仍保留同一非空校验作为 API 边界。
 
 ## Plan Runtime 基础
 
@@ -231,9 +231,11 @@ base/safety/agent Prompt
 
 验证缓存效果时必须使用新版本部署后的增量 `cachedInputTokens / inputTokens`，不能直接用历史累计比率。模型切换、工具白名单变化、项目规则变化、摘要重写和供应商最小可缓存前缀仍会造成合理失效；供应商不支持或未开启 Prompt Cache 时，结构优化不会凭空产生缓存命中。
 
+`model_usage.reusable_prefix_tokens` 来自调用前的 Context Manifest，分母使用同一窗口的 `estimated_input_tokens`；`ttft_ms` 从模型请求开始计时，到首个非空 content/reasoning delta 为止。非流式或没有 delta 的 Provider 记录为 0，并从平均 TTFT 的 SQL 分母排除。`uncachedInputTokens=max(input-cached,0)`；成功任务成本以窗口内估算费用除以 `COMPLETED` Run 数，不能把失败 Run 从费用分子中剔除。
+
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 41：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34 增加根任务级协作工作区归并与交付证据门禁，35 增加轻量 WorkingPlan，36 增加 Run 反思，37 增加任务摘要/交付清单/验收快照，38 增加 ExpertThread 专家线程与线程-Run 绑定，39 增加私有仓库 fixture/grader、不可变 Trial Case 快照和 Baseline Grader 详情，40 增加完成合同、结构化工具证据和 Deferred 外部工具调用，41 补偿关联协作会话遗漏的续作 Run。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 42：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–41 覆盖协作工作区、WorkingPlan、反思、交付清单、ExpertThread、仓库评测、完成合同和续作 Run 修复；42 增加 Context 可复用前缀与模型 TTFT 用量列。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 
@@ -244,7 +246,8 @@ Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。W
 RAG、历史会话检索、Skill、联网、MCP 和 Multi-Agent 委派都通过普通 ToolCall 进入统一管线，不可绕过持久化、审批、顺序执行、Event/SSE、Audit 和 Artifact 边界。
 
 - Skill 只从受控全局/项目目录发现，稳定排序并按需加载；Git 导入先预检文件与权限声明，再暂存并校验符号链接、文件数和字符预算，不执行仓库代码。生命周期元数据和单级回滚备份均留在受控 Skill 根目录。
-- RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构，BM25 与真实 Embedding 独立排序后以 RRF 融合、去重和限额。检索时会生成轻量 Query Plan，识别代码路径、符号、排障、决策和架构类查询；SearchHit 返回 citation、文档版本、BM25 分、检索策略和命中原因，便于 UI 解释和后续排序调参。
+- RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构。BM25 与 Embedding 独立排序后以 RRF 形成最多 30 个候选；确定性 reranker 再综合 query term coverage、标题/正文短语、BM25、向量和 RRF 分数选 Top-K，随后去重并施加单文档限额。SearchHit 额外返回 rerank 分与实际策略。
+- `RetrievalEvaluationService` 对最多 200 个带 relevant citation、可选 answer citation 的 Case 顺序执行 BM25、Embedding、RRF、RRF+Rerank 四种消融，统一输出 Recall@5/10、MRR、nDCG@10、Top-5 citation precision 与 answer citation grounding coverage。评测只读 Knowledge 索引，不写反馈、不调用生成模型；同一标注集可重复运行并用于提交前后对比。
 - `session_search` 只在 Agent 调用时检索当前项目的用户可见历史消息，排除当前 Run，并按会话生成抽取式摘要。
 - 联网默认关闭；启用时必须提供可访问的 SearXNG-compatible 搜索端点。`web_search` 将端点连接/超时转换为含脱敏端点和 `PAICLI_WEB_SEARCH_URL` 的操作性错误，并可通过 `PAICLI_WEB_SEARCH_ENGINES` 将固定引擎集合透传给 SearXNG，规避默认聚合集合中被限流、验证码或超时的引擎；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
 - MCP Header 只能直接填写非敏感值或引用 `env:VARIABLE_NAME`，真实密钥不写入配置也不回显；Schema、参数和响应都有预算，连续失败触发短时熔断；全部 MCP 工具强制审批。

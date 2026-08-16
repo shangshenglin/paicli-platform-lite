@@ -3380,10 +3380,11 @@ async function loadEvaluations() {
     groups.forEach(({suite, cases, executions}) => {
       const block = element('div', 'evaluation-suite-block');
       const latest = executions[0];
-      const summary = `${cases.filter(value => value.enabled).length}/${cases.length} 个启用用例 · 默认 ${suite.defaultTrials} Trial · ${suite.passThreshold} 分通过${latest ? ` · 最近 ${latest.status}${latest.averageScore == null ? '' : ` ${latest.averageScore.toFixed(1)} 分`}` : ''}`;
+      const enabledCaseCount = cases.filter(value => value.enabled).length;
+      const summary = `${enabledCaseCount}/${cases.length} 个启用用例 · 默认 ${suite.defaultTrials} Trial · ${suite.passThreshold} 分通过${latest ? ` · 最近 ${latest.status}${latest.averageScore == null ? '' : ` ${latest.averageScore.toFixed(1)} 分`}` : ''}`;
       const item = workbenchItem(suite.name, `${suite.description || '未填写说明'} · ${summary}`);
       actionButton(item, '新建用例', () => openEvaluationCaseDialog(suite), true);
-      actionButton(item, '运行', () => startEvaluation(suite));
+      actionButton(item, enabledCaseCount ? '运行' : '先启用用例', () => startEvaluation(suite, cases, block));
       if (latest) actionButton(item, '查看报告', () => loadEvaluationReport(latest.id));
       actionButton(item, '删除', async () => {
         if (!confirm(`删除评测套件“${suite.name}”？`)) return;
@@ -3529,7 +3530,13 @@ async function submitEvaluationCase(event) {
   finally { $('saveEvaluationCase').disabled = false; }
 }
 
-async function startEvaluation(suite) {
+async function startEvaluation(suite, cases = [], block = null) {
+  if (!cases.some(value => value.enabled)) {
+    const caseList = block?.querySelector('.evaluation-case-list');
+    if (caseList) caseList.open = true;
+    showNotice('该套件没有启用用例。请先展开用例并启用已满足前置条件的案例。', true);
+    return;
+  }
   const teamId = $('evaluationAgentTeam')?.value || '';
   const team = state.agentTeams.find(value => value.id === teamId);
   if (!confirm(`运行“${suite.name}”？每个启用用例将执行 ${suite.defaultTrials} 次${team ? `，执行者为团队“${team.name}”` : ''}。`)) return;
@@ -3718,9 +3725,15 @@ function renderUsage(value) {
   const tokens = value.inputTokens + value.outputTokens;
   const labels = [
     ['调用', value.calls.toLocaleString()], ['Token', tokens.toLocaleString()],
-    ['缓存命中', value.cachedTokens.toLocaleString()], ['平均响应', `${Math.round(value.averageDurationMs)} ms`],
+    ['缓存命中', value.cachedTokens.toLocaleString()],
+    ['Cache Hit', `${(value.cacheHitRatio * 100).toFixed(1)}%`],
+    ['Reusable Prefix', `${(value.reusablePrefixRatio * 100).toFixed(1)}%`],
+    ['平均 Uncached Input', Math.round(value.averageUncachedInputTokens).toLocaleString()],
+    ['TTFT', `${Math.round(value.averageTtftMs)} ms`],
+    ['平均响应', `${Math.round(value.averageDurationMs)} ms`],
     ['失败率', `${(value.failureRate * 100).toFixed(1)}%`], ['重试', value.retries.toLocaleString()],
-    ['估算成本', `$${value.estimatedCost.toFixed(4)}`]
+    ['估算成本', `$${value.estimatedCost.toFixed(4)}`],
+    ['Cost / Success', `$${value.tokenCostPerSuccessfulRun.toFixed(4)}`]
   ];
   const tokenRatio = budget.monthlyTokens ? tokens / budget.monthlyTokens : 0;
   const costRatio = budget.monthlyCost ? value.estimatedCost / budget.monthlyCost : 0;

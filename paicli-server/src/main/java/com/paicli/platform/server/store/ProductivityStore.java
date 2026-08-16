@@ -423,8 +423,12 @@ public class ProductivityStore {
         String sql="SELECT COUNT(u.id) calls,COUNT(DISTINCT r.id) runs,"+
                 "COALESCE(SUM(CASE WHEN u.input_tokens>0 THEN u.input_tokens ELSE u.estimated_input_tokens END),0) input_tokens,"+
                 "COALESCE(SUM(u.output_tokens),0) output_tokens,COALESCE(SUM(u.cached_input_tokens),0) cached_tokens,"+
-                "COALESCE(AVG(u.duration_ms),0) avg_duration,COALESCE(SUM(u.retry_count),0) retries,"+
+                "COALESCE(SUM(u.reusable_prefix_tokens),0) reusable_prefix_tokens,"+
+                "COALESCE(SUM(u.estimated_input_tokens),0) estimated_input_tokens,"+
+                "COALESCE(AVG(u.duration_ms),0) avg_duration,COALESCE(AVG(NULLIF(u.ttft_ms,0)),0) avg_ttft,"+
+                "COALESCE(SUM(u.retry_count),0) retries,"+
                 "COUNT(DISTINCT CASE WHEN r.status='FAILED' THEN r.id END) failed,"+
+                "COUNT(DISTINCT CASE WHEN r.status='COMPLETED' THEN r.id END) succeeded,"+
                 "COALESCE(SUM(CASE WHEN COALESCE(u.local_model,0)=1 THEN 0 ELSE " +
                 "((CASE WHEN u.input_tokens>0 THEN u.input_tokens ELSE u.estimated_input_tokens END)/1000000.0*COALESCE(p.input_price,0)+"+
                 "u.output_tokens/1000000.0*COALESCE(p.output_price,0)) END),0) cost " +
@@ -434,9 +438,17 @@ public class ProductivityStore {
         try(Connection c=open();PreparedStatement ps=c.prepareStatement(sql)){
             ps.setString(1,key);ps.setString(2,since.toString());try(ResultSet rs=ps.executeQuery()){
                 rs.next();long calls=rs.getLong("calls"),runs=rs.getLong("runs"),failed=rs.getLong("failed");
-                return new UsageSummary(key,days,calls,rs.getLong("input_tokens"),rs.getLong("output_tokens"),
-                        rs.getLong("cached_tokens"),rs.getLong("avg_duration"),runs==0?0:(double)failed/runs,
-                        rs.getLong("retries"),rs.getDouble("cost"),budget(key),usageBreakdown(key,since));
+                long input=rs.getLong("input_tokens"),cached=rs.getLong("cached_tokens");
+                long reusable=rs.getLong("reusable_prefix_tokens"),estimated=rs.getLong("estimated_input_tokens");
+                long succeeded=rs.getLong("succeeded");double cost=rs.getDouble("cost");
+                return new UsageSummary(key,days,calls,input,rs.getLong("output_tokens"),cached,
+                        Math.max(0,input-cached),input==0?0:(double)cached/input,
+                        estimated==0?0:(double)reusable/estimated,
+                        calls==0?0:(double)input/calls,calls==0?0:(double)cached/calls,
+                        calls==0?0:(double)Math.max(0,input-cached)/calls,
+                        rs.getLong("avg_duration"),rs.getLong("avg_ttft"),runs==0?0:(double)failed/runs,
+                        rs.getLong("retries"),cost,succeeded==0?0:cost/succeeded,
+                        budget(key),usageBreakdown(key,since));
             }
         }catch(SQLException e){throw failure("read usage summary",e);}
     }
@@ -686,7 +698,10 @@ public class ProductivityStore {
     public record BudgetPolicy(String projectKey,long dailyTokens,long monthlyTokens,double dailyCost,double monthlyCost,
                                double warnRatio,int maxConcurrentRuns,Instant updatedAt){}
     public record UsageSummary(String projectKey,int days,long calls,long inputTokens,long outputTokens,long cachedTokens,
-                               long averageDurationMs,double failureRate,long retries,double estimatedCost,BudgetPolicy budget,
+                               long uncachedInputTokens,double cacheHitRatio,double reusablePrefixRatio,
+                               double averageInputTokens,double averageCachedTokens,double averageUncachedInputTokens,
+                               long averageDurationMs,long averageTtftMs,double failureRate,long retries,
+                               double estimatedCost,double tokenCostPerSuccessfulRun,BudgetPolicy budget,
                                List<UsageBreakdown> breakdown){}
     public record UsageBreakdown(String date,String sessionId,String sessionTitle,String model,long calls,long inputTokens,
                                  long outputTokens,long cachedTokens,long averageDurationMs,long retries,double estimatedCost,

@@ -1,6 +1,40 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-16
+
+### 官方评测集首轮实跑校准
+
+- 变更：首轮 8 套、36 Case、49 Trial 实跑后继续消除 5 个题面歧义：历史检索限定一次精确查询，Skill 加载限定工具范围，Plan 限定 600 汉字，上下文预算与写冲突说明明确禁止工具；避免把额外探索或“修改文件”字样误当成案例目标。
+- 思路：只校准案例意图与预算，不降低硬门禁、不掩盖模型真实越界，也不把 Local Sandbox 未提供 `execute_command` 的能力缺口伪装为通过。数据库、REST/OpenAPI、Sandbox 实现、阶段范围和产品站点能力未变化，因此迁移、OpenAPI、`docs/docker-sandbox.md`、`docs/phases.md` 与 `paicli-site/README.md` 不适用。
+- 验证：代码层 `mvnw.cmd clean test` 共 326 项通过，校准后 `EvaluationStarterPackServiceTest` 再次通过；最终对 8 套、36 Case、51 Trial 完整复跑，51 个 Trial 全部进入终态，其中 47 通过、4 未通过，套件 4/8 通过。未通过项均保留真实证据：Local Sandbox 拒绝 `execute_command`，以及 3 个模型回答超过案例输出 Token 上限；没有用放宽硬门禁伪造全绿。
+
+### 官方评测集 1.4.0 与误判修复
+
+- 变更：Completion Requirement 根任务分类先按标点切分并剥离“不要/不得/无需/禁止/do not”等否定子句，再从肯定子句识别修改与测试意图；修复固定文本回答被误判 `MUTATION_REQUIRED`、诚实说明未运行测试被误判 `TEST_REQUIRED`、禁止创建子 Agent 的查询被误判为修改任务。
+- 变更：所有 `RULE` Trial 使用唯一工作区并注入无密钥的确定性 README、AGENTS、tests 说明夹具；评分时必需工具只有 `COMPLETED` ToolCall 才算命中，必需/禁止工具与回答规则升级为硬门禁。Starter Pack 升级至 `1.4.0`，为工具发现、AgentTeam 和 Harness Loop 收紧提示词并校准调用、输出与模型延迟预算，移除“禁止静默覆盖”被裸字符串反向误杀的规则。
+- 思路：本次修复区分模型真实越界、运行时合同误分类、空工作区 Fixture 和机械字符串评分，不通过简单降低阈值制造通过。Starter Pack 安装仍不覆盖已有同名 Case；本机历史官方 Case 会在重跑前通过现有 Case API 显式同步到 1.4.0，保留启用状态。数据库、OpenAPI 路径、Sandbox 隔离实现、阶段范围和产品站点能力未变，因此迁移、OpenAPI、`docs/docker-sandbox.md`、`docs/phases.md` 与 `paicli-site/README.md` 不适用；运行语义已同步 README 与 `docs/architecture.md`。
+- 验证：Completion Contract、Evaluation Service、Starter Pack 与 RULE Fixture 定向测试共 16 个通过；继续执行全量测试、构建、本机重启与 8 套件回归，最终结果在本工作项后续补记。
+
+### 评测中心默认停用套件启动修复
+
+- 变更：评测中心按套件实际启用 Case 数决定运行入口；官方 05 Plan、06 Context/Memory、07 AgentTeam 等默认停用套件显示“先启用用例”，点击会展开案例列表并说明需先满足前置条件，不再提交必然返回 `evaluation suite has no enabled cases` 的空 Execution。
+- 思路：高级案例默认停用是隔离缺失 Plan、Memory 或 AgentTeam 前置条件的安全边界，不能为消除报错而全量强制启用；前端增加预检和引导，后端继续拒绝无启用 Case 的直接 API 请求。数据库、OpenAPI、Sandbox、阶段范围与产品站点均未改变，因此迁移、Store 测试、OpenAPI、`docs/docker-sandbox.md`、`docs/phases.md` 和 `paicli-site/README.md` 不适用；运行说明与架构边界已同步 README 和 `docs/architecture.md`。
+- 验证：`node --check paicli-server/src/main/resources/static/app.js` 与 `git diff --check` 通过，新增静态资源集成断言覆盖无启用 Case 的前端预检。定向 Spring 集成测试第一次完成 13 个用例并仅因中文响应字符集使新增文案断言失败；改为 ASCII 逻辑断言后，重跑受正在运行服务锁定 `paicli-server/target/paicli-server-0.6.0-SNAPSHOT.jar` 影响，无法完成干净构建，故不声明 Maven 测试通过。
+
+### Context Cache 效率量化与 RAG Rerank/Eval
+
+- 变更：`model_usage` 通过兼容迁移 42 增加 `reusable_prefix_tokens` 与 `ttft_ms`；模型调用把 Context Manifest 的稳定前缀和首个流式 delta 延迟持久化。Usage API 与 Console 新增 Reusable Prefix Ratio、Cache Hit Ratio、平均 input/cached/uncached input、TTFT 和估算费用/成功 Run。
+- 变更：Knowledge 检索从直接 RRF Top-K 调整为 BM25/Embedding → RRF Top-30 → 确定性跨特征 reranker → Top-K；SearchHit 返回 rerank 分。新增 `POST /v1/knowledge/documents/evaluations`，用调用方标注 Case 对 BM25、Embedding、RRF、RRF+Rerank 做消融并计算 Recall@5/10、MRR、nDCG@10、Citation Hit Rate、Answer Grounded Rate。
+- 思路：本工作项只纵向优化 Context 缓存效率的可测量性和 RAG 排序/评测，不增加 Plan、Memory、Multi-Agent、Sandbox 或部署功能。TTFT 缺少流式 delta 时记 0 且不进入平均；Reranker 使用本地确定性特征，保证单机环境无需新增密钥也能复现，未来可在同一候选边界替换为模型实现。产品站点能力与 Sandbox 行为未变，`paicli-site/README.md`、`docs/docker-sandbox.md` 不适用；API、运行架构和阶段完成度已同步 README/OpenAPI 注解、`docs/architecture.md` 与 `docs/phases.md`。
+- 验证：`mvnw -pl paicli-server -am -DskipTests compile` 通过；Context、Knowledge、Retrieval Eval、SQLite 定向测试共 58 个通过；`git diff --check` 通过。全量 `mvnw test` 两次均在运行中出现既有测试/依赖 `.class` 消失导致的 `NoClassDefFoundError`（新增测试已通过、无断言失败）；`mvnw clean test` 又因当前运行中的 Java 服务占用 `paicli-server-0.6.0-SNAPSHOT.jar` 无法完成 clean，未擅自停止用户进程。未运行真实模型/业务标注集，因此不声明缓存命中或 Recall 的虚构提升数字。
+
 ## 2026-08-14
+
+### Docker Hub Java 基础镜像连接故障规避
+
+- 变更：Sandbox Java 17 构建阶段从 Docker Hub 的 `eclipse-temurin:17-jdk` 切换为 Microsoft Container Registry 的 `mcr.microsoft.com/openjdk/jdk:17-ubuntu`，并复制其 `/usr/lib/jvm/msopenjdk-17` 到既有的运行时 `JAVA_HOME`。
+- 思路：构建失败发生于连接 `auth.docker.io` 获取 OAuth token，尚未执行 Dockerfile 指令；Sandbox 同时依赖 Microsoft .NET SDK，统一到同一 Registry 可移除不必要的 Docker Hub 认证路径，同时保持完整 JDK。
+- 验证：在禁网临时容器中确认 Microsoft OpenJDK 镜像的 Java 17 路径；随后重建 `paicli-sandbox-agent:0.6.0` 并验证 Java、Maven、Node/npm、Python/venv、Git、PowerShell、curl 和 unzip。API、数据库 Schema、阶段范围与产品站点未变，OpenAPI、架构和阶段文档不适用。
 
 ### Docker Sandbox apt 下载可靠性
 

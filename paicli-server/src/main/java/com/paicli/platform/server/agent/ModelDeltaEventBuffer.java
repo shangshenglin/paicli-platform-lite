@@ -14,14 +14,17 @@ final class ModelDeltaEventBuffer implements ModelStreamListener, AutoCloseable 
     private final SqliteRuntimeStore store;
     private final ObjectMapper mapper;
     private final String runId;
+    private final long modelStartedNanos;
     private final StringBuilder content = new StringBuilder();
     private final StringBuilder reasoning = new StringBuilder();
     private long lastFlushNanos = System.nanoTime();
+    private long firstDeltaNanos;
 
-    ModelDeltaEventBuffer(SqliteRuntimeStore store, ObjectMapper mapper, String runId) {
+    ModelDeltaEventBuffer(SqliteRuntimeStore store, ObjectMapper mapper, String runId, long modelStartedNanos) {
         this.store = store;
         this.mapper = mapper;
         this.runId = runId;
+        this.modelStartedNanos = modelStartedNanos;
     }
 
     @Override
@@ -36,6 +39,7 @@ final class ModelDeltaEventBuffer implements ModelStreamListener, AutoCloseable 
 
     private void append(StringBuilder target, String delta) {
         if (delta == null || delta.isEmpty()) return;
+        if (firstDeltaNanos == 0) firstDeltaNanos = System.nanoTime();
         target.append(delta);
         long now = System.nanoTime();
         if (content.length() + reasoning.length() >= MAX_BUFFER_CHARS
@@ -46,6 +50,10 @@ final class ModelDeltaEventBuffer implements ModelStreamListener, AutoCloseable 
 
     synchronized void flush() {
         flushAt(System.nanoTime());
+    }
+
+    synchronized long timeToFirstTokenMs() {
+        return firstDeltaNanos == 0 ? 0 : Math.max(1, (firstDeltaNanos - modelStartedNanos) / 1_000_000);
     }
 
     private void flushAt(long now) {

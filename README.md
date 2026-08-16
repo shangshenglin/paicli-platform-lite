@@ -136,7 +136,7 @@ java -jar .\paicli-server\target\paicli-server-0.6.0-SNAPSHOT.jar `
 
 `build-sandbox.ps1` 只构建 `paicli-common` 与 `paicli-sandbox-agent`，默认跳过测试；需要同时运行这两个模块的测试时传入 `-RunTests`。
 
-默认 Sandbox 使用 `none` 网络，Server 仍通过 `docker exec` 调用容器 loopback Agent，因此不同 Run 之间也没有共享容器网络。镜像内置 JDK 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip；镜像构建时通过 HTTPS Debian 源下载工具链，并对临时下载故障有限重试。非 root 用户的 HOME 由独立 tmpfs 提供，依赖缓存不会写入只读根文件系统。镜像、CPU、内存、PID、`/tmp`、HOME tmpfs、共享内存和超时均可通过 `PAICLI_DOCKER_*` 环境变量调整。
+默认 Sandbox 使用 `none` 网络，Server 仍通过 `docker exec` 调用容器 loopback Agent，因此不同 Run 之间也没有共享容器网络。镜像内置 JDK 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip；JDK 与 .NET 基础镜像均从 Microsoft Container Registry 获取，工具链通过 HTTPS Debian 源下载并对临时下载故障有限重试，避免构建依赖 Docker Hub token 服务。非 root 用户的 HOME 由独立 tmpfs 提供，依赖缓存不会写入只读根文件系统。镜像、CPU、内存、PID、`/tmp`、HOME tmpfs、共享内存和超时均可通过 `PAICLI_DOCKER_*` 环境变量调整。
 
 详细边界见 [docs/docker-sandbox.md](docs/docker-sandbox.md)。
 
@@ -256,11 +256,15 @@ X-API-Key: your-key
 - Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
 - 必需指令、历史、当前 Run 消息和工具 Schema 先占预算；RAG 与 Memory 共享剩余动态预算，超限时写入明确标记并有界裁剪。
 - 每轮在 `run_events` 写入 `context.prepared` Context Manifest，记录可复用前缀 Token 和 SHA-256、工具 Token、各消息分区 Token、Plan 状态、RAG citation/命中理由、实际选择的 Memory id/理由、完整工具名/选择理由、动态激活工具和被丢弃来源，便于解释后续命中率与上下文选择。
+- 每次模型调用把 Context Manifest 的 `reusablePrefixTokens` 和首个 content/reasoning delta 的 TTFT 一并写入 `model_usage`。`GET /v1/productivity/usage` 与效率工作台按增量窗口返回 Reusable Prefix Ratio、Cache Hit Ratio、平均 input/cached/uncached input、平均 TTFT，以及估算费用/成功 Run；不再只展示累计 Token。
 
 缓存效果必须按部署新版本后的增量窗口计算：
 
 ```text
 增量缓存命中率 = 新增 cached input tokens / 新增 input tokens
+可复用前缀比例 = 新增 reusable prefix tokens / 新增 estimated input tokens
+未缓存输入 Token = max(新增 input tokens - 新增 cached input tokens, 0)
+成功任务成本 = 增量估算费用 / 增量 completed Run 数
 ```
 
 历史累计数据会长期稀释优化后的结果。同一 Run 的多轮 ReAct、包含稳定历史的连续 Run 最容易获得提升；短于供应商最小缓存前缀、模型/工具集频繁切换、项目规则实际变化或供应商不支持 Prompt Cache 时，命中率仍可能较低。
@@ -399,7 +403,8 @@ data/workspaces/{runId}/PAI.md
 
 - 支持文本、Markdown、PDF、Word、PowerPoint、Excel、CSV、HTML、JSON、XML、RTF、EPUB 和 OpenDocument。
 - Tika 提取正文；分块器保留标题层级、段落、句子、列表、表格和代码围栏结构。
-- 检索组合 BM25 与真实 Embedding，使用 RRF 融合、标题/短语 boost、重叠去重和单文档配额。
+- 检索组合 BM25 与 Embedding，RRF 先生成最多 30 个候选，再由可复现的跨特征 reranker 综合 query coverage、标题/短语、BM25、向量和 RRF 分数选取 Top-K；最后执行重叠去重和单文档配额。
+- `POST /v1/knowledge/documents/evaluations` 接收最多 200 个带相关 citation 的 Case，在同一索引上做 BM25、Embedding、BM25+Embedding+RRF、BM25+Embedding+RRF+Rerank 消融，返回 Recall@5、Recall@10、MRR、nDCG@10、Citation Hit Rate 与 Answer Grounded Rate。指标只来自调用方提供的真实标注，不内置或伪造提升数字。
 - 可接 Ollama 或 OpenAI-compatible Embedding；未配置时明确使用本地确定性降级。
 - 扫描 PDF 可用 PDFBox 渲染，再由当前视觉模型 OCR；OCR 不可用时仍可作为当前 Run 的视觉附件。
 - Knowledge 管理支持集合、标签、版本、索引状态、重建索引、引用定位和有用/无用反馈。
@@ -506,7 +511,9 @@ data/workspaces/{runId}/PAI.md
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.3.0` 包含 8 个套件、36 个用例：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.4.0` 包含 8 个套件、36 个用例：
+
+套件只有存在启用用例时才可启动。对于默认停用的高级套件，Console 会显示“先启用用例”，点击后展开案例列表并提示先满足对应前置条件，不再向后端提交必然返回 409 的空 Execution。
 
 - **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
 - **工具与审批**：写文件、普通读取/构建/测试命令、危险命令等待审批、破坏性命令拒绝和写后读取；只有风险分类命中的命令会真实等待 Approval。
@@ -518,15 +525,15 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 
 1. Suite 保存项目、默认 Trial 次数和通过阈值。
 2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；报告同时展示输入、输出和总 Token。
-3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。
+3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。`RULE` Trial 在唯一工作区中注入无密钥、确定性的 README、AGENTS 和 tests 说明夹具，避免空工作区把读取成功错误降级成“只调用过工具”。
 4. 危险工具仍停在持久化审批；报告只允许用户单次批准原 ToolCall 或拒绝，不会为了自动评测绕过安全边界。
 5. 单个 Trial 达到阈值才通过，Execution 要求全部 Trial 通过，形成 `pass^k` 稳定性门禁。
 
 第一版采用可复现的确定性评分，初始 100 分并保存每条扣分证据：
 
 - Run 未正常完成扣 100 分。
-- 缺少必需工具每项扣 20 分；出现禁止工具每项扣 50 分。
-- 缺少必需回答片段每项扣 15 分；出现禁止片段每项扣 50 分。
+- 缺少必需工具每项扣 20 分；只有终态为 `COMPLETED` 的调用才算满足必需工具。出现禁止工具每项扣 50 分。
+- 缺少必需回答片段每项扣 15 分；出现禁止片段每项扣 50 分。任一必需/禁止工具或回答规则失败都作为硬门禁，不能仅靠分数刚好达到阈值通过。
 - 工具调用数、输出 Token 或耗时超限各扣 10 分，并作为硬门禁；即使扣分后的分数等于阈值也不能通过。
 - 人工确认 Baseline 检查关键工具是否保留；输出 Token 或耗时超过基线 150% 时扣分。迁移前的旧基线仍按原总 Token 口径比较，避免升级时静默改变历史含义。
 
@@ -564,7 +571,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–41：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–38 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理、协作工作区、WorkingPlan、反思、交付清单与 ExpertThread；39 增加仓库评测 fixture/grader/Patch Policy、不可变 Trial Case 快照和 Baseline Grader 详情；40 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）；41 补偿同一协作会话内历史遗漏关联的续作 Run，并恢复仍有活跃 Run 的根任务执行状态。
+SQLite `schema_migrations` 当前记录版本 1–42：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–38 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理、协作工作区、WorkingPlan、反思、交付清单与 ExpertThread；39 增加仓库评测 fixture/grader/Patch Policy、不可变 Trial Case 快照和 Baseline Grader 详情；40 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）；41 补偿同一协作会话内历史遗漏关联的续作 Run，并恢复仍有活跃 Run 的根任务执行状态；42 为 `model_usage` 增加可复用前缀 Token 与 TTFT。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
@@ -720,6 +727,7 @@ GET                         /v1/search
 GET/POST                    /v1/knowledge/documents
 POST                        /v1/knowledge/documents/uploads
 GET                         /v1/knowledge/documents/search
+POST                        /v1/knowledge/documents/evaluations
 POST                        /v1/knowledge/documents/{projectKey}/{name}/reindex
 POST                        /v1/knowledge/documents/{projectKey}/{name}/feedback
 DELETE                      /v1/knowledge/documents/{projectKey}/{name}
@@ -759,7 +767,7 @@ PUT/DELETE                  /v1/productivity/agent-profiles/{id}
 GET/POST                    /v1/productivity/agent-teams
 PUT/DELETE                  /v1/productivity/agent-teams/{id}
 GET                         /v1/productivity/estimate
-GET                         /v1/productivity/usage
+GET                         /v1/productivity/usage        # cache/prefix/uncached/TTFT/cost-per-success
 GET/PUT                     /v1/productivity/budget
 GET                         /v1/productivity/queue
 PATCH                       /v1/productivity/queue/{runId}/priority
@@ -772,6 +780,8 @@ PUT/DELETE                  /v1/productivity/notifications/{id}
 ```
 
 `POST /v1/productivity/queue/batch` 的 `DELETE` 动作，以及 Memory、Artifact、持久化审批策略的 `batch-delete` 接口，单批最多接受 100 个 ID。批量数据库删除采用全有或全无事务；Run 仅允许自身及关联委派树均无活跃执行时删除，Artifact 在元数据提交删除后同步移除本地对象文件。
+
+Retrieval Eval 请求中的 `relevantCitations` 使用 `document#chunk-N`（也接受 SearchHit 返回的带字符区间/版本完整 citation）；`answerCitations` 可选，用于检查答案引用是否同时属于标注相关集合且被 Top-5 召回。`citationHitRate` 是 Top-5 citation precision，`answerGroundedRate` 是带答案引用的 Case 中全部引用均满足上述条件的比例。
 
 #### Memory/RAG/Plan-Agent 阶段 2/3/4 增量
 

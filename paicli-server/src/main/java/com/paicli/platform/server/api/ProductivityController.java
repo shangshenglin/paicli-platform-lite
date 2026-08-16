@@ -9,6 +9,7 @@ import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ToolRouter;
 import jakarta.validation.Valid;
+import io.swagger.v3.oas.annotations.Operation;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.web.bind.annotation.*;
@@ -229,6 +230,7 @@ public class ProductivityController {
     }
 
     @GetMapping("/usage")
+    @Operation(summary = "Read token, prompt-cache, reusable-prefix, TTFT and successful-run cost metrics")
     public ProductivityStore.UsageSummary usage(@RequestParam(defaultValue="default") String projectKey,
                                                 @RequestParam(defaultValue="30") int days) {
         return productivity.usage(projectKey,days);

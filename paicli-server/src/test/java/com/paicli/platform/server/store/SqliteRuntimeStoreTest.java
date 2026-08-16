@@ -92,7 +92,7 @@ class SqliteRuntimeStoreTest {
             while (versions.next()) values.add(versions.getInt(1));
             assertThat(values).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41);
+                    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42);
         }
     }
 
@@ -848,7 +848,7 @@ class SqliteRuntimeStoreTest {
         var run = store.createRun(session.id(), "review", "disabled", "", List.of(),
                 profile.id(), agent.id(), 5, 0, agent.executionShell());
         store.recordModelUsage(run.id(), "openai-compatible", profile.model(), 100, 90, 10, 20,
-                250, 1, true);
+                250, 1, true, null, 60, 75);
         var schedule = productivity.saveSchedule(null, "project-p1", "日报", template.id(),
                 "DAILY", "", "{}", profile.id(), agent.id(), null, true,
                 java.time.Instant.now().minusSeconds(1));
@@ -879,7 +879,14 @@ class SqliteRuntimeStoreTest {
             assertThat(value.calls()).isEqualTo(1);
             assertThat(value.inputTokens()).isEqualTo(90);
             assertThat(value.cachedTokens()).isEqualTo(20);
+            assertThat(value.uncachedInputTokens()).isEqualTo(70);
+            assertThat(value.cacheHitRatio()).isEqualTo(20d / 90d);
+            assertThat(value.reusablePrefixRatio()).isEqualTo(.6);
+            assertThat(value.averageInputTokens()).isEqualTo(90);
+            assertThat(value.averageCachedTokens()).isEqualTo(20);
+            assertThat(value.averageUncachedInputTokens()).isEqualTo(70);
             assertThat(value.averageDurationMs()).isEqualTo(250);
+            assertThat(value.averageTtftMs()).isEqualTo(75);
             assertThat(value.estimatedCost()).isZero();
             assertThat(value.breakdown()).singleElement().satisfies(row -> {
                 assertThat(row.sessionId()).isEqualTo(session.id());

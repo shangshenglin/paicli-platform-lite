@@ -40,6 +40,31 @@ class CompletionRequirementClassifierTest {
     }
 
     @Test
+    void negatedMutationAndTestPhrasesDoNotStrengthenTextOnlyTasks() {
+        var marker = CompletionRequirementClassifier.classify(
+                "不要调用任何工具，只回复 PAICLI_EVAL_OK，不要添加其他内容。");
+        assertThat(marker.requiresWorkspaceChange()).isFalse();
+        assertThat(marker.requiresTests()).isFalse();
+
+        var honest = CompletionRequirementClassifier.classify(
+                "不要声称任何测试通过，除非真的执行测试命令并看到通过结果。");
+        assertThat(honest.requiresWorkspaceChange()).isFalse();
+        assertThat(honest.requiresTests()).isFalse();
+
+        var delegated = CompletionRequirementClassifier.classify(
+                "调用 list_agents 查看状态，不要创建或取消子 Agent。");
+        assertThat(delegated.requiresWorkspaceChange()).isFalse();
+    }
+
+    @Test
+    void laterAffirmativeClauseStillDetectsRequiredMutation() {
+        var requirements = CompletionRequirementClassifier.classify(
+                "不要只解释，修改 config.yml 并运行测试。");
+        assertThat(requirements.requiresWorkspaceChange()).isTrue();
+        assertThat(requirements.requiresTests()).isTrue();
+    }
+
+    @Test
     void blankFallsBackToTextOnly() {
         var blank = CompletionRequirementClassifier.classify("");
         assertThat(blank.requiresWorkspaceChange()).isFalse();

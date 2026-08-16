@@ -3,6 +3,7 @@ package com.paicli.platform.server.evaluation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.common.RunStatus;
+import com.paicli.platform.common.ToolCallStatus;
 import com.paicli.platform.server.domain.MessageRecord;
 import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
@@ -33,21 +34,30 @@ public class EvaluationService {
     private final ProductivityStore productivity;
     private final ObjectMapper mapper;
     private final RepositoryEvaluationService repositoryEvaluations;
+    private final RuleEvaluationFixtureService ruleFixtures;
 
     @Autowired
     public EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
                              ProductivityStore productivity, ObjectMapper mapper,
-                             RepositoryEvaluationService repositoryEvaluations) {
+                             RepositoryEvaluationService repositoryEvaluations,
+                             RuleEvaluationFixtureService ruleFixtures) {
         this.evaluations = evaluations;
         this.runtime = runtime;
         this.productivity = productivity;
         this.mapper = mapper;
         this.repositoryEvaluations = repositoryEvaluations;
+        this.ruleFixtures = ruleFixtures;
+    }
+
+    EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
+                      ProductivityStore productivity, ObjectMapper mapper,
+                      RepositoryEvaluationService repositoryEvaluations) {
+        this(evaluations, runtime, productivity, mapper, repositoryEvaluations, null);
     }
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
                       ProductivityStore productivity, ObjectMapper mapper) {
-        this(evaluations, runtime, productivity, mapper, null);
+        this(evaluations, runtime, productivity, mapper, null, null);
     }
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime, ObjectMapper mapper) {
@@ -83,17 +93,22 @@ public class EvaluationService {
             for (var evaluationCase : cases) {
                 for (int ordinal = 1; ordinal <= trials; ordinal++) {
                     RepositoryEvaluationService.PreparedRepositoryCase prepared = null;
+                    String workspaceOwner = evaluationWorkspaceOwner(
+                            execution.id(), evaluationCase.id(), ordinal);
                     if ("REPOSITORY".equals(evaluationCase.caseType())) {
                         if (repositoryEvaluations == null) {
                             throw new IllegalStateException("repository evaluation is unavailable");
                         }
-                        prepared = repositoryEvaluations.prepare(evaluationCase,
-                                evaluationWorkspaceOwner(execution.id(), evaluationCase.id(), ordinal));
+                        prepared = repositoryEvaluations.prepare(evaluationCase, workspaceOwner);
+                    } else if (ruleFixtures != null) {
+                        ruleFixtures.prepare(workspaceOwner);
+                    } else {
+                        workspaceOwner = null;
                     }
                     var session = runtime.createInternalSession(
                             "Evaluation: " + suite.name() + " / " + evaluationCase.name() + " #" + ordinal,
                             suite.projectKey());
-                    var run = prepared == null
+                    var run = workspaceOwner == null
                             ? leader == null
                                 ? runtime.createRun(session.id(), evaluationCase.prompt(), "auto", "", List.of(),
                                 modelProfileId, 0, 0)
@@ -104,7 +119,7 @@ public class EvaluationService {
                                 leader == null ? "auto" : leader.thinkingMode(),
                                 leader == null ? "" : leader.reasoningEffort(), List.of(), modelProfileId,
                                 leader == null ? null : leader.id(), 0, 0,
-                                leader == null ? "bash" : leader.executionShell(), prepared.workspaceOwner());
+                                leader == null ? "bash" : leader.executionShell(), workspaceOwner);
                     if (team != null) {
                         runtime.saveCollaborationPolicy(run.id(), true, "MEDIUM", "MEDIUM",
                                 team.memberAgentProfileIdsJson(), team.maxExperts(), team.maxDepth(),
@@ -212,6 +227,7 @@ public class EvaluationService {
         long duration = duration(run);
         List<Map<String, Object>> checks = new ArrayList<>();
         int score = 100;
+        boolean ruleRequirementsPassed = true;
         boolean resourceLimitsPassed = true;
 
         if (run.status() != RunStatus.COMPLETED) {
@@ -219,19 +235,24 @@ public class EvaluationService {
                     "run ended as " + run.status());
         }
         for (String required : readList(evaluationCase.requiredToolsJson())) {
-            boolean ok = toolNames.contains(required);
+            boolean ok = tools.stream().anyMatch(tool -> required.equals(tool.toolName())
+                    && tool.status() == ToolCallStatus.COMPLETED);
+            ruleRequirementsPassed &= ok;
             score = deduct(score, ok ? 0 : 20, checks, "required_tool", ok, required);
         }
         for (String forbidden : readList(evaluationCase.forbiddenToolsJson())) {
             boolean ok = !toolNames.contains(forbidden);
+            ruleRequirementsPassed &= ok;
             score = deduct(score, ok ? 0 : 50, checks, "forbidden_tool", ok, forbidden);
         }
         for (String required : readList(evaluationCase.requiredResponseJson())) {
             boolean ok = response.contains(required);
+            ruleRequirementsPassed &= ok;
             score = deduct(score, ok ? 0 : 15, checks, "required_response", ok, required);
         }
         for (String forbidden : readList(evaluationCase.forbiddenResponseJson())) {
             boolean ok = !response.contains(forbidden);
+            ruleRequirementsPassed &= ok;
             score = deduct(score, ok ? 0 : 50, checks, "forbidden_response", ok, forbidden);
         }
         if (evaluationCase.maxToolCalls() > 0) {
@@ -272,9 +293,10 @@ public class EvaluationService {
                         duration + " / " + baseline.durationMs());
             }
         }
-        boolean passed = score >= execution.passThreshold() && resourceLimitsPassed;
+        boolean passed = score >= execution.passThreshold() && ruleRequirementsPassed && resourceLimitsPassed;
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("summary", passed ? "passed" : "failed");
+        details.put("ruleRequirementsPassed", ruleRequirementsPassed);
         details.put("runStatus", run.status().name()); details.put("toolNames", toolNames);
         details.put("toolCalls", tools.size()); addTokenDetails(details, usage); details.put("durationMs", duration);
         details.put("response", response); details.put("checks", checks);

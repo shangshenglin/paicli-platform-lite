@@ -37,7 +37,7 @@ Server 重启后，带 `paicli.platform.managed=true` 标签的容器视为孤�
 - 根文件系统只读，仅 Run workspace、`/tmp` tmpfs 和 `/home/sandbox` tmpfs 可写。HOME tmpfs 只对 UID/GID `10001` 开放，容量独立可配，随 Run 回收。
 - 容器显式使用非 root UID/GID `10001`，并启用 Docker init 回收孤儿进程。
 - 镜像内置 Java 17、Maven、Node.js/npm、Python 3/pip/venv、Git、Bash、PowerShell Core、curl 和 unzip。
-- 构建阶段通过 HTTPS Debian 源安装工具链；`apt` 请求有 20 秒超时和 3 次有限重试，降低 HTTP 响应截断或短暂网络波动导致构建失败的概率。
+- JDK 与 .NET 基础镜像均来自 Microsoft Container Registry，避免构建依赖 Docker Hub OAuth token 服务；构建阶段通过 HTTPS Debian 源安装工具链，`apt` 请求有 20 秒超时和 3 次有限重试，降低 HTTP 响应截断或短暂网络波动导致构建失败的概率。
 - 启用 `no-new-privileges` 和 `cap-drop ALL`。
 - CPU、内存、PID、`/tmp`、HOME tmpfs 和共享内存限额可配置。
 - 只把当前 Run 工作区以读写方式挂载。

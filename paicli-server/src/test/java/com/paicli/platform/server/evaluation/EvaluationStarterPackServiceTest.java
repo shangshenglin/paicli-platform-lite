@@ -24,7 +24,7 @@ class EvaluationStarterPackServiceTest {
         EvaluationStarterPackService service = new EvaluationStarterPackService(store, new ObjectMapper());
 
         var first = service.install("starter-project");
-        assertThat(first.version()).isEqualTo("1.3.0");
+        assertThat(first.version()).isEqualTo("1.4.0");
         assertThat(first.totalSuites()).isEqualTo(8);
         assertThat(first.totalCases()).isEqualTo(36);
         assertThat(first.installedSuites()).isEqualTo(8);

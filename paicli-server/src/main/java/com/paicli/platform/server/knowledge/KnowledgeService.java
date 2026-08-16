@@ -137,7 +137,13 @@ public class KnowledgeService {
     }
 
     public List<SearchHit> search(String projectKey, String query, int requestedLimit) {
-        return searchInternal(projectKey, query, requestedLimit, Set.of(), false);
+        return searchInternal(projectKey, query, requestedLimit, Set.of(), false, RetrievalStrategy.HYBRID_RERANK);
+    }
+
+    public List<SearchHit> searchForEvaluation(String projectKey, String query, int requestedLimit,
+                                               RetrievalStrategy strategy) {
+        return searchInternal(projectKey, query, requestedLimit, Set.of(), false,
+                strategy == null ? RetrievalStrategy.HYBRID_RERANK : strategy);
     }
 
     public List<SearchHit> searchAttached(String projectKey, List<String> documentNames,
@@ -145,17 +151,18 @@ public class KnowledgeService {
         Set<String> allowed = documentNames == null ? Set.of() : documentNames.stream()
                 .filter(name -> name != null && !name.isBlank()).collect(java.util.stream.Collectors.toSet());
         if (allowed.isEmpty()) return List.of();
-        return searchInternal(projectKey, query, requestedLimit, allowed, true);
+        return searchInternal(projectKey, query, requestedLimit, allowed, true, RetrievalStrategy.HYBRID_RERANK);
     }
 
     private List<SearchHit> searchInternal(String projectKey, String query, int requestedLimit,
-                                           Set<String> allowedDocuments, boolean fallbackSampling) {
+                                           Set<String> allowedDocuments, boolean fallbackSampling,
+                                           RetrievalStrategy strategy) {
         String normalized = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         if (normalized.isBlank()) throw new IllegalArgumentException("query must not be blank");
         int limit = Math.max(1, Math.min(requestedLimit, 10));
         QueryPlan plan = plan(query);
         Set<String> terms = terms(plan.queryText());
-        float[] queryVector = embeddings.semanticEnabled() ? embeddings.embed(normalized) : new float[0];
+        float[] queryVector = embeddings.embed(normalized);
         List<Candidate> candidates = new ArrayList<>();
         int consumed = 0;
         for (KnowledgeDocument document : list(projectKey).stream()
@@ -168,7 +175,7 @@ public class KnowledgeService {
                 for (int index = 0; index < indexed.chunks().size(); index++) {
                     IndexedChunk chunk = indexed.chunks().get(index);
                     consumed += chunk.text().length();
-                    double similarity = embeddings.semanticEnabled() ? cosine(queryVector, chunk.embedding()) : 0;
+                    double similarity = cosine(queryVector, chunk.embedding());
                     List<String> tokens = tokens((chunk.heading() == null ? "" : chunk.heading() + " ") + chunk.text());
                     Map<String, Integer> frequencies = new HashMap<>();
                     for (String token : tokens) frequencies.merge(token, 1, Integer::sum);
@@ -193,9 +200,11 @@ public class KnowledgeService {
                         + phraseBoost(candidate, normalized) + exactBoost(candidate, plan))).toList();
 
         Map<Integer, Double> fused = new HashMap<>();
-        rank(scored.stream().filter(candidate -> candidate.lexical() > 0)
-                .sorted(Comparator.comparingDouble(Candidate::lexical).reversed()).toList(), fused, 1.0);
-        if (embeddings.semanticEnabled()) {
+        if (strategy != RetrievalStrategy.EMBEDDING) {
+            rank(scored.stream().filter(candidate -> candidate.lexical() > 0)
+                    .sorted(Comparator.comparingDouble(Candidate::lexical).reversed()).toList(), fused, 1.0);
+        }
+        if (strategy != RetrievalStrategy.BM25) {
             rank(scored.stream().filter(candidate -> candidate.similarity() >= 0.05)
                     .sorted(Comparator.comparingDouble(Candidate::similarity).reversed()).toList(), fused, 1.15);
         }
@@ -206,17 +215,32 @@ public class KnowledgeService {
                                         + Math.max(0, candidate.similarity()) * 0.02)
                 .reversed().thenComparing(Candidate::document).thenComparingInt(Candidate::chunk))
                 .toList();
+        Map<Integer, Double> rerankScores = new HashMap<>();
+        if (strategy == RetrievalStrategy.HYBRID_RERANK) {
+            ranked.stream().limit(30).forEach(candidate -> rerankScores.put(candidate.id(),
+                    KnowledgeReranker.score(plan.queryText(), candidate.heading(), candidate.text(),
+                            candidate.lexical(), candidate.similarity(), fused.getOrDefault(candidate.id(), 0.0))));
+            ranked = ranked.stream().limit(30)
+                    .sorted(Comparator.<Candidate>comparingDouble(candidate -> rerankScores.get(candidate.id()))
+                            .reversed().thenComparing(candidate -> fused.getOrDefault(candidate.id(), 0.0),
+                                    Comparator.reverseOrder())
+                            .thenComparing(Candidate::document).thenComparingInt(Candidate::chunk))
+                    .toList();
+        }
         if (ranked.isEmpty() && fallbackSampling) ranked = sampleAcrossDocuments(scored, limit);
         List<SearchHit> hits = new ArrayList<>();
         Map<String, Integer> perDocument = new HashMap<>();
         for (Candidate candidate : ranked) {
             if (perDocument.getOrDefault(candidate.document(), 0) >= 3 || overlapsExisting(hits, candidate)) continue;
-            double finalScore = fused.getOrDefault(candidate.id(), 0.0) + candidate.lexical() * 0.01
+            double rerankScore = rerankScores.getOrDefault(candidate.id(), 0.0);
+            double finalScore = strategy == RetrievalStrategy.HYBRID_RERANK ? rerankScore
+                    : fused.getOrDefault(candidate.id(), 0.0) + candidate.lexical() * 0.01
                     + Math.max(0, candidate.similarity()) * 0.02;
             String citation = candidate.document() + "#chunk-" + candidate.chunk() + ":"
                     + candidate.start() + "-" + candidate.end() + "@v" + candidate.documentVersion();
             hits.add(new SearchHit(candidate.document(), candidate.chunk(), candidate.start(), candidate.end(),
-                    finalScore, candidate.similarity(), candidate.lexical(), plan.queryType(), plan.strategy(),
+                    finalScore, candidate.similarity(), candidate.lexical(), rerankScore,
+                    plan.queryType(), strategy.label(),
                     citation, candidate.documentVersion(), false,
                     matchReasons(candidate, plan, normalized), candidate.heading(), candidate.kind(), candidate.text()));
             perDocument.merge(candidate.document(), 1, Integer::sum);
@@ -493,6 +517,16 @@ public class KnowledgeService {
                                 String text, float[] embedding) { }
     public record QueryPlan(String queryType, String queryText, List<String> paths, List<String> symbols,
                             String strategy) { }
+    public enum RetrievalStrategy {
+        BM25("BM25"),
+        EMBEDDING("EMBEDDING"),
+        HYBRID_RRF("BM25+EMBEDDING+RRF"),
+        HYBRID_RERANK("BM25+EMBEDDING+RRF+RERANK");
+
+        private final String label;
+        RetrievalStrategy(String label) { this.label = label; }
+        public String label() { return label; }
+    }
     private record Candidate(int id, String document, int chunk, int start, int end,
                              String heading, String kind, String text, Map<String, Integer> frequencies,
                              int length, double similarity, double lexical, int documentVersion) {
@@ -505,7 +539,8 @@ public class KnowledgeService {
                                     int version, String collection, List<String> tags, String indexStatus,
                                     int indexedChunks, String embeddingProvider) { }
     public record SearchHit(String document, int chunk, int startChar, int endChar,
-                            double score, double vectorSimilarity, double lexicalScore, String queryType,
+                            double score, double vectorSimilarity, double lexicalScore, double rerankScore,
+                            String queryType,
                             String retrievalStrategy, String citation, int documentVersion, boolean stale,
                             List<String> matchReasons, String heading, String kind, String content) { }
 }

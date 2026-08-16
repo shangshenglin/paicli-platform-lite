@@ -187,15 +187,18 @@ public class RunProcessor {
             }
             ModelResponse response;
             long modelStarted = System.nanoTime();
-            try (ModelDeltaEventBuffer deltas = new ModelDeltaEventBuffer(store, mapper, run.id())) {
+            long ttftMs;
+            try (ModelDeltaEventBuffer deltas = new ModelDeltaEventBuffer(store, mapper, run.id(), modelStarted)) {
                 response = modelClient.complete(run.id(), request, deltas);
+                ttftMs = deltas.timeToFirstTokenMs();
             }
             long durationMs = (System.nanoTime() - modelStarted) / 1_000_000;
             String modelName = profile.map(ProductivityStore.ModelProfile::model).orElse(modelClient.name());
             store.recordModelUsage(run.id(), modelClient.name(), modelName, context.estimatedInputTokens(),
                     response.usage().inputTokens(), response.usage().outputTokens(),
                     response.usage().cachedInputTokens(), durationMs, store.modelRetriesForRun(run.id()),
-                    profile.map(ProductivityStore.ModelProfile::localModel).orElse(false), budgetReservationKey);
+                    profile.map(ProductivityStore.ModelProfile::localModel).orElse(false), budgetReservationKey,
+                    context.manifest().reusablePrefixTokens(), ttftMs);
             budgetReservationKey = null;
             if (store.findRun(run.id()).map(RunRecord::status).orElse(RunStatus.CANCELED) == RunStatus.CANCELED) return;
 

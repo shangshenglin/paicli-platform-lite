@@ -1,6 +1,8 @@
 package com.paicli.platform.server.api;
 
 import com.paicli.platform.server.knowledge.KnowledgeService;
+import com.paicli.platform.server.knowledge.RetrievalEvaluationService;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -27,12 +29,14 @@ public class KnowledgeController {
     private final KnowledgeService knowledge;
     private final DocumentTextExtractor extractor;
     private final SqliteRuntimeStore store;
+    private final RetrievalEvaluationService evaluations;
 
     public KnowledgeController(KnowledgeService knowledge, DocumentTextExtractor extractor,
-                               SqliteRuntimeStore store) {
+                               SqliteRuntimeStore store, RetrievalEvaluationService evaluations) {
         this.knowledge = knowledge;
         this.extractor = extractor;
         this.store = store;
+        this.evaluations = evaluations;
     }
 
     @PostMapping
@@ -62,6 +66,13 @@ public class KnowledgeController {
                                                    @RequestParam String query,
                                                    @RequestParam(defaultValue = "10") int limit) {
         return knowledge.search(projectKey, query, limit);
+    }
+
+    @PostMapping("/evaluations")
+    @Operation(summary = "Run BM25, embedding, RRF and rerank retrieval ablations over labelled cases")
+    public RetrievalEvaluationService.EvaluationReport evaluate(
+            @RequestBody RetrievalEvaluationService.EvaluationRequest request) {
+        return evaluations.evaluate(request);
     }
 
     @PostMapping("/{projectKey}/{name}/reindex")

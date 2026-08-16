@@ -251,6 +251,8 @@
 - [x] Memory 增加近重复 canonical key 归并、中相似冲突队列、L1 陈旧标记、类型召回配额和 `memory_usage_feedback`；Run 终态与 Plan 验证结果形成排序反馈。
 - [x] 官方 Starter Pack `1.1.0` 增加 Context/Memory Harness 六个专项 Case，并补来源冻结、source span、反馈、结构化摘要、按需工具和预算回归测试。
 - [x] Prompt Cache 模板改为稳定前缀、历史前置、动态尾部和持久化 Run 时间；README/架构文档单列命中率优化、增量指标口径及合理失效条件。
+- [x] `model_usage` 持久化 Context 可复用前缀 Token 与 TTFT；Usage API/Console 量化 Reusable Prefix Ratio、Cache Hit Ratio、平均 input/cached/uncached input、TTFT 和费用/成功 Run；Schema 迁移 42。
+- [x] RAG 改为 BM25/Embedding → RRF Top-30 → 确定性跨特征 Rerank → Top-K，并提供四策略消融评测 API，统一计算 Recall@5/10、MRR、nDCG@10、Citation Hit Rate 与 Answer Grounded Rate。
 
 - [x] 自动 Memory 仅由委派树根 Run 排队；单根 Run 至多 3 条（L1≤1、L2≤2、L3≤1），过滤协作流程噪声，拒绝空证据或仅 Assistant 证据，并按证据质量、重复和稳定性校准模型置信度；Console 支持主动新增人工 L3 长期记忆。
 

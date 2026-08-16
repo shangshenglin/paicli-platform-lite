@@ -84,12 +84,30 @@ class KnowledgeServiceTest {
         assertThat(hits.get(0)).satisfies(hit -> {
             assertThat(hit.document()).isEqualTo("PaymentService.java");
             assertThat(hit.queryType()).isEqualTo("CODE");
-            assertThat(hit.retrievalStrategy()).contains("PATH_SYMBOL");
+            assertThat(hit.retrievalStrategy()).contains("RERANK");
             assertThat(hit.citation()).contains("PaymentService.java#chunk-").contains("@v1");
             assertThat(hit.documentVersion()).isEqualTo(1);
             assertThat(hit.matchReasons()).contains("PATH_EXACT", "SYMBOL_EXACT");
             assertThat(hit.lexicalScore()).isPositive();
+            assertThat(hit.rerankScore()).isPositive();
         });
+    }
+
+    @Test
+    void supportsDeterministicRetrievalAblations() {
+        KnowledgeService service = new KnowledgeService(properties());
+        service.upsert("eval", "runtime.md", "Tool calls are persisted before execution. Recovery reuses the idempotency key.");
+        service.upsert("eval", "unrelated.md", "The console uses a bounded grid layout.");
+
+        var bm25 = service.searchForEvaluation("eval", "persisted tool call recovery", 5,
+                KnowledgeService.RetrievalStrategy.BM25);
+        var reranked = service.searchForEvaluation("eval", "persisted tool call recovery", 5,
+                KnowledgeService.RetrievalStrategy.HYBRID_RERANK);
+
+        assertThat(bm25).isNotEmpty().allSatisfy(hit -> assertThat(hit.retrievalStrategy()).isEqualTo("BM25"));
+        assertThat(reranked).isNotEmpty();
+        assertThat(reranked.get(0).document()).isEqualTo("runtime.md");
+        assertThat(reranked.get(0).rerankScore()).isPositive();
     }
 
     private PlatformProperties properties() {

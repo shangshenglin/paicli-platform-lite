@@ -134,6 +134,33 @@ class EvaluationServiceTest {
     }
 
     @Test
+    void failedToolCallDoesNotSatisfyRequiredToolRule() throws Exception {
+        PlatformProperties properties = new PlatformProperties(
+                tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        EvaluationStore evaluations = new EvaluationStore(properties);
+        EvaluationService service = new EvaluationService(evaluations, runtime, new ObjectMapper());
+        var suite = evaluations.saveSuite(null, "default", "Required tool status", "", 1, 90);
+        evaluations.saveCase(null, suite.id(), "read fixture", "read README", "[\"read_file\"]", "[]",
+                "[]", "[]", 2, 1000, 0, true);
+        var execution = service.start(suite.id(), null, 1, 90);
+        var trial = evaluations.trials(execution.id()).get(0);
+        var run = runtime.claimNextRun().orElseThrow();
+        var tool = runtime.createToolCall(run.id(), "provider-read", "read_file", "{}", run.id() + ":read");
+        runtime.failTool(tool.id(), "README missing");
+        runtime.appendAssistantMessage(run.sessionId(), run.id(), "README is missing", "");
+        runtime.completeRun(run.id());
+
+        var result = service.report(execution.id()).trials().get(0);
+
+        assertThat(result.trial().score()).isEqualTo(80);
+        assertThat(result.trial().passed()).isFalse();
+        assertThat(result.details().get("checks").toString())
+                .contains("required_tool", "passed=false", "read_file");
+    }
+
+    @Test
     void evaluatesOutputTokensAndTreatsResourceLimitsAsHardGates() throws Exception {
         PlatformProperties properties = new PlatformProperties(
                 tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
