@@ -1,6 +1,6 @@
 FROM mcr.microsoft.com/openjdk/jdk:17-ubuntu AS java-runtime
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0
+FROM mcr.microsoft.com/dotnet/sdk:9.0
 
 COPY --from=java-runtime /usr/lib/jvm/msopenjdk-17 /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
