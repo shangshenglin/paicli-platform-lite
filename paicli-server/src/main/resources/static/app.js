@@ -234,6 +234,130 @@ function element(tag, className, text) {
   return value;
 }
 
+// Frontend-only explainers: these describe the product's default strategy. Live
+// status (provider availability, selected model and limits) stays on the cards
+// already rendered by each module, so a tooltip never masquerades as runtime data.
+const moduleExplainers = {
+  'connection': {title: '连接设置', summary: 'Console 只保存本页会话的访问凭据，不保存或下发模型密钥。', facts: ['认证：X-API-Key', '存储：sessionStorage', '模型密钥：仅 Server']},
+  'approvals': {title: '持久化审批', summary: '危险操作先持久化审批，再按原工具参数执行，恢复时复用原决策。', facts: ['匹配：工具 + 完全相同参数', '执行：审批后原样复用', '策略：可撤销']},
+  'capabilities': {title: '能力管理', summary: '按项目统一管理检索、Skill 与 MCP；状态卡展示当前实际能力和健康度。', facts: ['隔离：项目级', '状态：实时加载', '来源：已配置 Provider']},
+  'skills': {title: 'Skills', summary: '模型先看到稳定排序的能力索引，匹配后才加载完整说明、模板和资源。', facts: ['发现：稳定索引', '加载：load_skill', '资源：read_skill_resource 按需读取']},
+  'knowledge': {title: '项目知识库', summary: '按标题、段落、句子、代码块和表格结构分块，再混合召回、融合和重排。', facts: ['分块：结构化', 'BM25 + Embedding', 'RRF：1.00 / 1.15', '候选：Top 30 → Rerank', 'Milvus：可选 COSINE 索引']},
+  'mcp': {title: 'MCP Server', summary: '按 Server 注册外部工具；敏感 Header 只保存环境变量引用，不回显真实值。', facts: ['凭据：env:变量名', '连接：测试后启用', '工具：按 Server 聚合']},
+  'agent-studio': {title: '专家创建', summary: 'Profile 把角色指令、模型、工具、Skill 和交付格式固定为可审计配置。', facts: ['范围：项目级', 'Leader：可分派子任务']},
+  'agent-profiles': {title: '智能体专家', summary: '每个专家使用独立提示、模型、Shell、工具与 Skill 白名单，形成可审计执行边界。', facts: ['模型：Profile 选择', '工具/Skill：白名单', '输出：交付格式约束']},
+  'agent-teams': {title: '执行小队', summary: '保存 Leader 与专家组合，协作时以小队作为可复用编排模板。', facts: ['路由：Leader 分派', '执行：可追踪子 Run', '并发：受团队/任务限制']},
+  'workbench': {title: '效率工作台', summary: '把运行、成本、自动化、记忆和审计入口集中到一个项目工作区。', facts: ['范围：当前项目', '数据：按需刷新']},
+  'global-search': {title: '全局检索', summary: '一次查询聚合会话、消息、记忆、知识与 Artifact，便于追溯上下文。', facts: ['范围：项目内', '对象：5 类工作数据']},
+  'usage': {title: '长期使用效率', summary: '按最近 30 天汇总用量、性能和预算风险，不改变实际调度策略。', facts: ['窗口：近 30 天', '指标：Token / 成本 / 延迟', '缓存：前缀复用 / 命中率']},
+  'templates': {title: '任务模板', summary: '把常用提示和变量固化为可复用入口，发送前仍可编辑。', facts: ['复用：项目级', '执行：按当前模型']},
+  'model-profiles': {title: '模型配置方案', summary: '集中管理 Provider、模型、端点、上下文、输出、重试、Fallback 与价格估算。', facts: ['实际模型：当前 Profile', '限额：运行时生效', '思考：按模型能力']},
+  'run-queue': {title: 'Run 队列', summary: '查看持久化执行及其终态记录；删除只对明确选择的终态 Run 生效。', facts: ['状态：持久化', '删除：终态可选']},
+  'schedules': {title: '定时任务', summary: '按已保存的模板和目标在设定时间触发，不绕过常规运行边界。', facts: ['输入：模板 + 变量', '触发：计划时间']},
+  'notifications': {title: '完成通知', summary: '为完成或异常事件配置通知，运行链路仍以持久化事件为准。', facts: ['来源：Run 事件', '范围：项目级']},
+  'portability': {title: 'Session 导入导出', summary: '按 Markdown、JSON 或审计包导出会话；可选隐私脱敏。', facts: ['格式：Markdown / JSON', '审计：完整包']},
+  'memory': {title: '长期记忆', summary: 'Run 完成后先创建持久化 Extraction Job，再异步提取；召回按四类信号综合排序。', facts: ['语义 55% + 词法 25%', '置信度 10% + 新鲜度 10%', 'L3：奖励 +0.20', '反馈：效果 ×0.08']},
+  'memory-wiki': {title: '记忆浏览', summary: '按 L1/L2/L3、来源、置信度和修订历史检查记忆，人工编辑是纠错边界。', facts: ['层级：L1 / L2 / L3', '来源：Run / 人工', '反馈：历史效果参与排序']},
+  'artifacts': {title: 'Artifact 工作台', summary: '集中列出 Run 生成的交付物，以所属 Run 和受控工作区作为追溯边界。', facts: ['归属：Run', '访问：受控路径']},
+  'plans': {title: 'Plan 工作台', summary: '复杂任务以持久化 DAG 调度，步骤仍复用普通 ReAct Run，并保留验证证据。', facts: ['图：Step DAG', '调度：依赖 / 资源锁', '校验：Validation Check']},
+  'policies': {title: '持久化审批策略', summary: '只复用相同工具与完全相同参数的已批准决策。', facts: ['匹配：精确参数', '安全：可随时撤销']},
+  'evaluation': {title: 'Agent 评测中心', summary: '用固定套件、Case、Trial 和历史基线比较质量，显示真实执行证据而非主观评分。', facts: ['单位：Suite / Case / Trial', '通过：阈值 + 硬规则', '证据：真实 Run']},
+  'evaluation-suites': {title: '评测套件', summary: '套件包含可开关的用例与默认 Trial 数，用于可重复回归。', facts: ['执行：真实 Run', '对比：历史基线']},
+  'evaluation-report': {title: '执行报告', summary: '报告汇总每次 Trial 的得分、规则证据与失败原因。', facts: ['证据：持久化', '结果：可回看']},
+  'collaboration': {title: '多智能体协作', summary: 'Leader 按目标、复杂度和风险决定是否分派，并汇总子任务证据。', facts: ['入口：Leader', '并发：最多专家数', '结果：子 Run 汇总']},
+  'collaboration-tasks': {title: '协作任务', summary: '任务长期存在，Agent Run 是每次可追踪的执行；最终验收由人工决定。', facts: ['任务：长期状态', '执行：可追踪 Run']},
+  'chat': {title: '普通对话', summary: '当前 Profile 决定模型和工具范围；复杂目标可转为受控 Plan。', facts: ['模型：当前 Profile', '复杂任务：Plan']}
+};
+
+function createModuleExplainer(key) {
+  const config = moduleExplainers[key];
+  if (!config) return null;
+  const wrapper = element('div', 'module-explainer');
+  wrapper.tabIndex = 0;
+  wrapper.setAttribute('aria-label', `查看“${config.title}”的策略说明`);
+  wrapper.setAttribute('aria-haspopup', 'true');
+  const card = element('span', 'module-explainer-card');
+  card.setAttribute('role', 'tooltip');
+  card.append(
+    element('strong', '', config.title),
+    element('span', 'module-explainer-summary', config.summary)
+  );
+  const facts = element('span', 'module-explainer-facts');
+  config.facts.forEach(fact => facts.append(element('span', '', fact)));
+  card.append(facts);
+  wrapper.append(card);
+  const setOpen = open => {
+    wrapper.classList.toggle('is-open', open);
+    wrapper.setAttribute('aria-expanded', String(open));
+  };
+  wrapper.setAttribute('aria-expanded', 'false');
+  wrapper.addEventListener('pointermove', event => {
+    const suppressUntil = Number(wrapper.dataset.moduleExplainerSuppressUntil || 0);
+    if (event.pointerType !== 'touch' && performance.now() >= suppressUntil) setOpen(true);
+  });
+  wrapper.addEventListener('pointerleave', () => setOpen(false));
+  wrapper.addEventListener('focus', () => setOpen(true));
+  wrapper.addEventListener('click', event => {
+    event.preventDefault();
+    setOpen(!wrapper.classList.contains('is-open'));
+  });
+  wrapper.addEventListener('focusout', () => {
+    requestAnimationFrame(() => { if (!wrapper.contains(document.activeElement)) setOpen(false); });
+  });
+  return wrapper;
+}
+
+function suppressDialogModuleExplainers(dialog) {
+  const suppressUntil = performance.now() + 350;
+  dialog.querySelectorAll('.module-explainer').forEach(wrapper => {
+    wrapper.dataset.moduleExplainerSuppressUntil = String(suppressUntil);
+    wrapper.classList.remove('is-open');
+    wrapper.setAttribute('aria-expanded', 'false');
+  });
+}
+
+document.addEventListener('toggle', event => {
+  const dialog = event.target;
+  if (!(dialog instanceof HTMLDialogElement) || !dialog.open) return;
+  requestAnimationFrame(() => suppressDialogModuleExplainers(dialog));
+}, true);
+
+const moduleExplainerTargets = [
+  ['#workbenchDialog .workbench-search-section', 'global-search'],
+  ['#usageSummary', 'usage'], ['#templateList', 'templates'], ['#profileList', 'model-profiles'],
+  ['#queueCollapse', 'run-queue'], ['#scheduleList', 'schedules'], ['#notificationList', 'notifications'],
+  ['#sessionImport', 'portability'], ['#memoryList', 'memory'], ['#memoryWikiDialog', 'memory-wiki'],
+  ['#artifactList', 'artifacts'], ['#planList', 'plans'], ['#policyList', 'policies'],
+  ['#evaluationDialog', 'evaluation'], ['.evaluation-suites-pane', 'evaluation-suites'],
+  ['.evaluation-report-pane', 'evaluation-report']
+];
+
+function tagModuleExplainerTargets() {
+  moduleExplainerTargets.forEach(([selector, key]) => {
+    document.querySelectorAll(selector).forEach(node => {
+      const container = node.matches('section, dialog') ? node : node.closest('section, dialog');
+      if (container && !container.dataset.moduleHelp) container.dataset.moduleHelp = key;
+    });
+  });
+}
+
+function hydrateModuleExplainers(root = document) {
+  tagModuleExplainerTargets();
+  root.querySelectorAll?.('[data-module-help]').forEach(container => {
+    if (container.dataset.moduleHelpAttached === 'true') return;
+    const config = moduleExplainers[container.dataset.moduleHelp];
+    if (!config) return;
+    const heading = container.querySelector(':scope > strong, :scope > .dialog-title > strong, :scope > h1, :scope > h2, :scope > h3')
+      || container.querySelector(':scope > .section-title h3, :scope > .pane-title h3, :scope > .task-workspace-toolbar h1');
+    if (!heading) return;
+    const explainer = createModuleExplainer(container.dataset.moduleHelp);
+    if (!explainer) return;
+    heading.replaceWith(explainer);
+    explainer.prepend(heading);
+    container.dataset.moduleHelpAttached = 'true';
+  });
+}
+
 function showNotice(text, error = false) {
   $('notice').textContent = 'Enter 发送，Shift + Enter 换行';
   $('notice').className = 'notice';
@@ -495,6 +619,7 @@ function renderEmpty() {
   $('stack').classList.toggle('task-stack', state.homeMode === 'tasks');
   const empty = element('div', 'empty');
   const content = element('div');
+  if (state.homeMode === 'chat') content.dataset.moduleHelp = 'chat';
   if (state.homeMode === 'tasks') content.className = 'task-home-content';
   if (state.homeMode === 'collaboration') content.append(renderHomeCollaboration());
   else if (state.homeMode === 'tasks') content.append(renderCollaborationTaskWorkspace());
@@ -546,6 +671,7 @@ const collaborationStatusNames = {
 function renderCollaborationTaskWorkspace() {
   const workspace = element('section', 'task-workspace');
   workspace.id = 'collaborationTaskWorkspace';
+  workspace.dataset.moduleHelp = 'collaboration-tasks';
   const toolbar = element('div', 'task-workspace-toolbar');
   const heading = element('div');
   heading.append(element('h1', '', '协作任务'),
@@ -1320,6 +1446,7 @@ function renderTaskExecutionLayer(detail) {
 
 function renderHomeCollaboration() {
   const panel = element('div', 'home-collaboration');
+  panel.dataset.moduleHelp = 'collaboration';
   const head = element('div', 'home-collaboration-head');
   const copy = element('div');
   copy.append(
@@ -5661,6 +5788,10 @@ document.addEventListener('keydown', event => {
 });
 
 $('workspace').classList.toggle('hide-detail', !state.detailOpen);
+hydrateModuleExplainers();
+new MutationObserver(records => {
+  if (records.some(record => record.addedNodes.length)) hydrateModuleExplainers();
+}).observe(document.body, {childList: true, subtree: true});
 clearEvents();
 renderModelControls();
 selectExecutionShell(state.executionShell);

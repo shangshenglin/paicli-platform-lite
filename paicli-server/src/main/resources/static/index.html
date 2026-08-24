@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PaiCLI</title>
-  <link rel="stylesheet" href="/app.css?v=20260804-workbench-batch-delete-1">
+  <link rel="stylesheet" href="/app.css?v=20260824-module-explainers-5">
 </head>
 <body>
 <div class="app">
@@ -89,7 +89,7 @@
     </aside>
   </section>
 </div>
-<dialog id="dialog">
+<dialog id="dialog" data-module-help="connection">
   <strong>连接设置</strong>
   <div class="hint" id="connectionHint">请输入 PaiCLI 访问密钥 PAICLI_API_KEY，不是 DeepSeek 模型密钥 PAICLI_MODEL_API_KEY。</div>
   <input id="key" type="password" autocomplete="off" placeholder="PAICLI_API_KEY">
@@ -98,16 +98,16 @@
     <button class="primary" id="save">验证并连接</button>
   </div>
 </dialog>
-<dialog id="approvalInboxDialog" class="wide-dialog audit-dialog">
+<dialog id="approvalInboxDialog" class="wide-dialog audit-dialog" data-module-help="approvals">
   <div class="dialog-title"><strong>待审批</strong><button class="secondary" id="closeApprovalInbox">关闭</button></div>
   <div class="hint">当前项目的专家与子专家审批会在这里汇总，可直接处理。</div>
   <div class="managed-list" id="approvalInboxList"></div>
 </dialog>
-<dialog id="capabilityDialog" class="wide-dialog">
+<dialog id="capabilityDialog" class="wide-dialog" data-module-help="capabilities">
   <div class="dialog-title"><strong>能力管理</strong><button class="secondary" id="closeCapabilities">关闭</button></div>
   <div class="hint" id="capabilityProject">当前项目：default</div>
   <div class="capability-status" id="capabilityStatus"></div>
-  <section class="capability-section">
+  <section class="capability-section" data-module-help="skills">
     <h3>Skills</h3>
     <p class="hint">目录会自动扫描；可粘贴仓库地址或 GitHub /tree/ Skill 目录链接。模型先看到稳定排序的索引，匹配后调用 load_skill；Skill 附带的 references、模板和脚本再通过 read_skill_resource 按需读取，不会一次性塞入上下文。</p>
     <div class="inline-form">
@@ -118,7 +118,7 @@
     </div>
     <div class="managed-list" id="skillList"></div>
   </section>
-  <section class="capability-section">
+  <section class="capability-section" data-module-help="knowledge">
     <h3>项目知识库</h3>
     <p class="hint">文档按标题层级、段落、句子、代码块和表格结构分块，建立 BM25 与向量索引并用 RRF 融合去重。它与对话 Memory 分离；每轮会自动召回，也可由模型调用 search_knowledge 深入检索。</p>
     <div class="upload-row">
@@ -127,16 +127,16 @@
     </div>
     <div class="managed-list" id="knowledgeList"></div>
   </section>
-  <section class="capability-section">
+  <section class="capability-section" data-module-help="mcp">
     <div class="section-title"><h3>MCP Server</h3><div class="managed-actions"><button class="secondary" id="addGithubMcp">GitHub 快速配置</button><button class="secondary" id="addMcp">新增</button></div></div>
     <p class="hint">敏感 Header 仅保存环境变量名，例如 <code>env:MCP_TOKEN</code>，不会保存或回显真实值。</p>
     <div class="managed-list" id="mcpList"></div>
   </section>
 </dialog>
-<dialog id="agentStudioDialog" class="wide-dialog workbench-dialog">
+<dialog id="agentStudioDialog" class="wide-dialog workbench-dialog" data-module-help="agent-studio">
   <div class="dialog-title"><strong>专家创建</strong><button class="secondary" id="closeAgentStudio">关闭</button></div>
   <div class="hint" id="agentStudioProject">当前项目：default</div>
-  <section class="capability-section productivity-overview">
+  <section class="capability-section productivity-overview" data-module-help="agent-profiles">
     <div class="section-title">
       <div><h3>智能体专家</h3><p class="hint">项目级 Profile 会约束专家指令、模型、工具、Skill 和交付格式；Leader 可以按 Profile 分派子任务。</p></div>
       <div class="managed-actions"><button class="secondary" id="installAgentStarterPack" title="只补齐缺失的内置专家；已有同名专家会保留，不覆盖你的修改">补齐专家模板</button><button class="primary" id="addAgentFromStudio">新建专家</button></div>
@@ -144,7 +144,7 @@
     <div class="capability-status" id="agentStudioSummary"></div>
     <div class="managed-list" id="agentStudioList"></div>
   </section>
-  <section class="capability-section">
+  <section class="capability-section" data-module-help="agent-teams">
     <div class="section-title">
       <div><h3>执行小队</h3><p class="hint">把 Leader 和专家组合保存为项目级小队，在协作模式中可直接套用。</p></div>
       <button class="primary" id="addAgentTeam">新建小队</button>
@@ -152,7 +152,7 @@
     <div class="managed-list" id="agentTeamList"></div>
   </section>
 </dialog>
-<dialog id="workbenchDialog" class="wide-dialog workbench-dialog">
+<dialog id="workbenchDialog" class="wide-dialog workbench-dialog" data-module-help="workbench">
   <div class="dialog-title"><strong>效率工作台</strong><button class="secondary" id="closeWorkbench">关闭</button></div>
   <div class="hint" id="workbenchProject">当前项目：default</div>
   <section class="capability-section workbench-search-section"><h3>全局检索</h3><div class="workbench-search"><input id="globalSearch" placeholder="搜索对话、消息、Memory、知识和 Artifact"><button class="primary" id="searchAll">搜索</button></div><div class="managed-list" id="searchResults"></div></section>
@@ -449,6 +449,6 @@
     <button class="primary" id="saveGroup">创建</button>
   </div>
 </dialog>
-<script src="/app.js?v=20260805-workspace-html-preview-2"></script>
+<script src="/app.js?v=20260824-module-explainers-5"></script>
 </body>
 </html>
