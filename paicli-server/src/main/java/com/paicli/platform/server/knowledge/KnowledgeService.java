@@ -35,14 +35,24 @@ public class KnowledgeService {
     private final ObjectMapper mapper;
     private final KnowledgeEmbeddingService embeddings;
     private final StructuredDocumentChunker chunker;
+    private final KnowledgeVectorStore vectorStore;
+    private final KnowledgeReranker reranker;
 
     @Autowired
     public KnowledgeService(PlatformProperties properties, ObjectMapper mapper,
-                            KnowledgeEmbeddingService embeddings, StructuredDocumentChunker chunker) {
+                            KnowledgeEmbeddingService embeddings, StructuredDocumentChunker chunker,
+                            KnowledgeVectorStore vectorStore, KnowledgeReranker reranker) {
         dataRoot = properties.dataDir().toAbsolutePath().normalize();
         this.mapper = mapper;
         this.embeddings = embeddings;
         this.chunker = chunker;
+        this.vectorStore = vectorStore;
+        this.reranker = reranker;
+    }
+
+    public KnowledgeService(PlatformProperties properties, ObjectMapper mapper,
+                            KnowledgeEmbeddingService embeddings, StructuredDocumentChunker chunker) {
+        this(properties, mapper, embeddings, chunker, KnowledgeVectorStore.disabled(), KnowledgeReranker.disabled());
     }
 
     public KnowledgeService(PlatformProperties properties) {
@@ -52,6 +62,8 @@ public class KnowledgeService {
                 new com.paicli.platform.server.config.RagProperties("local", "", "", "", 25 * 1024 * 1024),
                 this.mapper);
         this.chunker = new StructuredDocumentChunker();
+        this.vectorStore = KnowledgeVectorStore.disabled();
+        this.reranker = KnowledgeReranker.disabled();
     }
 
     public KnowledgeDocument upsert(String projectKey, String name, String content) {
@@ -118,6 +130,11 @@ public class KnowledgeService {
     public boolean delete(String projectKey, String name) {
         try {
             Path document = documentPath(projectKey, name);
+            if (Files.isRegularFile(indexPath(document))) {
+                IndexedDocument index = mapper.readValue(indexPath(document).toFile(), IndexedDocument.class);
+                int dimensions = index.chunks().isEmpty() ? 0 : index.chunks().get(0).embedding().length;
+                vectorStore.delete(projectKey, name, index.provider(), dimensions);
+            }
             Files.deleteIfExists(indexPath(document));
             Files.deleteIfExists(metadataPath(document));
             return Files.deleteIfExists(document);
@@ -163,6 +180,9 @@ public class KnowledgeService {
         QueryPlan plan = plan(query);
         Set<String> terms = terms(plan.queryText());
         float[] queryVector = embeddings.embed(normalized);
+        KnowledgeVectorStore.SearchResult vectorSearch = strategy == RetrievalStrategy.BM25
+                ? KnowledgeVectorStore.SearchResult.unavailable()
+                : vectorStore.search(projectKey, embeddings.provider(), queryVector, 60);
         List<Candidate> candidates = new ArrayList<>();
         int consumed = 0;
         for (KnowledgeDocument document : list(projectKey).stream()
@@ -175,7 +195,10 @@ public class KnowledgeService {
                 for (int index = 0; index < indexed.chunks().size(); index++) {
                     IndexedChunk chunk = indexed.chunks().get(index);
                     consumed += chunk.text().length();
-                    double similarity = cosine(queryVector, chunk.embedding());
+                    String entityId = KnowledgeVectorStore.entityId(projectKey, document.name(), index + 1);
+                    double similarity = vectorSearch.available()
+                            ? vectorSearch.scores().getOrDefault(entityId, 0.0)
+                            : cosine(queryVector, chunk.embedding());
                     List<String> tokens = tokens((chunk.heading() == null ? "" : chunk.heading() + " ") + chunk.text());
                     Map<String, Integer> frequencies = new HashMap<>();
                     for (String token : tokens) frequencies.merge(token, 1, Integer::sum);
@@ -216,11 +239,17 @@ public class KnowledgeService {
                 .reversed().thenComparing(Candidate::document).thenComparingInt(Candidate::chunk))
                 .toList();
         Map<Integer, Double> rerankScores = new HashMap<>();
+        String retrievalStrategy = strategy.label();
         if (strategy == RetrievalStrategy.HYBRID_RERANK) {
-            ranked.stream().limit(30).forEach(candidate -> rerankScores.put(candidate.id(),
-                    KnowledgeReranker.score(plan.queryText(), candidate.heading(), candidate.text(),
-                            candidate.lexical(), candidate.similarity(), fused.getOrDefault(candidate.id(), 0.0))));
-            ranked = ranked.stream().limit(30)
+            List<Candidate> rerankPool = ranked.stream().limit(reranker.candidateLimit()).toList();
+            KnowledgeReranker.RerankResult reranked = reranker.rerank(plan.queryText(), rerankPool.stream()
+                    .map(candidate -> new KnowledgeReranker.RerankCandidate(candidate.id(), candidate.heading(),
+                            candidate.text(), candidate.lexical(), candidate.similarity(),
+                            fused.getOrDefault(candidate.id(), 0.0)))
+                    .toList());
+            rerankScores.putAll(reranked.scores());
+            if (reranked.crossEncoder()) retrievalStrategy = "BM25+EMBEDDING+RRF+CROSS_ENCODER";
+            ranked = rerankPool.stream()
                     .sorted(Comparator.<Candidate>comparingDouble(candidate -> rerankScores.get(candidate.id()))
                             .reversed().thenComparing(candidate -> fused.getOrDefault(candidate.id(), 0.0),
                                     Comparator.reverseOrder())
@@ -240,7 +269,7 @@ public class KnowledgeService {
                     + candidate.start() + "-" + candidate.end() + "@v" + candidate.documentVersion();
             hits.add(new SearchHit(candidate.document(), candidate.chunk(), candidate.start(), candidate.end(),
                     finalScore, candidate.similarity(), candidate.lexical(), rerankScore,
-                    plan.queryType(), strategy.label(),
+                    plan.queryType(), retrievalStrategy,
                     citation, candidate.documentVersion(), false,
                     matchReasons(candidate, plan, normalized), candidate.heading(), candidate.kind(), candidate.text()));
             perDocument.merge(candidate.document(), 1, Integer::sum);
@@ -377,6 +406,11 @@ public class KnowledgeService {
         Path index = indexPath(document);
         AtomicFileWriter.write(index, mapper.writeValueAsBytes(new IndexedDocument(INDEX_VERSION, embeddings.provider(),
                 Files.getLastModifiedTime(document).toMillis(), indexed)));
+        List<KnowledgeVectorStore.VectorChunk> vectorChunks = new ArrayList<>(indexed.size());
+        for (int chunk = 0; chunk < indexed.size(); chunk++) {
+            vectorChunks.add(new KnowledgeVectorStore.VectorChunk(chunk + 1, indexed.get(chunk).embedding()));
+        }
+        vectorStore.replace(projectKey(document), document.getFileName().toString(), embeddings.provider(), vectorChunks);
     }
 
     private IndexedDocument readOrCreateIndex(Path document) throws Exception {
@@ -402,6 +436,21 @@ public class KnowledgeService {
         String encoded = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(document.getFileName().toString().getBytes(StandardCharsets.UTF_8));
         return document.getParent().resolve(".metadata").resolve(encoded + ".json").normalize();
+    }
+
+    public KnowledgeVectorStore.StoreStatus vectorStoreStatus() {
+        return vectorStore.status();
+    }
+
+    public KnowledgeReranker.Status rerankerStatus() {
+        return reranker.status();
+    }
+
+    private String projectKey(Path document) {
+        Path projects = dataRoot.resolve("projects").normalize();
+        Path relative = projects.relativize(document.toAbsolutePath().normalize());
+        if (relative.getNameCount() < 3) throw new IllegalArgumentException("invalid knowledge document path");
+        return relative.getName(0).toString();
     }
 
     private DocumentMetadata readMetadata(Path document) {

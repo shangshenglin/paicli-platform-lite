@@ -1,0 +1,22 @@
+name: paicli-reranker
+
+services:
+  reranker:
+    container_name: paicli-reranker
+    image: ${PAICLI_RAG_RERANKER_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
+    command: ["--model-id", "${PAICLI_RAG_RERANKER_MODEL:-BAAI/bge-reranker-base}"]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HF_HOME: /data
+      HUGGINGFACE_HUB_CACHE: /data/hub
+      HF_ENDPOINT: ${PAICLI_RAG_RERANKER_HF_ENDPOINT:-https://huggingface.co}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - reranker-data:/data
+    ports:
+      - "127.0.0.1:${PAICLI_RAG_RERANKER_PORT:-8090}:80"
+    restart: unless-stopped
+
+volumes:
+  reranker-data:

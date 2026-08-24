@@ -7,6 +7,7 @@ import com.paicli.platform.server.config.WebProperties;
 import com.paicli.platform.server.knowledge.KnowledgeService;
 import com.paicli.platform.server.mcp.McpToolProvider;
 import com.paicli.platform.server.skill.SkillService;
+import io.swagger.v3.oas.annotations.Operation;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -39,8 +40,12 @@ public class CapabilityController {
     }
 
     @GetMapping("/status")
+    @Operation(summary = "Get project capability status",
+            description = "Includes RAG vector-store and reranker provider, configured/reachable state, model, and latest connection detail.")
     public Map<String, Object> status(@RequestParam String projectKey) {
         Map<String, Object> result = new LinkedHashMap<>();
+        var vectorStore = knowledge.vectorStoreStatus();
+        var reranker = knowledge.rerankerStatus();
         result.put("skills", Map.of("count", skills.list(projectKey).size(),
                 "loading", "index-then-load", "resources", true));
         result.put("rag", Map.of("documents", knowledge.list(projectKey).size(),
@@ -50,7 +55,13 @@ public class CapabilityController {
                 "automaticRetrieval", rag.autoRetrieve(),
                 "scannedPdfOcr", rag.pdfOcrEnabled(),
                 "pdfOcrMaxPages", rag.pdfOcrMaxPages(),
-                "retrieval", "BM25 + vector + RRF + dedup"));
+                "retrieval", "BM25 + vector + RRF + cross-encoder/local fallback + dedup",
+                "reranker", Map.of("provider", reranker.provider(), "model", reranker.model(),
+                        "configured", reranker.configured(), "reachable", reranker.reachable(),
+                        "detail", reranker.detail()),
+                "vectorStore", Map.of("backend", vectorStore.backend(),
+                        "configured", vectorStore.configured(), "reachable", vectorStore.reachable(),
+                        "detail", vectorStore.detail())));
         result.put("memory", Map.of("automaticExtraction", memory.autoExtract(),
                 "layers", "L1/L2/L3", "retrievalTopK", memory.retrievalTopK(),
                 "revisionHistory", true));

@@ -1,5 +1,19 @@
 # 交付阶段
 
+## 2026-08-24 本地 Cross-Encoder Reranker
+
+- [x] 增加固定 TEI CPU 1.9 Compose 和 PowerShell pull/start/stop/status/logs/test 入口，端口只绑定 loopback，模型缓存使用 Docker named volume。
+- [x] 混合 RAG 的 RRF 候选接入 `BAAI/bge-reranker-base` `/rerank`，按响应 index 映射原候选并公开实际检索策略。
+- [x] TEI 禁用、超时、HTTP 错误、非法或不完整响应时整批回退现有确定性 reranker，保持知识检索可用。
+- [x] 能力状态公开 reranker provider/model/configured/reachable/detail，并补充成功映射与失败回退测试。
+
+## 2026-08-24 可选 Milvus Docker 向量索引
+
+- [x] 增加固定 Milvus 2.6.22、etcd、MinIO 版本的 Standalone Compose，并提供 PowerShell 启停、状态和日志入口。
+- [x] 增加 Milvus REST v2 适配器：按向量维度建 collection，稳定主键 upsert/delete，按项目与 Embedding Provider 过滤 COSINE Top-K。
+- [x] 混合 RAG 使用 Milvus 候选参与 BM25/RRF/rerank；Milvus 未启用或不可达时保持本地 JSON 向量回退，SQLite 与本地知识文件继续作为权威数据。
+- [x] 能力状态公开 vector store backend/configured/reachable，补充 REST 合约、认证、失败回退和原有知识检索回归测试。
+
 ## 2026-08-09 Harness Loop v2 · PR10：完成合同、执行证据与 Deferred get_agent_result
 
 - 迁移 40：`run_completion_contracts`（完成合同）、`tool_calls.result_metadata_json`（结构化工具证据）、`tool_calls.wait_kind/wait_ref/waiting_since`（Deferred 外部工具调用）。迁移 41：补偿关联协作会话遗漏的续作 Run。
@@ -319,7 +333,7 @@
 - 已为 Kafka/Redis/MinIO 预留替换端口：Run Dispatch Queue、Run Execution Registry 和 Object Storage Port；当前默认和唯一可用实现仍是 SQLite/进程内注册/本地文件，配置为外部后端会明确失败，避免误判为已接入。
 - 跨项目 Memory 联想图谱
 - 跨项目自治组织、复杂资源排班和无人工边界的自进化团队；Lite 当前提供单项目 AgentTeam、持久化协作任务和三层任务 Console
-- 默认 Lite 配置中的外部向量数据库
+- 将外部向量数据库作为默认或必需依赖；Milvus 仅作为显式启用的可选、可重建索引。
 - 音视频理解和历史原始图片重复注入
 ### 2026-08-09 Completion Evidence 审查修复
 

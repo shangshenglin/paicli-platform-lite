@@ -93,6 +93,22 @@ paicli:
     pdf-ocr-enabled: ${PAICLI_RAG_PDF_OCR_ENABLED:true}
     pdf-ocr-max-pages: ${PAICLI_RAG_PDF_OCR_MAX_PAGES:6}
     pdf-ocr-dpi: ${PAICLI_RAG_PDF_OCR_DPI:150}
+    reranker:
+      enabled: ${PAICLI_RAG_RERANKER_ENABLED:false}
+      endpoint: ${PAICLI_RAG_RERANKER_ENDPOINT:http://127.0.0.1:8090}
+      api-key: ${PAICLI_RAG_RERANKER_API_KEY:}
+      model: ${PAICLI_RAG_RERANKER_MODEL:BAAI/bge-reranker-base}
+      candidates: ${PAICLI_RAG_RERANKER_CANDIDATES:30}
+      timeout-seconds: ${PAICLI_RAG_RERANKER_TIMEOUT_SECONDS:15}
+      max-text-chars: ${PAICLI_RAG_RERANKER_MAX_TEXT_CHARS:4000}
+  milvus:
+    enabled: ${PAICLI_MILVUS_ENABLED:false}
+    endpoint: ${PAICLI_MILVUS_ENDPOINT:http://127.0.0.1:19530}
+    token: ${PAICLI_MILVUS_TOKEN:}
+    database: ${PAICLI_MILVUS_DATABASE:default}
+    collection-prefix: ${PAICLI_MILVUS_COLLECTION_PREFIX:paicli_knowledge}
+    timeout-seconds: ${PAICLI_MILVUS_TIMEOUT_SECONDS:10}
+    search-limit: ${PAICLI_MILVUS_SEARCH_LIMIT:60}
   memory:
     auto-extract: ${PAICLI_MEMORY_AUTO_EXTRACT:true}
     retrieval-top-k: ${PAICLI_MEMORY_RETRIEVAL_TOP_K:8}

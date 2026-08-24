@@ -1,0 +1,68 @@
+name: paicli-milvus
+
+services:
+  etcd:
+    container_name: paicli-milvus-etcd
+    image: ${PAICLI_MILVUS_ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - milvus-etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    container_name: paicli-milvus-minio
+    image: ${PAICLI_MILVUS_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z}
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - milvus-minio:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  standalone:
+    container_name: paicli-milvus-standalone
+    image: ${PAICLI_MILVUS_IMAGE:-milvusdb/milvus:v2.6.22}
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "127.0.0.1:${PAICLI_MILVUS_PORT:-19530}:19530"
+      - "127.0.0.1:${PAICLI_MILVUS_WEBUI_PORT:-9091}:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      start_period: 90s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  milvus-etcd:
+  milvus-minio:
+  milvus-data:

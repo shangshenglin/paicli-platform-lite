@@ -1,5 +1,23 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-24
+
+### 本地 TEI Cross-Encoder Reranker
+
+- 变更：新增 `paicli.rag.reranker` 配置、TEI `/rerank` 客户端和能力状态；混合检索在 BM25/Embedding RRF 后把有界候选的标题与正文交给本地 Cross-Encoder，按响应 index 映射原 chunk 并使用模型分数排序。成功时 `SearchHit.retrievalStrategy` 明确返回 `BM25+EMBEDDING+RRF+CROSS_ENCODER`；禁用时保持既有 `...+RERANK`。
+- 变更：新增 `deploy/reranker/docker-compose.yml` 与 `scripts/reranker.ps1`，固定官方 TEI CPU 1.9 和 `BAAI/bge-reranker-base`，提供 pull/start/stop/status/logs/test；端口只绑定 loopback，模型权重保存于 Docker named volume，镜像、模型、端口、Hugging Face 端点和启动超时均可通过 `.env` 覆盖。能力状态与知识搜索 OpenAPI 注解、README 配置/运行说明、架构边界和阶段完成度已同步。
+- 思路：Cross-Encoder 是可选的本机排序加速层，不改变文档、SQLite、本地 JSON 或 Milvus 的权威边界，也不要求重新向量化。对超时、非 2xx、无 ranks、非法 index/score、重复或缺失候选采用整批确定性回退，避免不同评分量纲混排并确保模型冷启动不放大为搜索故障。数据库与 Schema 未变化，迁移/Store 测试不适用；Sandbox 行为未变化，`docs/docker-sandbox.md` 不适用；Console 与产品站展示未变化，`paicli-site/README.md` 不适用。
+- 验证：`KnowledgeRerankerTest` 与 `KnowledgeServiceTest` 共 7 项通过，覆盖 TEI 排序位置映射、完整候选校验、HTTP 失败整批回退和原有混合检索；修正模拟 503 的无响应体测试夹具后，`mvnw.cmd test` 全 Reactor 共 330 项通过（Common 3、Server 322、Sandbox Agent 5）。官方 GHCR TEI CPU 1.9 镜像成功拉取，首次启动从 Hugging Face 下载 ONNX 模型并缓存，`/health` 返回 200；真实中文 `/rerank` 请求把 Milvus 相关文本排第 1（0.5757537），两个无关候选分别为 0.000080369544 与 0.000037430847。重建并重启 Server 后，对本机 `default/prompts.md.extracted.txt` 发起真实知识搜索，返回 3 条结果且实际策略为 `BM25+EMBEDDING+RRF+CROSS_ENCODER`；能力状态返回 reranker provider=`tei-cross-encoder`、model=`BAAI/bge-reranker-base`、configured/reachable=true，同时 Milvus 仍 reachable，PaiCLI→TEI→知识排序端到端通过。
+
+### 可选 Milvus 2.6 Docker 向量索引
+
+- 部署验证：按官方 Windows 安装脚本完成用户级 Ollama 0.32.15 安装，后台 API 在 `127.0.0.1:11434` 正常响应；拉取并通过 SHA-256 校验 `nomic-embed-text`，真实 `/api/embeddings` 请求返回 768 维向量。本机忽略的 `.env` 已切换 `PAICLI_RAG_EMBEDDING_PROVIDER=ollama`、Base URL 与模型名，未写入新的密钥；现有 README 和 `.env.example` 已覆盖相同配置，因此无需重复修改。重启 Server 后能力状态为 `embeddingProvider=ollama`、`semanticEmbedding=true`；重建 `prompts.md.extracted.txt` 后，Milvus 新建并加载 COSINE collection `paicli_knowledge_d768`，11 个 chunk 全部写入且 PaiCLI 实际搜索返回 `reachable=true`。旧 384 维 collection 保留，未在未经确认时删除可恢复索引数据。
+- 变更：真实 Milvus 2.6.22 REST 联调发现服务内置数据库名称为 `default`，原 `_default` 会返回错误码 800 `database not found`；将 Java 配置归一化、Spring 默认值、`.env.example` 和 README 统一修正为 `default`，并增加未配置/空配置时所有 REST 请求携带 `dbName=default` 的回归断言。本机 `.env` 同步显式设置该值，`.env` 仍保持忽略且不提交。
+- 变更：真实启动反馈显示 Docker Desktop 直连 Docker Hub 超时后，Compose 的 Milvus/MinIO/etcd 镜像改为支持 `PAICLI_MILVUS_*_IMAGE` 完整引用覆盖；MinIO 默认源切到同版本 Quay 镜像。启动脚本增加独立 `pull` 动作，按 etcd、MinIO、Milvus 顺序逐项拉取并有限重试三次，在 Registry 失败时显示准确镜像、Docker Desktop Containers proxy 与可信私有镜像覆盖方式，避免 Compose 并行拉取因单项失败中断全部镜像，也避免把拉取失败误报成 Milvus 服务启动失败。
+- 变更：新增 `deploy/milvus/docker-compose.yml`，固定 Milvus 2.6.22、etcd 3.5.18 与 MinIO 版本，数据使用 Docker named volumes 持久化且端口仅绑定 loopback；新增 `scripts/milvus.ps1` 提供 start/stop/status/logs。新增 `PAICLI_MILVUS_*` 配置和 REST v2 向量存储适配器，按维度创建 collection，以 project/document/chunk 的 SHA-256 作为稳定主键，写入时 delete+upsert，检索时按 project/provider 过滤 COSINE Top-K 并继续参与 BM25/RRF/rerank。能力状态 API 增加 `rag.vectorStore` 的 backend/configured/reachable/detail。
+- 思路：SQLite、知识正文和原子本地 JSON 索引继续作为权威数据，Milvus 只是可重建的检索索引；默认关闭，启用后不可达或请求失败会记录最近状态并回退本地 cosine，避免把外部基础设施故障放大为知识库不可用。Collection 按向量维度隔离，Embedding Provider 作为动态字段过滤，支持本地哈希向量和远程 Embedding 维度变化。API 响应说明、启动配置、架构边界和阶段完成度已同步 README、OpenAPI 注解、`docs/architecture.md` 与 `docs/phases.md`。数据库行为与 Schema 未变化，迁移/Store 测试不适用；Milvus 不改变 Sandbox 隔离，`docs/docker-sandbox.md` 不适用；未修改 Console 或产品站展示，`paicli-site/README.md` 不适用。
+- 验证：`mvnw.cmd -pl paicli-server -am -DskipTests compile` 与 `mvnw.cmd package -DskipTests` 通过；Milvus/Knowledge 定向测试 7 项通过；修复测试构造器引起的 Spring 装配选择后，`mvnw.cmd test` 全 Reactor 共 328 项通过（Common 3、Server 320、Sandbox Agent 5），覆盖 REST v2 collection/create/delete/upsert/search、Bearer Token、失败回退、ApplicationContext 与原有混合检索。镜像拉取失败增强后的 PowerShell 解析检查通过。用户侧通过固定版本 DaoCloud Docker Hub 缓存完成 Milvus 镜像拉取，Compose 的 etcd、MinIO、Milvus 2.6.22 三个容器均为 healthy；`http://127.0.0.1:9091/healthz` 返回 200/OK，Server 能加载 `milvus-rest` backend。真实知识检索进一步暴露并定位默认数据库名问题；修复后 `MilvusKnowledgeVectorStoreTest` 2 项通过，真实 `POST /v2/vectordb/collections/list` 携带 `dbName=default` 返回 `code=0`。重启 Server 后通过知识搜索触发真实访问，能力状态返回 `backend=milvus-rest`、`configured=true`、`reachable=true` 和最近成功时间，Server→Milvus 端到端检索通过；`git diff --check` 通过。
+
 ## 2026-08-16
 
 ### 官方评测集首轮实跑校准

@@ -403,11 +403,37 @@ data/workspaces/{runId}/PAI.md
 
 - 支持文本、Markdown、PDF、Word、PowerPoint、Excel、CSV、HTML、JSON、XML、RTF、EPUB 和 OpenDocument。
 - Tika 提取正文；分块器保留标题层级、段落、句子、列表、表格和代码围栏结构。
-- 检索组合 BM25 与 Embedding，RRF 先生成最多 30 个候选，再由可复现的跨特征 reranker 综合 query coverage、标题/短语、BM25、向量和 RRF 分数选取 Top-K；最后执行重叠去重和单文档配额。
+- 检索组合 BM25 与 Embedding，RRF 先生成有界候选集；启用本地 TEI 时由 Cross-Encoder 对 query/document pair 重新打分，否则使用可复现的跨特征 reranker，最后执行重叠去重和单文档配额。TEI 超时、非 2xx、非法或不完整响应会整批回退，避免不同分数量纲混排。
 - `POST /v1/knowledge/documents/evaluations` 接收最多 200 个带相关 citation 的 Case，在同一索引上做 BM25、Embedding、BM25+Embedding+RRF、BM25+Embedding+RRF+Rerank 消融，返回 Recall@5、Recall@10、MRR、nDCG@10、Citation Hit Rate 与 Answer Grounded Rate。指标只来自调用方提供的真实标注，不内置或伪造提升数字。
 - 可接 Ollama 或 OpenAI-compatible Embedding；未配置时明确使用本地确定性降级。
+- 向量检索默认继续使用本地 JSON 索引；可选启用 Milvus 2.6 Standalone。SQLite、知识正文与本地索引仍是权威数据，Milvus 只保存可重建的检索索引；服务不可达时自动回退本地向量计算。
 - 扫描 PDF 可用 PDFBox 渲染，再由当前视觉模型 OCR；OCR 不可用时仍可作为当前 Run 的视觉附件。
 - Knowledge 管理支持集合、标签、版本、索引状态、重建索引、引用定位和有用/无用反馈。
+
+启动仓库内固定版本的 Milvus Docker Standalone（Milvus + etcd + MinIO）：
+
+```powershell
+.\scripts\milvus.ps1 start
+.\scripts\milvus.ps1 status
+```
+
+随后在 `.env` 中设置 `PAICLI_MILVUS_ENABLED=true` 并重启 Server。默认端点为 `http://127.0.0.1:19530`，默认数据库为 Milvus 内置的 `default`，WebUI 为 `http://127.0.0.1:9091/webui/`。`stop` 只停止容器并保留 Docker named volumes；如需清空索引数据，需在明确确认后手动删除 Compose volumes。启用或更换 Embedding Provider 后，对已有文档执行重建索引，Milvus collection 会按向量维度使用 `{prefix}_d{dimensions}` 命名。
+
+镜像拉取可先独立验证：`.\scripts\milvus.ps1 pull`。脚本按 etcd、MinIO、Milvus 顺序逐个拉取，每项最多重试三次，避免并行拉取中一个 Registry 失败后中断其他镜像；etcd 与 MinIO 默认使用 Quay，Milvus 2.6.22 仍使用官方 Docker Hub 镜像。若错误包含 `Docker Desktop has no HTTPS proxy`、TLS handshake timeout 或无法连接 `registry-1.docker.io:443`，需在 Docker Desktop 的 `Settings > Resources > Proxies` 配置 **Containers proxy** 后重启 Docker Desktop；仅在当前 PowerShell 设置 `HTTPS_PROXY` 不能替代 Docker Desktop 的拉取代理。使用组织内可信镜像仓库时，可在 `.env` 用 `PAICLI_MILVUS_IMAGE`、`PAICLI_MILVUS_MINIO_IMAGE`、`PAICLI_MILVUS_ETCD_IMAGE` 覆盖完整镜像引用。不要把不受信任的公共镜像代理直接用于生产。
+
+`GET /v1/capabilities/status?projectKey=...` 的 `rag.vectorStore` 返回 backend、configured、reachable 和最近连接详情；它反映本进程最近一次 Milvus 操作结果，不额外发起健康探测。
+
+启动本地 CPU Cross-Encoder（TEI + `BAAI/bge-reranker-base`，中英文）：
+
+```powershell
+.\scripts\reranker.ps1 start
+.\scripts\reranker.ps1 status
+.\scripts\reranker.ps1 test
+```
+
+首次启动会下载 TEI 镜像和模型权重，缓存保存在 Docker named volume；服务只监听 `127.0.0.1:8090`。在 `.env` 设置 `PAICLI_RAG_RERANKER_ENABLED=true` 后重启 Server。`PAICLI_RAG_RERANKER_CANDIDATES` 控制送入模型的 RRF 候选数，`MAX_TEXT_CHARS` 限制单候选输入，`TIMEOUT_SECONDS` 是请求超时。镜像、模型、端口和 Hugging Face 下载端点均可通过同族变量覆盖；生产环境只使用可信 Registry/模型来源。
+
+`GET /v1/capabilities/status?projectKey=...` 的 `rag.reranker` 返回 provider、model、configured、reachable 和最近请求详情；它与 Milvus 状态一样只反映本进程最近一次实际操作。知识搜索成功使用模型时，`SearchHit.retrievalStrategy` 为 `BM25+EMBEDDING+RRF+CROSS_ENCODER`；未启用或失败回退时保留 `BM25+EMBEDDING+RRF+RERANK`。停止容器使用 `.\scripts\reranker.ps1 stop`，不会删除模型缓存 volume。
 
 #### 历史会话检索与联网
 
@@ -837,7 +863,8 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 | `PAICLI_SERVER_ADDRESS`、`PAICLI_API_KEY`、`PAICLI_SECURITY_*` | 回环监听默认值、REST、Actuator、OpenAPI 认证和生产启动门禁 |
 | `PAICLI_MODEL_*` | Provider、端点、模型、Key、上下文/输出、思考、重试、流空闲超时、熔断、限流、Fallback、Run/工具预算和相同工具参数循环上限 |
 | `PAICLI_WEB_*` | 可选 SearXNG 搜索、引擎选择和 Server 侧 Web 工具 |
-| `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR 页数和 DPI |
+| `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR，以及可选本地 TEI Cross-Encoder 的端点、模型、候选数、超时、输入上限和镜像/缓存下载配置 |
+| `PAICLI_MILVUS_*` | 可选 Milvus REST 端点、Token、数据库、collection 前缀、超时、向量候选上限及可信 registry 镜像覆盖；默认关闭 |
 | `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
 | `PAICLI_DOCKER_*` | Docker 可执行文件/镜像、默认 `none` 网络、CPU/内存/PID、`/tmp`/HOME tmpfs、共享内存、启动与命令超时；命令超时同时是请求级 `timeoutSeconds` 上限 |
@@ -880,7 +907,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - 当前命令输出在 ToolCall 完成后以结构化 Event/Artifact 交付，尚未提供逐行实时 stdout/stderr SSE、PTY 交互终端或可脱离 Run 生命周期的后台服务管理。
 - 当前提供可复用智能体专家 Profile/执行小队、确定性能力路由、持久化任务与评论、Leader 动态 Delegation Graph、阶段屏障、依赖门禁、资源隔离、失败路由、Human Node 和结果信封；尚不包含基于历史成功率的学习型路由、复杂工作量均衡、真实 Git worktree 自动合并和跨项目 Memory 联想图谱。
 - MCP 当前只支持远程 Streamable HTTP，不管理本地 stdio MCP 进程。
-- 默认不依赖外部向量数据库；未配置真实 Embedding 时使用明确的本地降级。
+- 默认不依赖外部向量数据库；Milvus 是可选、可重建的检索索引，未启用或不可达时回退本地向量计算；未配置真实 Embedding 时使用明确的本地降级。
 - 图片型 PDF 支持受限 OCR/视觉路径；尚不支持音频和视频理解。
 - `RULE` 评测是确定性安全、工具、关键文本和预算门禁，不等同于开放式语义质量评价或无偏 LLM Judge；`REPOSITORY` 只代表内部 SWE-bench 风格执行式评测，不是官方 SWE-bench Verified 成绩。
 - 单机 SQLite 通过一次性 WAL 初始化、30 秒写锁等待和短事务承载并发；它降低锁冲突但不等同于多节点数据库，高写入规模仍应迁移 PostgreSQL。

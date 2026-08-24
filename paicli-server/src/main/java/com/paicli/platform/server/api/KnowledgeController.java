@@ -62,6 +62,8 @@ public class KnowledgeController {
     }
 
     @GetMapping("/search")
+    @Operation(summary = "Search project knowledge",
+            description = "Uses BM25/vector RRF candidates and reports CROSS_ENCODER when the optional local TEI reranker succeeds; otherwise uses the deterministic local reranker.")
     public List<KnowledgeService.SearchHit> search(@RequestParam String projectKey,
                                                    @RequestParam String query,
                                                    @RequestParam(defaultValue = "10") int limit) {

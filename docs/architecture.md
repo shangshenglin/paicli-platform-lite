@@ -6,7 +6,7 @@ A Run that exhausts its step, token, tool-call, or elapsed-time budget always te
 
 ## 部署边界
 
-平台由一个 Spring Boot Server、一个 SQLite 数据库和可选的 Docker Sandbox 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界。
+平台由一个 Spring Boot Server、一个 SQLite 数据库、可选的 Docker Sandbox、可选的 Milvus Standalone 检索索引和可选的本地 TEI Cross-Encoder 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界；Milvus 与 TEI 不进入 Sandbox，也不取代 SQLite 或本地知识文件的权威数据地位。
 
 ```text
 客户端
@@ -20,6 +20,8 @@ PaiCLI Server
   -> PlanService：Plan JSON / DAG 校验 / Revision
   -> PlanExecutionService + PlanValidator：Step 调度 / ReAct Run 绑定 / Async Job / Validation Gate
   -> ContextManager：Prompt / Memory / 摘要 / Token 预算
+  -> KnowledgeVectorStore：本地 JSON（默认）或 Milvus REST（可选、失败回退）
+  -> KnowledgeReranker：本地确定性特征（默认）或 TEI Cross-Encoder（可选、整批失败回退）
   -> ToolRouter
        -> SandboxDriver：Local（仅开发）或 Docker
        -> ServerToolProvider：Skill / Knowledge / Web / MCP / Delegation
@@ -246,7 +248,8 @@ Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。W
 RAG、历史会话检索、Skill、联网、MCP 和 Multi-Agent 委派都通过普通 ToolCall 进入统一管线，不可绕过持久化、审批、顺序执行、Event/SSE、Audit 和 Artifact 边界。
 
 - Skill 只从受控全局/项目目录发现，稳定排序并按需加载；Git 导入先预检文件与权限声明，再暂存并校验符号链接、文件数和字符预算，不执行仓库代码。生命周期元数据和单级回滚备份均留在受控 Skill 根目录。
-- RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构。BM25 与 Embedding 独立排序后以 RRF 形成最多 30 个候选；确定性 reranker 再综合 query term coverage、标题/正文短语、BM25、向量和 RRF 分数选 Top-K，随后去重并施加单文档限额。SearchHit 额外返回 rerank 分与实际策略。
+- RAG 文档存于 `data/projects/{projectKey}/knowledge`。Tika 提取文本；PDF 无文本层时使用 PDFBox 渲染并由视觉模型 OCR。分块保留标题、句子、列表、表格和代码块结构。BM25 与 Embedding 独立排序后以 RRF 形成有界候选集；启用 TEI 后把 query 与每个候选的标题/正文组成 pair 交给本地 Cross-Encoder，按返回 index 映射 chunk 并排序。TEI 禁用、超时、非 2xx、非法或不完整响应时，整批使用 query coverage、标题/正文短语、BM25、向量与 RRF 的确定性分数，避免部分候选混用不同量纲。随后去重并施加单文档限额；SearchHit 返回 rerank 分与实际策略，能力状态保留最近一次模型请求结果。
+- `KnowledgeVectorStore` 默认关闭外部后端。启用 Milvus 时，本地原子 JSON 索引写入后，通过 REST v2 按 project/provider 过滤执行 COSINE Top-K，再与本地 BM25 做 RRF/rerank；collection 按维度隔离，实体主键由 project/document/chunk 的 SHA-256 稳定派生。Milvus 写入或查询失败只记录状态并回退本地向量计算，因为正文、元数据和可重建向量仍由本地文件持有。
 - `RetrievalEvaluationService` 对最多 200 个带 relevant citation、可选 answer citation 的 Case 顺序执行 BM25、Embedding、RRF、RRF+Rerank 四种消融，统一输出 Recall@5/10、MRR、nDCG@10、Top-5 citation precision 与 answer citation grounding coverage。评测只读 Knowledge 索引，不写反馈、不调用生成模型；同一标注集可重复运行并用于提交前后对比。
 - `session_search` 只在 Agent 调用时检索当前项目的用户可见历史消息，排除当前 Run，并按会话生成抽取式摘要。
 - 联网默认关闭；启用时必须提供可访问的 SearXNG-compatible 搜索端点。`web_search` 将端点连接/超时转换为含脱敏端点和 `PAICLI_WEB_SEARCH_URL` 的操作性错误，并可通过 `PAICLI_WEB_SEARCH_ENGINES` 将固定引擎集合透传给 SearXNG，规避默认聚合集合中被限流、验证码或超时的引擎；抓取对每次重定向重新校验，拒绝 loopback、链路本地和私网目标。
