@@ -564,6 +564,15 @@ dialog input { width: 100%; margin: 8px 0 14px; padding: 10px; border: 1px solid
 .audit-card .managed-actions { margin-top: 8px; }
 @media (max-width: 700px) { .audit-summary { grid-template-columns: 1fr; } }
 .dialog-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.module-explainer { position: relative; display: inline-flex; align-items: baseline; vertical-align: middle; z-index: 1; cursor: help; outline: 0; }
+.module-explainer.is-open { z-index: 100; }
+.module-explainer:focus-visible > :first-child { outline: 1px dashed #6fd0b1; outline-offset: 4px; border-radius: 3px; }
+.module-explainer-card { position: absolute; z-index: 1; top: calc(100% + 8px); left: 0; display: grid; gap: 8px; width: min(380px, calc(100vw - 42px)); padding: 12px 13px; border: 1px solid #416d62; border-radius: 10px; background: #101c1a; box-shadow: 0 14px 32px #0009; color: var(--text); font-size: 12px; line-height: 1.5; opacity: 0; visibility: hidden; transform: translateY(-3px); transition: opacity .14s ease, transform .14s ease, visibility .14s; pointer-events: none; }
+.module-explainer.is-open .module-explainer-card { opacity: 1; visibility: visible; transform: translateY(0); pointer-events: auto; }
+.module-explainer-card > strong { color: #d8fff1; font-size: 13px; }
+.module-explainer-summary { color: var(--muted); }
+.module-explainer-facts { display: flex; flex-wrap: wrap; gap: 5px; }
+.module-explainer-facts span { padding: 2px 6px; border: 1px solid #345b51; border-radius: 999px; background: #17322d; color: #bce9da; font-size: 11px; white-space: nowrap; }
 .capability-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .capability-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .capability-status-item { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: var(--panel-2); min-width: 0; }

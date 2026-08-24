@@ -2,6 +2,17 @@
 
 ## 2026-08-24
 
+### Console 模块策略悬停说明
+
+- 变更：Console 新增纯前端、可复用的“策略”悬停/焦点说明卡，覆盖普通对话、多智能体协作、协作任务、连接与审批、能力管理（Skills、知识库、MCP）、专家创建、效率工作台全部一级工作区（检索、用量、模板、模型方案、队列、定时、通知、导入导出、长期记忆、Artifact、Plan、审批策略）以及 Agent 评测中心（套件、报告）。说明以一句话摘要和参数标签呈现，键盘聚焦同样可见。
+- 思路：固定文案只说明已实现的默认策略或安全边界，例如 Memory 的语义/词法/置信度/新鲜度 55/25/10/10 召回组成、L3 +0.20，以及知识库的 BM25+向量、RRF 1.00/1.15、Top 30 后重排；不把前端文案伪装成实时配置。实际 Provider、模型、限额与健康状态继续由既有状态卡/API 数据显示。未改动 REST、后端、数据库、OpenAPI、Sandbox、架构或阶段范围，因此对应迁移/Store 测试、OpenAPI 注解、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md`、`paicli-site/README.md` 均不适用；README 已同步 Console 使用说明。
+- 验证：工作区 bundled Node 的 `node --check paicli-server/src/main/resources/static/app.js` 通过；以临时 loopback 静态站点配合本机 Chrome/Playwright 验证页面渲染 26 张标题绑定的说明卡、悬停卡片可见且“长期记忆”说明存在；`git diff --check` 通过，并已核对 `git diff --name-only` 仅包含前端静态资源、README 与本变更日志。
+- 修正：说明卡不再仅依赖 CSS `:hover`，改为鼠标实际移动至标签、点击或键盘聚焦时显式打开；Dialog 打开后的短暂抑制避免标签恰好出现在静止鼠标下而默认展开。打开的卡片提升到独立高层级，消除后续同级“策略”标签遮挡底部状态提示的问题；底部提示改为分隔的完整说明，并补充知识分块、Embedding/Milvus、Memory 提取 Job/反馈、模型方案、协作、Plan 和评测等关键词。
+- 回归验证：修改后再次通过 `node --check` 与 `git diff --check`；浏览器验证打开效率工作台后默认展开数为 0，鼠标移动至标签后卡片可见，打开卡片层级为 100。
+- 文案收敛：按反馈取消所有策略卡内的运行时状态提示，卡片只保留模块策略摘要与关键词，不再展示 Provider、模型或可用状态的统一说明。
+- 交互收敛：取消醒目的“策略”文字标签，将说明卡绑定到对应模块标题；鼠标移动到标题、点击标题区域或键盘聚焦标题时打开，默认界面不新增可见标签。
+- 标题悬停回归：Chrome/Playwright 确认页面中“策略”标签数为 0，标题“全局检索”文本保持不变，移动至标题后卡片可见。
+
 ### 本地 TEI Cross-Encoder Reranker
 
 - 变更：新增 `paicli.rag.reranker` 配置、TEI `/rerank` 客户端和能力状态；混合检索在 BM25/Embedding RRF 后把有界候选的标题与正文交给本地 Cross-Encoder，按响应 index 映射原 chunk 并使用模型分数排序。成功时 `SearchHit.retrievalStrategy` 明确返回 `BM25+EMBEDDING+RRF+CROSS_ENCODER`；禁用时保持既有 `...+RERANK`。

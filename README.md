@@ -871,7 +871,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |
 | `PAICLI_MAINTENANCE_*`、保留变量 | WAL、Event/Audit 保留、孤儿文件宽限和可选 VACUUM |
 
-项目模型方案、预算、模板、队列、定时任务和通知可在 Console“效率工作台”维护；智能体专家由首页左侧“专家创建”维护；评测套件、运行报告与基线由首页独立“Agent 评测中心”维护；Skill 和 MCP 位于“能力管理”。
+项目模型方案、预算、模板、队列、定时任务和通知可在 Console“效率工作台”维护；智能体专家由首页左侧“专家创建”维护；评测套件、运行报告与基线由首页独立“Agent 评测中心”维护；Skill 和 MCP 位于“能力管理”。鼠标移动到模块标题、点击标题区域或键盘聚焦标题时，会显示对应模块的默认策略、模型/排序路径、权重和边界说明；默认界面不额外显示说明标签。
 普通对话输入区提供“按计划执行”入口；当用户明确说“创建计划/按计划执行/指定计划/plan”或输入明显复杂的多步骤任务时，Console 会创建持久化 Plan、启动调度，并在当前对话窗口顶部展示步骤进度、当前步骤和调度动作。
 
 ## 验证
