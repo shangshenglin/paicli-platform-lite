@@ -112,6 +112,8 @@ paicli:
   memory:
     auto-extract: ${PAICLI_MEMORY_AUTO_EXTRACT:true}
     retrieval-top-k: ${PAICLI_MEMORY_RETRIEVAL_TOP_K:8}
+    retrieval-candidate-limit: ${PAICLI_MEMORY_RETRIEVAL_CANDIDATE_LIMIT:30}
+    min-relevance: ${PAICLI_MEMORY_MIN_RELEVANCE:0.35}
     max-context-chars: ${PAICLI_MEMORY_MAX_CONTEXT_CHARS:12000}
     min-confidence: ${PAICLI_MEMORY_MIN_CONFIDENCE:0.65}
     extraction-window-messages: ${PAICLI_MEMORY_EXTRACTION_WINDOW_MESSAGES:12}

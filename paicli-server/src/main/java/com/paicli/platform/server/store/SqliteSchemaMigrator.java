@@ -51,7 +51,8 @@ final class SqliteSchemaMigrator {
             new Migration(39, "repository evaluation fixtures graders and immutable case snapshots"),
             new Migration(40, "completion contracts structured tool evidence and deferred external tool calls"),
             new Migration(41, "link collaboration session continuation runs"),
-            new Migration(42, "context cache efficiency and model ttft metrics")
+            new Migration(42, "context cache efficiency and model ttft metrics"),
+            new Migration(43, "memory retrieval scopes and cross encoder candidate governance")
     );
 
     private SqliteSchemaMigrator() { }

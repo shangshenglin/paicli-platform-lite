@@ -51,16 +51,16 @@ public final class KnowledgeReranker {
         if (properties.enabled()) URI.create(properties.endpoint());
     }
 
-    static KnowledgeReranker disabled() {
+    public static KnowledgeReranker disabled() {
         return new KnowledgeReranker(new RerankerProperties(false, "", "", "", 30, 15, 4_000),
                 new ObjectMapper());
     }
 
-    int candidateLimit() {
+    public int candidateLimit() {
         return properties.candidates();
     }
 
-    RerankResult rerank(String query, List<RerankCandidate> requestedCandidates) {
+    public RerankResult rerank(String query, List<RerankCandidate> requestedCandidates) {
         List<RerankCandidate> candidates = requestedCandidates == null ? List.of()
                 : requestedCandidates.stream().limit(properties.candidates()).toList();
         Map<Integer, Double> fallback = deterministicScores(query, candidates);
@@ -183,8 +183,8 @@ public final class KnowledgeReranker {
         return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
     }
 
-    record RerankCandidate(int id, String heading, String content, double lexicalScore,
-                           double vectorSimilarity, double rrfScore) { }
-    record RerankResult(Map<Integer, Double> scores, boolean crossEncoder, String provider) { }
+    public record RerankCandidate(int id, String heading, String content, double lexicalScore,
+                                  double vectorSimilarity, double rrfScore) { }
+    public record RerankResult(Map<Integer, Double> scores, boolean crossEncoder, String provider) { }
     public record Status(boolean configured, boolean reachable, String provider, String model, String detail) { }
 }

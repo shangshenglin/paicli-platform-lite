@@ -103,7 +103,7 @@ class WebSecurityIntegrationTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "data-effort=\"low\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "20260804-workbench-batch-delete-1")))
+                        "20260824-module-explainers-5")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(
                         "id=\"scheduleForm\"")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString(

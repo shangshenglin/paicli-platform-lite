@@ -1,5 +1,12 @@
 # 交付阶段
 
+## 2026-08-25 Memory Scope、动态召回与 Cross-Encoder
+
+- [x] Memory 候选复用现有 TEI Cross-Encoder；TEI 禁用或失败时整批回退确定性相关性分，不改变 SQLite 的事实源地位。
+- [x] 固定 Top 8 改为“绝对最低相关性 + 相对最佳分”的动态 Top K，`retrievalTopK` 仅保留为硬上限。
+- [x] 移除 L3 无条件 `+0.20`，保留置信度、时效、历史反馈和类型配额，避免长期但无关的记忆霸榜。
+- [x] 迁移 43 增加 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` Scope 字段，并从来源 Run 回填历史自动 Memory；检索和近重复归并均遵守 Scope。
+
 ## 2026-08-24 本地 Cross-Encoder Reranker
 
 - [x] 增加固定 TEI CPU 1.9 Compose 和 PowerShell pull/start/stop/status/logs/test 入口，端口只绑定 loopback，模型缓存使用 Docker named volume。

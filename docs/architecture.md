@@ -157,7 +157,9 @@ ContextManager 把缓存稳定性与输入预算作为同一个组装边界处�
 
 只有委派树根 Run 完成后才创建一次持久化 `memory_extractions` 任务，避免 Leader 和子 Agent 为同一协作结论重复提取；创建时冻结根 Run 的 Message id、sequence、role、content 和 tool call 引用。Worker 只能读取 `source_snapshot_json`，不能读取稍后变化的 Session。每条提取结果把实际证据 Message id、起止 sequence 和摘录写入 `memory_sources`，API 可将 Memory 回跳到具体消息或工具结果。旧任务的空快照保留兼容读取路径。
 
-Worker 提取带类型、层级和置信度的 L1/L2/L3 Memory；单根 Run 总数上限为 3（L1≤1、L2≤2、L3≤1）。流程型协作事件会被过滤，候选必须带有效 evidence message id，且至少由用户陈述或成功工具结果支持；模型给出的分数会按证据质量、重复出现程度和层级稳定性校准并受来源上限约束。同 key 变化和人工编辑先写 `memory_revisions`；高相似候选复用 canonical key，中等相似候选进入 `memory_conflicts`，长期未访问且未置顶的 L1 进入 `STALE`。召回综合词法/语义相关性、置信度、时间衰减、类型配额、置顶、稳定 L3 偏好和历史反馈。`memory_usage_feedback` 保存每个 Run 实际选入上下文的 Memory；Run 终态以及 Plan 验证通过/返工更新 outcome，形成后续排序信号。显式 REST CRUD 仍是人工纠错边界；Console 也提供主动录入人工 L3 的入口。
+Worker 提取带类型、层级和置信度的 L1/L2/L3 Memory；单根 Run 总数上限为 3（L1≤1、L2≤2、L3≤1）。流程型协作事件会被过滤，候选必须带有效 evidence message id，且至少由用户陈述或成功工具结果支持；模型给出的分数会按证据质量、重复出现程度和层级稳定性校准并受来源上限约束。同 key 变化和人工编辑先写 `memory_revisions`；高相似候选只在相同 Scope 内复用 canonical key，中等相似候选进入 `memory_conflicts`，长期未访问且未置顶的 L1 进入 `STALE`。
+
+Memory 仍以 SQLite 为事实源和向量存储，不进入 Milvus。迁移 43 为每条 Memory 增加 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` Scope 及对应 Agent、workspace owner、任务类型字段，并从历史自动 Memory 的来源 Run 幂等回填；人工 Memory 默认项目级。每轮召回先执行 Scope、状态和置信度过滤，再以语义/词法、置信度、时间衰减、范围亲和度与历史反馈生成有界候选；不再为 L3 无条件加分。候选复用 KnowledgeReranker 的 TEI Cross-Encoder，服务不可用时整批使用确定性分数，最终通过绝对最低相关性与相对最佳分门槛动态返回 0 到配置上限条目。`memory_usage_feedback` 保存实际选入上下文的 Memory；Run 终态以及 Plan 验证通过/返工更新 outcome。Cross-Encoder 只判断 query-memory 相关性，不能覆盖证据、冲突、修订、状态或项目隔离。显式 REST CRUD 仍是人工纠错边界；Console 也提供主动录入人工 L3 的入口。
 
 Memory Wiki 不是第二份知识库，也不迁移或改写旧 Memory。它从同一项目的现有 Memory 派生页面视图：页面标题从内容首句生成，内部 key 只作为稳定链接标识；LLM 在确有依赖时以 `[[canonical-key]]` 写入明确关联，系统再补充同标签关联和反向引用。Console 以 L1/L2/L3 分栏地图渲染这些关系，并限制单层节点数以保持可读性。页面继续复用原有来源、修订、置信度、启停和确认状态，因此人工可以从 Wiki 直接回到可审计的 Memory 记录。
 
@@ -237,7 +239,7 @@ base/safety/agent Prompt
 
 ## SQLite 与文件一致性
 
-Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 42：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–41 覆盖协作工作区、WorkingPlan、反思、交付清单、ExpertThread、仓库评测、完成合同和续作 Run 修复；42 增加 Context 可复用前缀与模型 TTFT 用量列。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
+Lite 版是单机单租户，SQLite WAL 提供并发读取和短事务写入。WAL 只在数据库初始化时设置一次，普通连接不再反复切换日志模式；每个连接设置 30 秒 `busy_timeout`，降低多 Trial/多 Worker 短时争用直接产生 `SQLITE_BUSY` 的概率。`schema_migrations` 当前到版本 43：1–27 覆盖基础 Runtime、Plan/Graph、执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–33 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理和历史状态修正；34–41 覆盖协作工作区、WorkingPlan、反思、交付清单、ExpertThread、仓库评测、完成合同和续作 Run 修复；42 增加 Context 可复用前缀与模型 TTFT 用量列；43 增加 Memory Scope 并从来源 Run 兼容回填。旧目录先完成可恢复文件归并，再事务更新关联 Run 的 owner。
 
 `ApplicationReadyEvent` 会扫描等待中的阶段屏障并补发缺失的 Leader Trigger。该过程是持久化恢复的尽力对账，不是 Server 可用性的启动门禁：屏障列表读取、单项求值或唤醒遇到 `SQLITE_BUSY`/历史脏数据时记录带 task/stage 的警告并继续其他项，异常不再逃逸到 Spring Boot 主线程。未成功处理的屏障保持原状态，后续阶段终态事件或下次启动仍可幂等重试。
 

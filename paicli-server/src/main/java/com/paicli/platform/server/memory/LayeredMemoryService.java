@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.config.MemoryProperties;
 import com.paicli.platform.server.knowledge.KnowledgeEmbeddingService;
+import com.paicli.platform.server.knowledge.KnowledgeReranker;
 import com.paicli.platform.server.model.ModelClient;
 import com.paicli.platform.server.model.ModelMessage;
 import com.paicli.platform.server.model.ModelRequest;
@@ -11,6 +12,7 @@ import com.paicli.platform.server.model.ModelStreamListener;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -22,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
@@ -46,16 +49,25 @@ public class LayeredMemoryService {
     private final KnowledgeEmbeddingService embeddings;
     private final ObjectMapper mapper;
     private final MemoryProperties properties;
+    private final KnowledgeReranker reranker;
     private final AtomicBoolean working = new AtomicBoolean();
 
+    @Autowired
     public LayeredMemoryService(SqliteRuntimeStore store, ModelClient modelClient,
                                 KnowledgeEmbeddingService embeddings, ObjectMapper mapper,
-                                MemoryProperties properties) {
+                                MemoryProperties properties, KnowledgeReranker reranker) {
         this.store = store;
         this.modelClient = modelClient;
         this.embeddings = embeddings;
         this.mapper = mapper;
         this.properties = properties;
+        this.reranker = reranker;
+    }
+
+    public LayeredMemoryService(SqliteRuntimeStore store, ModelClient modelClient,
+                                KnowledgeEmbeddingService embeddings, ObjectMapper mapper,
+                                MemoryProperties properties) {
+        this(store, modelClient, embeddings, mapper, properties, KnowledgeReranker.disabled());
     }
 
     public void enqueue(String runId) {
@@ -84,31 +96,63 @@ public class LayeredMemoryService {
         if (query == null || query.isBlank()) return MemoryContext.empty();
         List<SqliteRuntimeStore.MemoryUnit> units = store.memoryUnits(projectKey, 300);
         if (units.isEmpty()) return MemoryContext.empty();
+        SqliteRuntimeStore.MemoryScope queryScope = store.memoryScopeForRun(runId);
         boolean semanticEnabled = embeddings.semanticEnabled();
         float[] queryVector = semanticEnabled ? embeddings.embed(query) : new float[0];
         Set<String> queryTerms = terms(query);
         Map<String, Double> feedback = store.memoryFeedbackScores(units.stream()
                 .map(SqliteRuntimeStore.MemoryUnit::id).toList());
-        List<ScoredMemory> scored = new ArrayList<>();
+        List<CandidateMemory> candidates = new ArrayList<>();
         for (var unit : units) {
             if (unit.confidence() < properties.minConfidence()) continue;
-            double semantic = semanticEnabled ? cosine(queryVector, vector(unit)) : 0;
+            if (!scopeCompatible(unit, queryScope)) continue;
+            double semantic = semanticEnabled ? Math.max(0, cosine(queryVector, vector(unit))) : 0;
             double lexical = lexical(queryTerms, unit.memoryKey() + " " + unit.tags() + " " + unit.content());
             double recency = recency(unit.updatedAt(), "L1".equals(unit.layer()) ? 30 : 180);
+            double feedbackScore = Math.max(-1, Math.min(1, feedback.getOrDefault(unit.id(), 0d)));
+            double scopeAffinity = "PROJECT".equals(normalizedScopeType(unit.scopeType())) ? 0.5 : 1.0;
             double score = semanticEnabled
-                    ? semantic * 0.55 + lexical * 0.25 + unit.confidence() * 0.10 + recency * 0.10
-                    : lexical * 0.70 + unit.confidence() * 0.15 + recency * 0.15;
-            if ("L3".equals(unit.layer())) score += 0.20;
-            score += feedback.getOrDefault(unit.id(), 0d) * 0.08;
-            if (score >= 0.16 || "L3".equals(unit.layer())) scored.add(new ScoredMemory(unit, score));
+                    ? semantic * 0.50 + lexical * 0.20 + unit.confidence() * 0.12
+                    + recency * 0.08 + scopeAffinity * 0.05 + feedbackScore * 0.05
+                    : lexical * 0.62 + unit.confidence() * 0.15 + recency * 0.10
+                    + scopeAffinity * 0.08 + feedbackScore * 0.05;
+            if (score >= Math.max(0.08, properties.minRelevance() * 0.40)) {
+                candidates.add(new CandidateMemory(unit, score, semantic, lexical));
+            }
+        }
+        candidates.sort(Comparator.comparingDouble(CandidateMemory::baseScore).reversed()
+                .thenComparing(value -> value.unit().updatedAt(), Comparator.reverseOrder()));
+        int candidateLimit = Math.min(properties.retrievalCandidateLimit(), reranker.candidateLimit());
+        candidates = new ArrayList<>(candidates.stream().limit(candidateLimit).toList());
+        List<KnowledgeReranker.RerankCandidate> rerankCandidates = new ArrayList<>();
+        for (int index = 0; index < candidates.size(); index++) {
+            CandidateMemory candidate = candidates.get(index);
+            var unit = candidate.unit();
+            rerankCandidates.add(new KnowledgeReranker.RerankCandidate(index,
+                    unit.memoryKey() + " " + unit.memoryType() + " " + unit.tags(), unit.content(),
+                    candidate.lexical(), candidate.semantic(), candidate.baseScore()));
+        }
+        KnowledgeReranker.RerankResult reranked = reranker.rerank(query, rerankCandidates);
+        List<ScoredMemory> scored = new ArrayList<>();
+        for (int index = 0; index < candidates.size(); index++) {
+            CandidateMemory candidate = candidates.get(index);
+            double rerankScore = reranked.scores().getOrDefault(index, 0d);
+            double finalScore = reranked.crossEncoder()
+                    ? rerankScore * 0.65 + candidate.baseScore() * 0.35
+                    : rerankScore * 0.45 + candidate.baseScore() * 0.55;
+            scored.add(new ScoredMemory(candidate.unit(), finalScore, candidate.baseScore(),
+                    rerankScore, reranked.provider()));
         }
         scored.sort(Comparator.comparingDouble(ScoredMemory::score).reversed()
                 .thenComparing(value -> value.unit().updatedAt(), Comparator.reverseOrder()));
+        if (scored.isEmpty()) return MemoryContext.empty();
+        double adaptiveThreshold = Math.max(properties.minRelevance(), scored.get(0).score() * 0.55);
         List<ScoredMemory> selected = new ArrayList<>();
         int l3 = 0;
         Map<String, Integer> typeCounts = new HashMap<>();
         for (ScoredMemory value : scored) {
-            if ("L3".equals(value.unit().layer()) && l3 >= 5) continue;
+            if (value.score() < adaptiveThreshold) break;
+            if ("L3".equals(value.unit().layer()) && l3 >= 3) continue;
             String type = value.unit().memoryType();
             int typeLimit = switch (type) {
                 case "PREFERENCE" -> 2;
@@ -139,7 +183,11 @@ public class LayeredMemoryService {
             out.append(line);
             ids.add(unit.id());
             reasons.put(unit.id(), "type=" + unit.memoryType() + ",layer=" + unit.layer()
-                    + ",score=" + String.format(Locale.ROOT, "%.4f", value.score()));
+                    + ",scope=" + normalizedScopeType(unit.scopeType())
+                    + ",score=" + String.format(Locale.ROOT, "%.4f", value.score())
+                    + ",base=" + String.format(Locale.ROOT, "%.4f", value.baseScore())
+                    + ",rerank=" + String.format(Locale.ROOT, "%.4f", value.rerankScore())
+                    + ",provider=" + value.rerankProvider());
         }
         out.append("</memory>");
         return ids.isEmpty() ? MemoryContext.empty()
@@ -150,6 +198,7 @@ public class LayeredMemoryService {
         try {
             var run = store.findRun(runId).orElseThrow();
             var session = store.findSession(run.sessionId()).orElseThrow();
+            SqliteRuntimeStore.MemoryScope sourceScope = store.memoryScopeForRun(runId);
             List<SqliteRuntimeStore.MemoryExtractionMessage> snapshot = store.memoryExtractionSnapshot(runId);
             int from = Math.max(0, snapshot.size() - properties.extractionWindowMessages());
             List<SqliteRuntimeStore.MemoryExtractionMessage> sourceMessages =
@@ -214,11 +263,12 @@ public class LayeredMemoryService {
                         .limit(3).collect(java.util.stream.Collectors.joining("\n"));
                 String vector = embeddings.semanticEnabled()
                         ? mapper.writeValueAsString(embeddings.embed(key + " " + content)) : null;
-                SimilarCandidate similar = bestSimilar(session.projectKey(), key, content, type);
+                SqliteRuntimeStore.MemoryScope memoryScope = extractionScope(sourceScope, layer, type);
+                SimilarCandidate similar = bestSimilar(session.projectKey(), key, content, type, memoryScope);
                 if (similar != null && similar.score() >= 0.90) key = similar.unit().memoryKey();
                 var saved = store.upsertAutomaticMemory(session.projectKey(), key, content, tags, layer, type,
                         confidence, session.id(), runId, vector, evidenceIds, startSequence, endSequence,
-                        sourceExcerpt);
+                        sourceExcerpt, memoryScope);
                 if (similar != null && similar.score() >= 0.65 && similar.score() < 0.90
                         && !similar.unit().id().equals(saved.id())) {
                     store.openMemoryConflict(session.projectKey(), saved.id(), similar.unit().id(),
@@ -329,12 +379,74 @@ public class LayeredMemoryService {
         return List.copyOf(values);
     }
 
-    private SimilarCandidate bestSimilar(String projectKey, String key, String content, String type) {
+    static boolean scopeCompatible(SqliteRuntimeStore.MemoryUnit memory,
+                                   SqliteRuntimeStore.MemoryScope queryScope) {
+        String type = normalizedScopeType(memory.scopeType());
+        SqliteRuntimeStore.MemoryScope query = queryScope == null
+                ? SqliteRuntimeStore.MemoryScope.project() : queryScope;
+        return switch (type) {
+            case "AGENT" -> sameText(memory.scopeAgentProfileId(), query.agentProfileId())
+                    && (memory.scopeTaskType() == null || memory.scopeTaskType().isBlank()
+                    || sameText(memory.scopeTaskType(), query.taskType()));
+            case "WORKSPACE" -> sameText(memory.scopeWorkspaceOwnerRunId(), query.workspaceOwnerRunId());
+            case "TASK_TYPE" -> sameText(memory.scopeTaskType(), query.taskType());
+            default -> true;
+        };
+    }
+
+    private static boolean sameScope(SqliteRuntimeStore.MemoryUnit memory,
+                                     SqliteRuntimeStore.MemoryScope scope) {
+        String type = normalizedScopeType(memory.scopeType());
+        if (!type.equals(normalizedScopeType(scope.scopeType()))) return false;
+        return switch (type) {
+            case "AGENT" -> sameText(memory.scopeAgentProfileId(), scope.agentProfileId())
+                    && (memory.scopeTaskType() == null || memory.scopeTaskType().isBlank()
+                    || sameText(memory.scopeTaskType(), scope.taskType()));
+            case "WORKSPACE" -> sameText(memory.scopeWorkspaceOwnerRunId(), scope.workspaceOwnerRunId());
+            case "TASK_TYPE" -> sameText(memory.scopeTaskType(), scope.taskType());
+            default -> true;
+        };
+    }
+
+    private static SqliteRuntimeStore.MemoryScope extractionScope(SqliteRuntimeStore.MemoryScope source,
+                                                                  String layer, String memoryType) {
+        SqliteRuntimeStore.MemoryScope value = source == null
+                ? SqliteRuntimeStore.MemoryScope.project() : source;
+        String type;
+        if (("L1".equals(layer) || "EPISODIC".equals(memoryType)) && value.workspaceOwnerRunId() != null) {
+            type = "WORKSPACE";
+        } else if (Set.of("PROCEDURAL", "LESSON").contains(memoryType)
+                && value.agentProfileId() != null) {
+            type = "AGENT";
+        } else if (Set.of("PROCEDURAL", "LESSON").contains(memoryType)
+                && value.taskType() != null && !"CHAT".equals(value.taskType())) {
+            type = "TASK_TYPE";
+        } else {
+            type = "PROJECT";
+        }
+        return new SqliteRuntimeStore.MemoryScope(type, value.agentProfileId(), value.workspaceOwnerRunId(),
+                value.taskType());
+    }
+
+    private static String normalizedScopeType(String value) {
+        String normalized = value == null || value.isBlank() ? "PROJECT" : value.trim().toUpperCase(Locale.ROOT);
+        return Set.of("PROJECT", "AGENT", "WORKSPACE", "TASK_TYPE").contains(normalized)
+                ? normalized : "PROJECT";
+    }
+
+    private static boolean sameText(String left, String right) {
+        return left != null && right != null && !left.isBlank() && !right.isBlank()
+                && Objects.equals(left, right);
+    }
+
+    private SimilarCandidate bestSimilar(String projectKey, String key, String content, String type,
+                                         SqliteRuntimeStore.MemoryScope scope) {
         Set<String> candidateTerms = terms(content);
         float[] candidateVector = embeddings.semanticEnabled() ? embeddings.embed(key + " " + content) : new float[0];
         SimilarCandidate best = null;
         for (var unit : store.memoryUnits(projectKey, 300)) {
             if (unit.memoryKey().equals(key) || !unit.memoryType().equals(type)) continue;
+            if (!sameScope(unit, scope)) continue;
             double lexical = jaccard(candidateTerms, terms(unit.content()));
             double semantic = embeddings.semanticEnabled() ? cosine(candidateVector, vector(unit)) : lexical;
             double score = semantic * 0.7 + lexical * 0.3;
@@ -392,7 +504,10 @@ public class LayeredMemoryService {
         return Math.pow(0.5, (double) days / halfLifeDays);
     }
 
-    private record ScoredMemory(SqliteRuntimeStore.MemoryUnit unit, double score) { }
+    private record CandidateMemory(SqliteRuntimeStore.MemoryUnit unit, double baseScore,
+                                   double semantic, double lexical) { }
+    private record ScoredMemory(SqliteRuntimeStore.MemoryUnit unit, double score, double baseScore,
+                                double rerankScore, String rerankProvider) { }
     private record SimilarCandidate(SqliteRuntimeStore.MemoryUnit unit, double score) { }
     public record MemoryContext(String content, List<String> memoryIds, Map<String, String> reasons) {
         public static MemoryContext empty() { return new MemoryContext("", List.of(), Map.of()); }

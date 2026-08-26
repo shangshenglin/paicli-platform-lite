@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -111,6 +112,55 @@ class MemoryStoreTest {
         assertThat(store.memoryFeedbackScores(List.of(memory.id()))).containsEntry(memory.id(), 0d);
         store.recordMemoryOutcome(run.id(), "VALIDATED");
         assertThat(store.memoryFeedbackScores(List.of(memory.id()))).containsEntry(memory.id(), 1d);
+    }
+
+    @Test
+    void persistsStructuredRetrievalScopeFromTheSourceRun() throws Exception {
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
+        store.initialize();
+        var session = store.createSession("scoped memory", "project-a");
+        var run = store.createRun(session.id(), "Implement the agent workflow", "auto", "", List.of(),
+                null, "agent-java", 0, 0);
+
+        var episodic = store.upsertAutomaticMemory("project-a", "current-workspace", "Current workspace fact", "",
+                "L1", "FACT", 0.9, session.id(), run.id(), null);
+        var lesson = store.upsertAutomaticMemory("project-a", "agent-lesson", "Reusable agent lesson", "",
+                "L2", "LESSON", 0.9, session.id(), run.id(), null);
+
+        var units = store.memoryUnits("project-a", 10);
+        var episodicUnit = units.stream().filter(value -> value.id().equals(episodic.id())).findFirst().orElseThrow();
+        var lessonUnit = units.stream().filter(value -> value.id().equals(lesson.id())).findFirst().orElseThrow();
+        assertThat(episodicUnit.scopeType()).isEqualTo("WORKSPACE");
+        assertThat(episodicUnit.scopeWorkspaceOwnerRunId()).isEqualTo(run.id());
+        assertThat(lessonUnit.scopeType()).isEqualTo("AGENT");
+        assertThat(lessonUnit.scopeAgentProfileId()).isEqualTo("agent-java");
+        assertThat(lessonUnit.structuredPayload()).contains("scopeVersion", "agent-java");
+    }
+
+    @Test
+    void migration43BackfillsLegacyAutomaticMemoryScope() throws Exception {
+        SqliteRuntimeStore store = new SqliteRuntimeStore(properties());
+        store.initialize();
+        var session = store.createSession("legacy scope", "project-a");
+        var run = store.createRun(session.id(), "Agent lesson", "auto", "", List.of(),
+                null, "agent-legacy", 0, 0);
+        var memory = store.upsertAutomaticMemory("project-a", "legacy-agent-lesson", "Legacy agent lesson", "",
+                "L3", "LESSON", 0.9, session.id(), run.id(), null);
+        String url = "jdbc:sqlite:" + tempDir.resolve("paicli.db").toAbsolutePath();
+        try (var connection = DriverManager.getConnection(url); var statement = connection.prepareStatement(
+                "UPDATE memories SET structured_payload='{}',scope_type='PROJECT'," +
+                        "scope_agent_profile_id=NULL,scope_workspace_owner_run_id=NULL,scope_task_type=NULL WHERE id=?")) {
+            statement.setString(1, memory.id());
+            statement.executeUpdate();
+        }
+
+        SqliteRuntimeStore migrated = new SqliteRuntimeStore(properties());
+        migrated.initialize();
+
+        var unit = migrated.findMemoryUnit(memory.id()).orElseThrow();
+        assertThat(unit.scopeType()).isEqualTo("AGENT");
+        assertThat(unit.scopeAgentProfileId()).isEqualTo("agent-legacy");
+        assertThat(unit.scopeTaskType()).isEqualTo("AGENT");
     }
 
     private PlatformProperties properties() {

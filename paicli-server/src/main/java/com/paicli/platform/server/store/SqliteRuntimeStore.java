@@ -187,9 +187,16 @@ public class SqliteRuntimeStore {
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "valid_to", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "supersedes_id", "TEXT");
             SqliteSchemaMigrator.ensureColumn(connection, "memories", "checksum", "TEXT NOT NULL DEFAULT ''");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "scope_type",
+                    "TEXT NOT NULL DEFAULT 'PROJECT'");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "scope_agent_profile_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "scope_workspace_owner_run_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "memories", "scope_task_type", "TEXT");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_key, updated_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_status " +
                     "ON memories(project_key,status,enabled,updated_at)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope " +
+                    "ON memories(project_key,scope_type,scope_agent_profile_id,scope_task_type,updated_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS memory_revisions (" +
                     "id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, " +
                     "layer TEXT NOT NULL, memory_type TEXT NOT NULL, confidence REAL NOT NULL, " +
@@ -705,7 +712,6 @@ public class SqliteRuntimeStore {
                     "(SELECT run_id FROM tool_calls WHERE status='UNKNOWN') AND status NOT IN " +
                     "('COMPLETED','FAILED','CANCELED')");
             reconcileBudgetStoppedCompletions(connection);
-            SqliteSchemaMigrator.recordAppliedVersions(connection);
             statement.execute("UPDATE approvals SET status='DENIED',resolved_at='" + Instant.now()
                     + "' WHERE status='PENDING' AND run_id IN "
                     + "(SELECT id FROM runs WHERE status IN ('COMPLETED','FAILED','CANCELED'))");
@@ -731,7 +737,44 @@ public class SqliteRuntimeStore {
                     Instant.now() + "' WHERE status='RUNNING'");
         }
         reconcileCollaborationTaskWorkspaces();
+        try (Connection connection = open()) {
+            backfillMemoryScopes(connection);
+            SqliteSchemaMigrator.recordAppliedVersions(connection);
+        }
         recoverInterruptedRuns();
+    }
+
+    /**
+     * Migration 43 derives retrieval scope for historical automatic memories from their immutable source Run.
+     * The update is intentionally idempotent; manually created memories remain project scoped.
+     */
+    private void backfillMemoryScopes(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("UPDATE memories SET scope_agent_profile_id=(SELECT r.agent_profile_id " +
+                    "FROM runs r WHERE r.id=memories.source_run_id) WHERE origin='automatic' " +
+                    "AND source_run_id IS NOT NULL AND COALESCE(structured_payload,'{}')='{}'");
+            statement.executeUpdate("UPDATE memories SET scope_workspace_owner_run_id=COALESCE(" +
+                    "(SELECT NULLIF(ps.workspace_ref,'') FROM plan_steps ps " +
+                    "WHERE ps.run_id=memories.source_run_id ORDER BY ps.updated_at DESC LIMIT 1)," +
+                    "(SELECT COALESCE(NULLIF(r.workspace_owner_run_id,''),r.id) FROM runs r " +
+                    "WHERE r.id=memories.source_run_id)) WHERE origin='automatic' " +
+                    "AND source_run_id IS NOT NULL AND COALESCE(structured_payload,'{}')='{}'");
+            statement.executeUpdate("UPDATE memories SET scope_task_type=CASE " +
+                    "WHEN EXISTS(SELECT 1 FROM collaboration_task_runs ctr " +
+                    "WHERE ctr.run_id=memories.source_run_id) THEN 'COLLABORATION' " +
+                    "WHEN EXISTS(SELECT 1 FROM plan_steps ps WHERE ps.run_id=memories.source_run_id) THEN 'PLAN' " +
+                    "WHEN EXISTS(SELECT 1 FROM run_delegations rd " +
+                    "WHERE rd.child_run_id=memories.source_run_id) THEN 'DELEGATION' " +
+                    "WHEN scope_agent_profile_id IS NOT NULL THEN 'AGENT' ELSE 'CHAT' END " +
+                    "WHERE origin='automatic' AND source_run_id IS NOT NULL " +
+                    "AND COALESCE(structured_payload,'{}')='{}'");
+            statement.executeUpdate("UPDATE memories SET scope_type=CASE " +
+                    "WHEN layer='L1' OR memory_type='EPISODIC' THEN 'WORKSPACE' " +
+                    "WHEN memory_type IN ('PROCEDURAL','LESSON') AND scope_agent_profile_id IS NOT NULL THEN 'AGENT' " +
+                    "WHEN memory_type IN ('PROCEDURAL','LESSON') AND scope_task_type<>'CHAT' THEN 'TASK_TYPE' " +
+                    "ELSE 'PROJECT' END WHERE origin='automatic' " +
+                    "AND COALESCE(structured_payload,'{}')='{}'");
+        }
     }
 
     private void reconcileBudgetStoppedCompletions(Connection connection) throws SQLException {
@@ -2428,12 +2471,25 @@ public class SqliteRuntimeStore {
                                               String sessionId, String runId, String embeddingJson,
                                               List<String> sourceMessageIds, Long sourceStartSequence,
                                               Long sourceEndSequence, String sourceExcerpt) {
+        MemoryScope sourceScope = runId == null ? MemoryScope.project() : memoryScopeForRun(runId);
+        return upsertAutomaticMemory(projectKey, memoryKey, content, tags, layer, memoryType, confidence,
+                sessionId, runId, embeddingJson, sourceMessageIds, sourceStartSequence, sourceEndSequence,
+                sourceExcerpt, defaultMemoryScope(sourceScope, layer, memoryType));
+    }
+
+    public MemoryRecord upsertAutomaticMemory(String projectKey, String memoryKey, String content, String tags,
+                                              String layer, String memoryType, double confidence,
+                                              String sessionId, String runId, String embeddingJson,
+                                              List<String> sourceMessageIds, Long sourceStartSequence,
+                                              Long sourceEndSequence, String sourceExcerpt, MemoryScope memoryScope) {
         String project = normalizeProjectKey(projectKey);
         String key = requireText(memoryKey, "memoryKey", 120);
         String value = requireText(content, "content", 32_000);
         String normalizedTags = tags == null ? "" : tags.trim();
         String normalizedLayer = Set.of("L1", "L2", "L3").contains(layer) ? layer : "L1";
         String normalizedType = memoryType == null || memoryType.isBlank() ? "FACT" : memoryType.trim().toUpperCase();
+        MemoryScope normalizedScope = normalizeMemoryScope(memoryScope);
+        String structuredPayload = memoryScopePayload(normalizedScope);
         double normalizedConfidence = Math.max(0, Math.min(1, confidence));
         Instant now = Instant.now();
         try (Connection connection = open()) {
@@ -2449,8 +2505,10 @@ public class SqliteRuntimeStore {
                 try (PreparedStatement ps = connection.prepareStatement(
                         "INSERT INTO memories(id,project_key,memory_key,content,tags,created_at,updated_at," +
                                 "layer,memory_type,confidence,origin,source_session_id,source_run_id,embedding_json," +
-                                "structured_payload,status,source_type,source_id,source_revision,valid_from,supersedes_id,checksum) " +
-                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_key,memory_key) DO UPDATE SET " +
+                                "structured_payload,status,source_type,source_id,source_revision,valid_from,supersedes_id,checksum," +
+                                "scope_type,scope_agent_profile_id,scope_workspace_owner_run_id,scope_task_type) " +
+                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+                                "ON CONFLICT(project_key,memory_key) DO UPDATE SET " +
                                 "content=excluded.content,tags=excluded.tags,updated_at=excluded.updated_at," +
                                 "layer=excluded.layer,memory_type=excluded.memory_type,confidence=excluded.confidence," +
                                 "origin='automatic',source_session_id=excluded.source_session_id," +
@@ -2458,7 +2516,10 @@ public class SqliteRuntimeStore {
                                 "structured_payload=excluded.structured_payload,status=excluded.status," +
                                 "source_type=excluded.source_type,source_id=excluded.source_id," +
                                 "source_revision=excluded.source_revision,valid_from=COALESCE(memories.valid_from,excluded.valid_from)," +
-                                "supersedes_id=excluded.supersedes_id,checksum=excluded.checksum")) {
+                                "supersedes_id=excluded.supersedes_id,checksum=excluded.checksum," +
+                                "scope_type=excluded.scope_type,scope_agent_profile_id=excluded.scope_agent_profile_id," +
+                                "scope_workspace_owner_run_id=excluded.scope_workspace_owner_run_id," +
+                                "scope_task_type=excluded.scope_task_type")) {
                     ps.setString(1, memoryId);
                     ps.setString(2, project);
                     ps.setString(3, key);
@@ -2473,7 +2534,7 @@ public class SqliteRuntimeStore {
                     ps.setString(12, sessionId);
                     ps.setString(13, runId);
                     ps.setString(14, embeddingJson);
-                    ps.setString(15, "{}");
+                    ps.setString(15, structuredPayload);
                     ps.setString(16, "ACTIVE");
                     ps.setString(17, "run");
                     ps.setString(18, runId);
@@ -2482,6 +2543,10 @@ public class SqliteRuntimeStore {
                             ? existing.createdAt().toString() : existing.validFrom().toString());
                     ps.setString(21, existing == null || existing.content().equals(value) ? null : existing.id());
                     ps.setString(22, checksum(key + "\n" + value));
+                    ps.setString(23, normalizedScope.scopeType());
+                    ps.setString(24, normalizedScope.agentProfileId());
+                    ps.setString(25, normalizedScope.workspaceOwnerRunId());
+                    ps.setString(26, normalizedScope.taskType());
                     ps.executeUpdate();
                 }
                 insertMemorySource(connection, memoryId, "run", runId, runId == null ? "1" : runId,
@@ -3053,6 +3118,28 @@ public class SqliteRuntimeStore {
             return workspaceOwnerRunId(connection, runId);
         } catch (SQLException e) {
             throw failure("resolve delegated workspace", e);
+        }
+    }
+
+    public MemoryScope memoryScopeForRun(String runId) {
+        if (runId == null || runId.isBlank()) return MemoryScope.project();
+        String workspace = workspaceOwnerRunId(runId);
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT r.agent_profile_id,CASE " +
+                        "WHEN EXISTS(SELECT 1 FROM collaboration_task_runs ctr WHERE ctr.run_id=r.id) " +
+                        "THEN 'COLLABORATION' " +
+                        "WHEN EXISTS(SELECT 1 FROM plan_steps step WHERE step.run_id=r.id) THEN 'PLAN' " +
+                        "WHEN EXISTS(SELECT 1 FROM run_delegations d WHERE d.child_run_id=r.id) THEN 'DELEGATION' " +
+                        "WHEN r.agent_profile_id IS NOT NULL THEN 'AGENT' ELSE 'CHAT' END task_type " +
+                        "FROM runs r WHERE r.id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return MemoryScope.project();
+                return new MemoryScope("PROJECT", rs.getString("agent_profile_id"), workspace,
+                        rs.getString("task_type"));
+            }
+        } catch (SQLException e) {
+            throw failure("resolve memory scope", e);
         }
     }
 
@@ -5721,7 +5808,15 @@ public class SqliteRuntimeStore {
                              boolean pinned, boolean enabled, Instant confirmedAt,
                              String structuredPayload, String status, String sourceType, String sourceId,
                              String sourceRevision, Instant validFrom, Instant validTo, String supersedesId,
-                             String checksum) { }
+                             String checksum, String scopeType, String scopeAgentProfileId,
+                             String scopeWorkspaceOwnerRunId, String scopeTaskType) { }
+
+    public record MemoryScope(String scopeType, String agentProfileId,
+                              String workspaceOwnerRunId, String taskType) {
+        public static MemoryScope project() {
+            return new MemoryScope("PROJECT", null, null, null);
+        }
+    }
 
     public record MemoryWikiPage(String id, String projectKey, String memoryKey, String title, String content,
                                   String tags, String layer, String memoryType, double confidence, String origin,
@@ -5880,7 +5975,9 @@ public class SqliteRuntimeStore {
                 confirmedAt == null || confirmedAt.isBlank() ? null : Instant.parse(confirmedAt),
                 rs.getString("structured_payload"), rs.getString("status"), rs.getString("source_type"),
                 rs.getString("source_id"), rs.getString("source_revision"), instant(rs.getString("valid_from")),
-                instant(rs.getString("valid_to")), rs.getString("supersedes_id"), rs.getString("checksum"));
+                instant(rs.getString("valid_to")), rs.getString("supersedes_id"), rs.getString("checksum"),
+                rs.getString("scope_type"), rs.getString("scope_agent_profile_id"),
+                rs.getString("scope_workspace_owner_run_id"), rs.getString("scope_task_type"));
     }
 
     private static ApprovalPolicy mapApprovalPolicy(ResultSet rs) throws SQLException {
@@ -5902,6 +5999,54 @@ public class SqliteRuntimeStore {
             throw new IllegalArgumentException("projectKey must match [a-zA-Z0-9_.-]{1,80}");
         }
         return normalized;
+    }
+
+    private static MemoryScope defaultMemoryScope(MemoryScope source, String layer, String memoryType) {
+        MemoryScope available = source == null ? MemoryScope.project() : source;
+        String normalizedLayer = layer == null ? "L1" : layer.trim().toUpperCase();
+        String normalizedType = memoryType == null ? "FACT" : memoryType.trim().toUpperCase();
+        String scopeType;
+        if (("L1".equals(normalizedLayer) || "EPISODIC".equals(normalizedType))
+                && available.workspaceOwnerRunId() != null) {
+            scopeType = "WORKSPACE";
+        } else if (Set.of("PROCEDURAL", "LESSON").contains(normalizedType)
+                && available.agentProfileId() != null) {
+            scopeType = "AGENT";
+        } else if (Set.of("PROCEDURAL", "LESSON").contains(normalizedType)
+                && available.taskType() != null && !"CHAT".equals(available.taskType())) {
+            scopeType = "TASK_TYPE";
+        } else {
+            scopeType = "PROJECT";
+        }
+        return new MemoryScope(scopeType, available.agentProfileId(), available.workspaceOwnerRunId(),
+                available.taskType());
+    }
+
+    private static MemoryScope normalizeMemoryScope(MemoryScope scope) {
+        MemoryScope value = scope == null ? MemoryScope.project() : scope;
+        String type = value.scopeType() == null ? "PROJECT" : value.scopeType().trim().toUpperCase();
+        if (!Set.of("PROJECT", "AGENT", "WORKSPACE", "TASK_TYPE").contains(type)) type = "PROJECT";
+        String agent = nullableText(value.agentProfileId());
+        String workspace = nullableText(value.workspaceOwnerRunId());
+        String taskType = nullableText(value.taskType());
+        if (("AGENT".equals(type) && agent == null)
+                || ("WORKSPACE".equals(type) && workspace == null)
+                || ("TASK_TYPE".equals(type) && taskType == null)) type = "PROJECT";
+        return new MemoryScope(type, agent, workspace, taskType == null ? null : taskType.toUpperCase());
+    }
+
+    private String memoryScopePayload(MemoryScope scope) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("scopeVersion", 1);
+        payload.put("scopeType", scope.scopeType());
+        if (scope.agentProfileId() != null) payload.put("agentProfileId", scope.agentProfileId());
+        if (scope.workspaceOwnerRunId() != null) payload.put("workspaceOwnerRunId", scope.workspaceOwnerRunId());
+        if (scope.taskType() != null) payload.put("taskType", scope.taskType());
+        try {
+            return mapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to encode memory scope", e);
+        }
     }
 
     private static String normalizeThinkingMode(String value) {

@@ -43,6 +43,9 @@ public class MemoryController {
     }
 
     @GetMapping("/managed")
+    @Operation(summary = "List managed Memory with retrieval scope metadata",
+            description = "Each MemoryUnit exposes PROJECT/AGENT/WORKSPACE/TASK_TYPE scope and its optional "
+                    + "agent profile, workspace owner and task type identifiers used before reranking.")
     public List<SqliteRuntimeStore.MemoryUnit> managed(
             @RequestParam(defaultValue = "default") String projectKey,
             @RequestParam(defaultValue = "200") int limit) {

@@ -295,7 +295,7 @@ X-API-Key: your-key
 - **统一 Context Manifest**：Rules、Skill 索引、工具 Schema、摘要、历史、PlanState、Memory、RAG 和当前 Run 进入同一输入预算；Manifest 记录各区块 Token、选择原因、引用、裁剪与丢弃项，不再只在超限时失败。
 - **结构化工作记忆**：压缩摘要固定包含“目标与硬约束、计划状态、已验证事实、未验证假设、技术决策、失败尝试、待办与下一步、证据引用”八节。模型摘要缺节、乱序或超预算时拒绝采用，并回退到同 Schema 的确定性摘要。
 - **按需工具加载**：常驻核心工具加 `tool_search`；扩展能力只先暴露轻量目录项，模型搜索后才在后续轮次注入匹配工具的完整 Schema。Agent Profile 的显式工具白名单仍是上限，工具发现不能绕过权限。
-- **Memory 归并与反馈**：自动提取对高相似候选复用 canonical key，中等相似候选进入 OPEN conflict；L1 长期未访问记录自动标记 STALE。召回执行类型配额，保存本轮选择的 Memory id 与理由，并用 Run 完成/失败、Plan 验证通过/返工结果形成历史效果分，参与后续排序。
+- **Memory 归并与反馈**：自动提取对同一检索 Scope 内的高相似候选复用 canonical key，中等相似候选进入 OPEN conflict；L1 长期未访问记录自动标记 STALE。召回先按 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` 过滤，再对有界候选复用知识库 TEI Cross-Encoder（不可用时确定性回退），以最低相关性和相对门槛动态决定实际 Top K；Run 完成/失败、Plan 验证通过/返工结果继续形成历史效果分。
 - **协作降噪与证据门禁**：自动提取只在委派树根 Run 完成时排队；每个根 Run 最多写入 3 条（L1 至多 1、L2 至多 2、L3 至多 1）。流程事件、空/伪造证据和仅 Assistant 自述都会被丢弃；最终置信度由模型分数、证据质量、重复出现程度和层级稳定性校准，用户陈述上限 0.80，用户陈述加成功工具结果上限 0.95。
 - **专项评测**：官方 Starter Pack `1.1.0` 新增“Context 与 Memory Harness”套件，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现与统一上下文预算；依赖夹具的用例默认关闭，由用户准备数据后启用。
 
@@ -476,7 +476,7 @@ data/workspaces/{runId}/PAI.md
 - job 创建时冻结所属 Run 的不可变消息快照，Worker 不读取稍后变化的 Session；自动 Memory 保存来源 Message id、序列范围和摘录。
 - L1/L2/L3 Memory 保存类型、置信度、来源 Run/Session、访问统计和生命周期状态；长期未访问的短期 L1 可进入 `STALE`。
 - 同一 key 的新值替换当前事实，旧值进入 `memory_revisions`；高相似候选复用 canonical key，中等相似候选进入 `memory_conflicts` 人工审计队列。
-- 召回综合词法/语义相关性、置信度、时间衰减、层级、类型配额、置顶、启用状态和历史效果反馈。
+- 召回先应用项目、Agent、工作区和任务类型 Scope，再综合词法/语义、置信度、时间衰减和历史反馈生成候选；L3 不再无条件加分。候选复用本地 TEI Cross-Encoder 重排，失败时整批使用确定性分数，并以 `PAICLI_MEMORY_MIN_RELEVANCE` 和相对最佳分门槛动态返回 0 到 `PAICLI_MEMORY_RETRIEVAL_TOP_K` 条。
 - 每个 Run 记录被选入上下文的 Memory；Run 终态和 Plan 验证结果回写完成、失败、验证通过或返工结果，用于后续排序分析。
 - 显式 REST CRUD、人工确认、启停、置顶、合并、修订与历史恢复构成人工纠错边界。
 - Console 的“新增 L3 长期记忆”入口复用 `POST /v1/memories`，创建默认的人工 L3 Memory，适合主动录入稳定偏好、长期约束与可复用背景。
@@ -597,7 +597,7 @@ data/
    └─ skills/{name}/
 ```
 
-SQLite `schema_migrations` 当前记录版本 1–42：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–38 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理、协作工作区、WorkingPlan、反思、交付清单与 ExpertThread；39 增加仓库评测 fixture/grader/Patch Policy、不可变 Trial Case 快照和 Baseline Grader 详情；40 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）；41 补偿同一协作会话内历史遗漏关联的续作 Run，并恢复仍有活跃 Run 的根任务执行状态；42 为 `model_usage` 增加可复用前缀 Token 与 TTFT。
+SQLite `schema_migrations` 当前记录版本 1–43：版本 1–27 覆盖基础 Runtime、Plan/Graph、专家执行小队、Delegation Graph、Memory/RAG 与 Context Harness；28–38 覆盖增强 AgentTeam、CollaborationTask、事件 Trigger、阶段屏障、并发上限、审批清理、协作工作区、WorkingPlan、反思、交付清单与 ExpertThread；39 增加仓库评测 fixture/grader/Patch Policy、不可变 Trial Case 快照和 Baseline Grader 详情；40 增加完成合同（`run_completion_contracts`）、结构化工具证据（`tool_calls.result_metadata_json`）与 Deferred 外部工具调用（`tool_calls.wait_kind/wait_ref/waiting_since`，`WAITING_EXTERNAL`）；41 补偿同一协作会话内历史遗漏关联的续作 Run，并恢复仍有活跃 Run 的根任务执行状态；42 为 `model_usage` 增加可复用前缀 Token 与 TTFT；43 增加 Memory Scope 字段，并从历史自动 Memory 的来源 Run 幂等回填检索范围。
 
 ### 协作任务状态与交付语义（阶段 22–24 补充）
 
@@ -759,6 +759,8 @@ POST                        /v1/knowledge/documents/{projectKey}/{name}/feedback
 DELETE                      /v1/knowledge/documents/{projectKey}/{name}
 ```
 
+`GET /v1/memories/managed` 与 Memory 状态/修订接口返回的 `MemoryUnit` 包含 `scopeType`、`scopeAgentProfileId`、`scopeWorkspaceOwnerRunId` 和 `scopeTaskType`。人工 Memory 默认 `PROJECT`；自动 Memory 根据来源 Run、层级和类型确定 Scope。`PAICLI_MEMORY_RETRIEVAL_CANDIDATE_LIMIT` 控制送入 reranker 的候选上限，`PAICLI_MEMORY_MIN_RELEVANCE` 控制动态 Top K 的绝对最低分，TEI 复用 `PAICLI_RAG_RERANKER_*` 配置。
+
 ### Skill 与 MCP
 
 ```text
@@ -865,7 +867,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 | `PAICLI_WEB_*` | 可选 SearXNG 搜索、引擎选择和 Server 侧 Web 工具 |
 | `PAICLI_RAG_*` | Embedding、自动召回、PDF OCR，以及可选本地 TEI Cross-Encoder 的端点、模型、候选数、超时、输入上限和镜像/缓存下载配置 |
 | `PAICLI_MILVUS_*` | 可选 Milvus REST 端点、Token、数据库、collection 前缀、超时、向量候选上限及可信 registry 镜像覆盖；默认关闭 |
-| `PAICLI_MEMORY_*` | 自动提取、召回数量和最小置信度 |
+| `PAICLI_MEMORY_*` | 自动提取、候选/结果上限、最低相关性、上下文字符预算和最小置信度；Memory Cross-Encoder 复用 `PAICLI_RAG_RERANKER_*` |
 | `PAICLI_WORKER_COUNT` | Run Worker 并行度，默认 4；实际并行仍受项目预算、Plan/Delegation 依赖和资源锁约束 |
 | `PAICLI_DOCKER_*` | Docker 可执行文件/镜像、默认 `none` 网络、CPU/内存/PID、`/tmp`/HOME tmpfs、共享内存、启动与命令超时；命令超时同时是请求级 `timeoutSeconds` 上限 |
 | `PAICLI_RUN_QUEUE_BACKEND`、`PAICLI_COORDINATION_BACKEND`、`PAICLI_ARTIFACT_STORAGE_BACKEND` | 为后续 Kafka、Redis、MinIO 适配器预留的后端选择；当前只支持 `local` |

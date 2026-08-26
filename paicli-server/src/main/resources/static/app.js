@@ -256,7 +256,7 @@ const moduleExplainers = {
   'schedules': {title: '定时任务', summary: '按已保存的模板和目标在设定时间触发，不绕过常规运行边界。', facts: ['输入：模板 + 变量', '触发：计划时间']},
   'notifications': {title: '完成通知', summary: '为完成或异常事件配置通知，运行链路仍以持久化事件为准。', facts: ['来源：Run 事件', '范围：项目级']},
   'portability': {title: 'Session 导入导出', summary: '按 Markdown、JSON 或审计包导出会话；可选隐私脱敏。', facts: ['格式：Markdown / JSON', '审计：完整包']},
-  'memory': {title: '长期记忆', summary: 'Run 完成后先创建持久化 Extraction Job，再异步提取；召回按四类信号综合排序。', facts: ['语义 55% + 词法 25%', '置信度 10% + 新鲜度 10%', 'L3：奖励 +0.20', '反馈：效果 ×0.08']},
+  'memory': {title: '长期记忆', summary: 'Run 完成后异步提取；先按项目与 Agent/工作区/任务类型过滤，再由混合分数和 Cross-Encoder 动态选取。', facts: ['候选：语义 + 词法 + 置信度 + 新鲜度', '范围：PROJECT / AGENT / WORKSPACE / TASK_TYPE', '重排：复用本地 TEI，失败时确定性回退', 'Top K：最低相关性门槛 + 数量上限']},
   'memory-wiki': {title: '记忆浏览', summary: '按 L1/L2/L3、来源、置信度和修订历史检查记忆，人工编辑是纠错边界。', facts: ['层级：L1 / L2 / L3', '来源：Run / 人工', '反馈：历史效果参与排序']},
   'artifacts': {title: 'Artifact 工作台', summary: '集中列出 Run 生成的交付物，以所属 Run 和受控工作区作为追溯边界。', facts: ['归属：Run', '访问：受控路径']},
   'plans': {title: 'Plan 工作台', summary: '复杂任务以持久化 DAG 调度，步骤仍复用普通 ReAct Run，并保留验证证据。', facts: ['图：Step DAG', '调度：依赖 / 资源锁', '校验：Validation Check']},

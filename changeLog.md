@@ -1,5 +1,15 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-25
+
+### Memory 作用域隔离、TEI 重排与动态召回
+
+- 变更：Memory 召回在词法/Embedding 初排后复用现有 TEI Cross-Encoder Reranker，并在 TEI 禁用、超时或返回异常时整批回退确定性重排；新增 `PAICLI_MEMORY_RETRIEVAL_CANDIDATE_LIMIT` 与 `PAICLI_MEMORY_MIN_RELEVANCE`，以配置门槛和最佳候选相对门槛共同形成动态 Top K，`retrievalTopK` 只保留为上限，不再无条件填满固定 Top 8。召回原因现包含 scope、base、rerank、provider 等可审计字段。
+- 变更：取消 L3 固定 `+0.20` 加分，改由内容相关性、置信度、新鲜度、反馈与轻量作用域亲和度共同评分；L3 单次最多进入 3 条。自动提取的 Memory 按来源确定 `PROJECT`、`AGENT`、`WORKSPACE` 或 `TASK_TYPE` 作用域，召回前依据当前 Run 的 Agent Profile、工作区所有者和任务类型做结构化过滤，避免象棋、五子棋等长期协作经验泄漏到无关普通任务。
+- 变更：SQLite 兼容迁移 43 为 Memory 增加作用域字段和索引，并从不可变的来源 Run 回填历史自动 Memory；回填成功后才登记迁移版本。自动写入同时保存作用域审计 payload，`GET /v1/memories/managed` 返回新增作用域字段。README、OpenAPI 注解、`docs/architecture.md`、`docs/phases.md`、`.env.example` 与 Console 策略说明已同步；配置 record 保持唯一规范构造器，确保 Spring `@ConfigurationProperties` 可正常绑定。
+- 思路：Memory 继续以 SQLite 为权威存储，不进入 Milvus；Ollama Embedding 只用于初排语义特征，TEI 只处理有界候选并与基础分融合。先做确定性的结构化隔离，再做相关性初排与 Cross-Encoder 精排，最后执行动态门槛和类型/层级配额，避免用昂贵排序弥补本可提前排除的跨任务噪声。Sandbox 执行语义和产品站能力未变化，因此 `docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用；REST 路径与错误语义未变，响应字段说明已同步 README/OpenAPI。
+- 验证：Memory、Store、迁移与 Reranker 定向测试 66 项通过，覆盖 TEI 排序/失败回退、动态门槛、Agent/任务类型/工作区隔离、自动作用域持久化和迁移 43 历史回填；Spring 应用上下文与 Web 集成测试确认配置绑定和新增响应可正常启动。以进程级 `PAICLI_SANDBOX_MODE=local` 隔离本机已停止的 Docker Desktop 后，`mvnw.cmd test` 全 Reactor 共 334 项通过（Common 3、Server 326、Sandbox Agent 5）；静态资源回归夹具同步为页面现用的 `20260824-module-explainers-5` 版本。bundled Node `--check`、`mvnw.cmd package -DskipTests`、`git diff --check` 均通过，并已按 `git diff --name-only` 核对代码、配置、OpenAPI、README、架构、阶段与变更日志覆盖关系。
+
 ## 2026-08-24
 
 ### Console 模块策略悬停说明
