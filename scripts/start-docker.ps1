@@ -2,6 +2,7 @@ param([switch]$Restart)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+$rerankerWasRunning = $false
 
 function Get-ListeningProcessId([int]$Port) {
     $match = netstat -ano -p TCP |
@@ -39,6 +40,7 @@ function Stop-RerankerForBuild {
         --format "{{.Names}}"
 
     if ($running -eq "paicli-reranker") {
+        $script:rerankerWasRunning = $true
         Write-Host ""
         Write-Host "Stopping paicli-reranker temporarily to release build memory..."
 
@@ -202,7 +204,12 @@ try {
     }
 
     #
-    # 6. 启动 PaiCLI
+    # 6. 构建完成后恢复 reranker
+    #
+    Start-Reranker
+
+    #
+    # 7. 启动 PaiCLI
     #
     Write-Host ""
     Write-Host "Starting PaiCLI..."
@@ -213,15 +220,22 @@ try {
         throw "PaiCLI server startup failed"
     }
 
-    #
-    # 7. 项目启动完成后强制恢复 reranker
-    #
-    Start-Reranker
-
     Write-Host ""
     Write-Host "PaiCLI startup completed."
     Write-Host "Server:   http://127.0.0.1:8080"
     Write-Host "Reranker: running"
+}
+catch {
+    if ($rerankerWasRunning) {
+        try {
+            Write-Warning "Build/startup failed; restoring paicli-reranker..."
+            Start-Reranker
+        }
+        catch {
+            Write-Warning "Unable to restore paicli-reranker: $($_.Exception.Message)"
+        }
+    }
+    throw
 }
 finally {
     Pop-Location

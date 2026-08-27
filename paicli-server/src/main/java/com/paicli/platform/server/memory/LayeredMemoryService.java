@@ -40,6 +40,13 @@ public class LayeredMemoryService {
             "DECISION", "ENTITY_RELATION", "FACT", "CONSTRAINT", "LESSON");
     private static final int MAX_MEMORIES_PER_RUN = 3;
     private static final Map<String, Integer> MAX_MEMORIES_PER_LAYER = Map.of("L1", 1, "L2", 2, "L3", 1);
+    private static final Map<String, Integer> RETRIEVAL_LAYER_LIMITS = Map.of("L1", 1, "L2", 2, "L3", 1);
+    private static final int FALLBACK_TOP_K = 2;
+    private static final double FALLBACK_MIN_RELEVANCE = 0.60;
+    private static final double FALLBACK_MIN_BASE_SCORE = 0.55;
+    private static final double FALLBACK_MIN_LEXICAL = 0.25;
+    private static final double FALLBACK_MIN_SEMANTIC = 0.72;
+    private static final double CROSS_TASK_PROJECT_MIN_RERANK = 0.70;
     private static final Pattern PROCESS_EVENT = Pattern.compile("(?i)(?:\\bstage\\s+\\d+\\b|\\btask_[a-z0-9]+\\b|"
             + "\\bagent_[a-z0-9]+\\b|\\brun_[a-z0-9]+\\b|\\bcomment_[a-z0-9]+\\b|已派发|正在运行|已发布评论|恢复运行中|leader\\s*启动)");
     private static final Pattern TECHNICAL_CONCLUSION = Pattern.compile("(?i)(?:决定|决策|采用|方案|架构|接口|数据库|迁移|约束|验证|测试|设计|原因|"
@@ -141,18 +148,26 @@ public class LayeredMemoryService {
                     ? rerankScore * 0.65 + candidate.baseScore() * 0.35
                     : rerankScore * 0.45 + candidate.baseScore() * 0.55;
             scored.add(new ScoredMemory(candidate.unit(), finalScore, candidate.baseScore(),
-                    rerankScore, reranked.provider()));
+                    rerankScore, candidate.semantic(), candidate.lexical(), reranked.provider()));
         }
         scored.sort(Comparator.comparingDouble(ScoredMemory::score).reversed()
                 .thenComparing(value -> value.unit().updatedAt(), Comparator.reverseOrder()));
         if (scored.isEmpty()) return MemoryContext.empty();
-        double adaptiveThreshold = Math.max(properties.minRelevance(), scored.get(0).score() * 0.55);
+        double adaptiveThreshold = reranked.crossEncoder()
+                ? Math.max(properties.minRelevance(), scored.get(0).score() * 0.55)
+                : Math.max(FALLBACK_MIN_RELEVANCE, properties.minRelevance());
+        int selectionLimit = reranked.crossEncoder()
+                ? properties.retrievalTopK() : Math.min(properties.retrievalTopK(), FALLBACK_TOP_K);
         List<ScoredMemory> selected = new ArrayList<>();
-        int l3 = 0;
+        Map<String, Integer> layerCounts = new HashMap<>();
         Map<String, Integer> typeCounts = new HashMap<>();
         for (ScoredMemory value : scored) {
             if (value.score() < adaptiveThreshold) break;
-            if ("L3".equals(value.unit().layer()) && l3 >= 3) continue;
+            if (!reranked.crossEncoder() && !strongFallbackMatch(value)) continue;
+            if (crossTaskProjectMemory(value.unit(), queryScope)
+                    && (!reranked.crossEncoder() || value.rerankScore() < CROSS_TASK_PROJECT_MIN_RERANK)) continue;
+            String layer = value.unit().layer();
+            if (layerCounts.getOrDefault(layer, 0) >= RETRIEVAL_LAYER_LIMITS.getOrDefault(layer, 1)) continue;
             String type = value.unit().memoryType();
             int typeLimit = switch (type) {
                 case "PREFERENCE" -> 2;
@@ -160,10 +175,10 @@ public class LayeredMemoryService {
                 default -> 4;
             };
             if (typeCounts.getOrDefault(type, 0) >= typeLimit) continue;
-            if ("L3".equals(value.unit().layer())) l3++;
+            layerCounts.merge(layer, 1, Integer::sum);
             typeCounts.merge(type, 1, Integer::sum);
             selected.add(value);
-            if (selected.size() >= properties.retrievalTopK()) break;
+            if (selected.size() >= selectionLimit) break;
         }
         if (selected.isEmpty()) return MemoryContext.empty();
         StringBuilder out = new StringBuilder("<memory project=\"").append(projectKey).append("\">\n")
@@ -191,6 +206,8 @@ public class LayeredMemoryService {
                     + ",score=" + String.format(Locale.ROOT, "%.4f", value.score())
                     + ",base=" + String.format(Locale.ROOT, "%.4f", value.baseScore())
                     + ",rerank=" + String.format(Locale.ROOT, "%.4f", value.rerankScore())
+                    + ",lexical=" + String.format(Locale.ROOT, "%.4f", value.lexical())
+                    + ",semantic=" + String.format(Locale.ROOT, "%.4f", value.semantic())
                     + ",provider=" + value.rerankProvider());
         }
         out.append("</memory>");
@@ -417,6 +434,22 @@ public class LayeredMemoryService {
         };
     }
 
+    private static boolean crossTaskProjectMemory(SqliteRuntimeStore.MemoryUnit memory,
+                                                  SqliteRuntimeStore.MemoryScope queryScope) {
+        if (!"PROJECT".equals(normalizedScopeType(memory.scopeType()))
+                || !"automatic".equalsIgnoreCase(memory.origin())) return false;
+        SqliteRuntimeStore.MemoryScope query = queryScope == null
+                ? SqliteRuntimeStore.MemoryScope.project() : queryScope;
+        return memory.scopeTaskType() != null && !memory.scopeTaskType().isBlank()
+                && query.taskType() != null && !query.taskType().isBlank()
+                && !sameText(memory.scopeTaskType(), query.taskType());
+    }
+
+    private static boolean strongFallbackMatch(ScoredMemory value) {
+        return value.baseScore() >= FALLBACK_MIN_BASE_SCORE
+                && (value.lexical() >= FALLBACK_MIN_LEXICAL || value.semantic() >= FALLBACK_MIN_SEMANTIC);
+    }
+
     private static boolean sameScope(SqliteRuntimeStore.MemoryUnit memory,
                                      SqliteRuntimeStore.MemoryScope scope) {
         String type = normalizedScopeType(memory.scopeType());
@@ -500,9 +533,9 @@ public class LayeredMemoryService {
 
     private static double lexical(Set<String> query, String content) {
         if (query.isEmpty()) return 0;
-        String lower = content.toLowerCase(Locale.ROOT);
+        Set<String> contentTerms = terms(content);
         int matched = 0;
-        for (String term : query) if (lower.contains(term)) matched++;
+        for (String term : query) if (contentTerms.contains(term)) matched++;
         return (double) matched / query.size();
     }
 
@@ -530,7 +563,8 @@ public class LayeredMemoryService {
     private record CandidateMemory(SqliteRuntimeStore.MemoryUnit unit, double baseScore,
                                    double semantic, double lexical) { }
     private record ScoredMemory(SqliteRuntimeStore.MemoryUnit unit, double score, double baseScore,
-                                double rerankScore, String rerankProvider) { }
+                                double rerankScore, double semantic, double lexical,
+                                String rerankProvider) { }
     private record SimilarCandidate(SqliteRuntimeStore.MemoryUnit unit, double score) { }
     public record MemorySelection(String memoryId, String memoryKey, String layer, String memoryType,
                                   String scopeType, String sourceType, String sourceId, String content,

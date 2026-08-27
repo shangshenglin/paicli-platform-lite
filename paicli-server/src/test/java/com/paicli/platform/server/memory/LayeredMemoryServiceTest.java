@@ -26,6 +26,15 @@ class LayeredMemoryServiceTest {
     Path tempDir;
 
     @Test
+    void usesTighterRetrievalDefaults() {
+        MemoryProperties properties = new MemoryProperties(true, 0, 0, 0, 0, 0, 0);
+
+        assertThat(properties.retrievalTopK()).isEqualTo(3);
+        assertThat(properties.retrievalCandidateLimit()).isEqualTo(12);
+        assertThat(properties.minRelevance()).isEqualTo(0.50);
+    }
+
+    @Test
     void queuesOnlyTheDelegationRootForAutomaticExtraction() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("memory root", "project-a");
@@ -177,6 +186,80 @@ class LayeredMemoryServiceTest {
         var context = service.context("project-a", "workspace rule", queryRun.id());
 
         assertThat(context.memoryIds()).contains(shared.id()).doesNotContain(scoped.id(), workspaceScoped.id());
+    }
+
+    @Test
+    void fallbackRequiresStrongExactTermEvidenceAndReturnsAtMostTwoMemories() throws Exception {
+        SqliteRuntimeStore store = store();
+        var session = store.createSession("fallback memory", "project-a");
+        var run = store.createRun(session.id(), "Java");
+        SqliteRuntimeStore.MemoryScope chatProject =
+                new SqliteRuntimeStore.MemoryScope("PROJECT", null, null, "CHAT");
+        var l1 = automaticMemory(store, session.id(), run.id(), "java-runtime",
+                "Java runtime requirement", "L1", chatProject);
+        var l2 = automaticMemory(store, session.id(), run.id(), "java-build",
+                "Java build requirement", "L2", chatProject);
+        automaticMemory(store, session.id(), run.id(), "java-preference",
+                "Java is the preferred language", "L3", chatProject);
+        var javascript = automaticMemory(store, session.id(), run.id(), "javascript-build",
+                "JavaScript browser build requirement", "L2", chatProject);
+        KnowledgeEmbeddingService embeddings = mock(KnowledgeEmbeddingService.class);
+        when(embeddings.semanticEnabled()).thenReturn(false);
+        KnowledgeReranker reranker = fixedReranker(false, 0.99);
+        LayeredMemoryService service = new LayeredMemoryService(store, mock(ModelClient.class), embeddings,
+                new ObjectMapper(), new MemoryProperties(true, 8, 30, 0.35, 12_000, 0.65, 12), reranker);
+
+        var context = service.context("project-a", "Java", run.id());
+
+        assertThat(context.memoryIds()).hasSize(2).containsAnyOf(l1.id(), l2.id()).doesNotContain(javascript.id());
+        assertThat(context.reasons().values()).allMatch(reason -> reason.contains("provider=local-deterministic"));
+    }
+
+    @Test
+    void crossTaskAutomaticProjectMemoryRequiresAHighCrossEncoderScore() throws Exception {
+        SqliteRuntimeStore store = store();
+        var sourceSession = store.createSession("agent source", "project-a");
+        var sourceRun = store.createRun(sourceSession.id(), "Use Java 17", "auto", "", List.of(),
+                null, "agent-a", 0, 0);
+        var memory = automaticMemory(store, sourceSession.id(), sourceRun.id(), "java-agent-rule",
+                "Use Java 17 for compilation", "L2",
+                new SqliteRuntimeStore.MemoryScope("PROJECT", "agent-a", null, "AGENT"));
+        var querySession = store.createSession("chat query", "project-a");
+        var queryRun = store.createRun(querySession.id(), "Use Java 17");
+        KnowledgeEmbeddingService embeddings = mock(KnowledgeEmbeddingService.class);
+        when(embeddings.semanticEnabled()).thenReturn(false);
+        MemoryProperties properties = new MemoryProperties(true, 8, 30, 0.35, 12_000, 0.65, 12);
+        LayeredMemoryService fallback = new LayeredMemoryService(store, mock(ModelClient.class), embeddings,
+                new ObjectMapper(), properties, fixedReranker(false, 0.99));
+        LayeredMemoryService weakCrossEncoder = new LayeredMemoryService(store, mock(ModelClient.class), embeddings,
+                new ObjectMapper(), properties, fixedReranker(true, 0.69));
+        LayeredMemoryService strongCrossEncoder = new LayeredMemoryService(store, mock(ModelClient.class), embeddings,
+                new ObjectMapper(), properties, fixedReranker(true, 0.95));
+
+        assertThat(fallback.context("project-a", "Use Java 17", queryRun.id()).memoryIds()).isEmpty();
+        assertThat(weakCrossEncoder.context("project-a", "Use Java 17", queryRun.id()).memoryIds()).isEmpty();
+        assertThat(strongCrossEncoder.context("project-a", "Use Java 17", queryRun.id()).memoryIds())
+                .containsExactly(memory.id());
+    }
+
+    private static com.paicli.platform.server.domain.MemoryRecord automaticMemory(
+            SqliteRuntimeStore store, String sessionId, String runId, String key, String content, String layer,
+            SqliteRuntimeStore.MemoryScope scope) {
+        return store.upsertAutomaticMemory("project-a", key, content, "", layer, "FACT", 0.95,
+                sessionId, runId, null, List.of(), null, null, "", scope);
+    }
+
+    private static KnowledgeReranker fixedReranker(boolean crossEncoder, double score) {
+        KnowledgeReranker reranker = mock(KnowledgeReranker.class);
+        when(reranker.candidateLimit()).thenReturn(30);
+        when(reranker.rerank(anyString(), any())).thenAnswer(invocation -> {
+            List<KnowledgeReranker.RerankCandidate> candidates = invocation.getArgument(1);
+            var scores = new LinkedHashMap<Integer, Double>();
+            for (var candidate : candidates) scores.put(candidate.id(), score);
+            return new KnowledgeReranker.RerankResult(scores, crossEncoder,
+                    crossEncoder ? "tei-cross-encoder" : "local-deterministic");
+        });
+        return reranker;
     }
 
     private SqliteRuntimeStore store() throws Exception {

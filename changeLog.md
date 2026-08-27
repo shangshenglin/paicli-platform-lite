@@ -2,6 +2,19 @@
 
 ## 2026-08-27
 
+### Memory 召回收紧与 Reranker 降级保护
+
+- 变更：Memory 默认候选上限从 30 收紧为 12、结果上限从 8 收紧为 3、最低相关性从 0.35 提高到 0.50，并新增 L1≤1、L2≤2、L3≤1 的召回配额。词法覆盖改为规范化完整 term 匹配，避免 `Java` 通过子串命中 `JavaScript`。自动 PROJECT Memory 的来源任务类型与当前任务不同时，只有 TEI Cross-Encoder 原始分达到 0.70 才允许进入。
+- 变更：TEI 禁用、启动中或请求失败时继续保留确定性可用性，但改为 fail-closed 兜底：最终分至少 0.60、基础分至少 0.55，并要求词法覆盖至少 0.25 或语义相似至少 0.72，最多返回 2 条；Context Manifest 的选择原因新增 lexical/semantic 分，便于区分服务降级与策略淘汰。
+- 思路：真实 Run 证明 Cross-Encoder 启动后能排除无关记忆，但旧的确定性 fallback 会让 PROJECT 下的 2048、五子棋、纸牌等历史因置信度、时效和 `Java`/`JavaScript` 子串共同越过 0.35 门槛。此次不改变 L0 会话上下文、L1/L2/L3 持久化模型、SQLite Schema、REST API、Sandbox 或产品站能力，只收紧召回路径及默认配置；因此数据库迁移/Store 测试、OpenAPI、`docs/docker-sandbox.md` 和 `paicli-site/README.md` 不适用，README、架构、阶段状态和 `.env.example` 已同步。
+- 验证：`LayeredMemoryServiceTest` 与 `KnowledgeRerankerTest` 定向 11 项通过，覆盖默认配置、Cross-Encoder 相关性筛选、Scope、完整 term、fallback 强匹配/Top 2 和跨任务 PROJECT 门槛；`mvnw.cmd test` 全 Reactor 共 364 项通过（Common 3、Server 356、Sandbox 5），随后 `mvnw.cmd -pl paicli-server -am -DskipTests compile` 编译通过。`mvnw.cmd clean package -DskipTests` 在删除运行中 Java 进程锁定的 `paicli-server-0.6.0-SNAPSHOT.jar` 时失败，未擅自停止用户服务；失败发生在 Server clean 阶段、尚未进入本次源码编译，不是代码或测试失败。`git diff --check` 与文档覆盖门禁通过。
+
+### Docker 构建期间暂停并恢复 Reranker
+
+- 变更：调整 `scripts/start-docker.ps1` 的启动顺序，在 Server 与 Sandbox 构建完成后、前台启动 PaiCLI Server 之前恢复 `paicli-reranker`；记录构建前 reranker 是否运行，并在构建或启动失败时尽力恢复其原状态。
+- 思路：`run-server.ps1` 以前台 `java -jar` 阻塞运行，恢复动作放在其后实际上要等 Server 退出才执行，导致构建阶段暂停的 reranker 无法在正常启动流程中恢复。现在保留构建期释放 Docker 内存的策略，同时把恢复点放到阻塞启动之前；本次未改变 reranker 模型、端点、API、数据库、Sandbox 隔离或架构边界，故迁移/Store 测试、OpenAPI 注解、`docs/architecture.md`、`docs/phases.md`、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用，README 运行说明已同步。
+- 验证：PowerShell 脚本语法解析通过，`git diff --check` 通过；未执行完整 Docker 重建，避免在本次文档/脚本修正中再次触发长时间镜像构建。
+
 ### 本地 Langfuse 基础链路追踪与独立评测
 
 - 变更：新增默认关闭的 `paicli.langfuse` 配置与独立 OpenTelemetry OTLP/HTTP 导出器。每个 Run 建立 `paicli.agent.run` 根 observation，模型调用记录为 Generation，持久化后实际执行的工具记录为子 Span；关联 Session/Run、Provider/模型、Token、TTFT、耗时、工具目标与终态，取消和 Server 关闭均收口未完成根段。导出使用有界异步批处理并吞掉旁路异常，不改变 Runtime 正确性。

@@ -20,6 +20,7 @@
 - [x] 固定 Top 8 改为“绝对最低相关性 + 相对最佳分”的动态 Top K，`retrievalTopK` 仅保留为硬上限。
 - [x] 移除 L3 无条件 `+0.20`，保留置信度、时效、历史反馈和类型配额，避免长期但无关的记忆霸榜。
 - [x] 迁移 43 增加 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` Scope 字段，并从来源 Run 回填历史自动 Memory；检索和近重复归并均遵守 Scope。
+- [x] 收紧降级安全边界：默认候选/结果上限改为 12/3，增加 L1/L2/L3 配额；确定性 fallback 最多返回 2 条强匹配，跨任务类型的自动 PROJECT Memory 必须由高分 Cross-Encoder 放行，完整 term 匹配避免语言名等子串误召回。
 
 ## 2026-08-24 本地 Cross-Encoder Reranker
 

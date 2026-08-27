@@ -127,6 +127,8 @@ Local 模式用于开发和读取类工具验证，故意不允许真正执行�
 
 这样会先停止旧服务，再重打包 Server，避免 Windows 锁定运行中 JAR 导致 Spring Boot `repackage` 失败。完整回归测试仍使用 `.\mvnw.cmd clean test` 显式执行。
 
+为避免完整构建期间 Docker 内存不足，脚本会在构建前暂停当前正在运行的 `paicli-reranker`，完成 Server 与 Sandbox 构建后、启动前台 Server 前恢复它；如果构建或启动失败，且 reranker 原先处于运行状态，脚本会尝试恢复原状态。`start-local.ps1` 不负责启动 reranker。
+
 也可以分步执行：
 
 ```powershell
@@ -508,7 +510,7 @@ data/workspaces/{runId}/PAI.md
 - job 创建时冻结所属 Run 的不可变消息快照，Worker 不读取稍后变化的 Session；自动 Memory 保存来源 Message id、序列范围和摘录。
 - L1/L2/L3 Memory 保存类型、置信度、来源 Run/Session、访问统计和生命周期状态；长期未访问的短期 L1 可进入 `STALE`。
 - 同一 key 的新值替换当前事实，旧值进入 `memory_revisions`；高相似候选复用 canonical key，中等相似候选进入 `memory_conflicts` 人工审计队列。
-- 召回先应用项目、Agent、工作区和任务类型 Scope，再综合词法/语义、置信度、时间衰减和历史反馈生成候选；L3 不再无条件加分。候选复用本地 TEI Cross-Encoder 重排，失败时整批使用确定性分数，并以 `PAICLI_MEMORY_MIN_RELEVANCE` 和相对最佳分门槛动态返回 0 到 `PAICLI_MEMORY_RETRIEVAL_TOP_K` 条。
+- 召回先应用项目、Agent、工作区和任务类型 Scope，再综合词法/语义、置信度、时间衰减和历史反馈生成候选；L3 不再无条件加分。候选复用本地 TEI Cross-Encoder 重排，默认候选/结果上限收紧为 12/3，并按 L1≤1、L2≤2、L3≤1 控制层级多样性。自动 PROJECT Memory 跨任务类型时必须取得高 Cross-Encoder 分；TEI 禁用或失败时采用 fail-closed 确定性兜底，最多返回 2 条且要求强词法或高语义命中，避免基础分和泛化子串把无关历史塞入上下文。
 - 每个 Run 记录被选入上下文的 Memory；Run 终态和 Plan 验证结果回写完成、失败、验证通过或返工结果，用于后续排序分析。
 - 显式 REST CRUD、人工确认、启停、置顶、合并、修订与历史恢复构成人工纠错边界。
 - Console 的“新增 L3 长期记忆”入口复用 `POST /v1/memories`，创建默认的人工 L3 Memory，适合主动录入稳定偏好、长期约束与可复用背景。
@@ -793,7 +795,7 @@ POST                        /v1/knowledge/documents/{projectKey}/{name}/feedback
 DELETE                      /v1/knowledge/documents/{projectKey}/{name}
 ```
 
-`GET /v1/memories/managed` 与 Memory 状态/修订接口返回的 `MemoryUnit` 包含 `scopeType`、`scopeAgentProfileId`、`scopeWorkspaceOwnerRunId` 和 `scopeTaskType`。人工 Memory 默认 `PROJECT`；自动 Memory 根据来源 Run、层级和类型确定 Scope。`PAICLI_MEMORY_RETRIEVAL_CANDIDATE_LIMIT` 控制送入 reranker 的候选上限，`PAICLI_MEMORY_MIN_RELEVANCE` 控制动态 Top K 的绝对最低分，TEI 复用 `PAICLI_RAG_RERANKER_*` 配置。
+`GET /v1/memories/managed` 与 Memory 状态/修订接口返回的 `MemoryUnit` 包含 `scopeType`、`scopeAgentProfileId`、`scopeWorkspaceOwnerRunId` 和 `scopeTaskType`。人工 Memory 默认 `PROJECT`；自动 Memory 根据来源 Run、层级和类型确定 Scope。`PAICLI_MEMORY_RETRIEVAL_CANDIDATE_LIMIT` 控制送入 reranker 的候选上限（默认 12），`PAICLI_MEMORY_RETRIEVAL_TOP_K` 是 Cross-Encoder 成功时的结果硬上限（默认 3），`PAICLI_MEMORY_MIN_RELEVANCE` 控制绝对最低分（默认 0.50）；TEI 复用 `PAICLI_RAG_RERANKER_*` 配置，失败兜底会进一步限制为最多 2 条强匹配 Memory。
 
 ### Skill 与 MCP
 
