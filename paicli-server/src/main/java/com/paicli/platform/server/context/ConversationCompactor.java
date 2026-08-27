@@ -30,9 +30,15 @@ public class ConversationCompactor {
 
     public CompactionResult compactIfNeeded(String sessionId, String runId, int fixedPromptTokens,
                                             int maxContextTokens) {
+        return compactIfNeeded(sessionId, runId, fixedPromptTokens, maxContextTokens,
+                TokenEstimator.Profile.defaultProfile());
+    }
+
+    public CompactionResult compactIfNeeded(String sessionId, String runId, int fixedPromptTokens,
+                                            int maxContextTokens, TokenEstimator.Profile tokenProfile) {
         List<MessageRecord> active = store.activeMessages(sessionId);
         int currentTokens = fixedPromptTokens + active.stream()
-                .mapToInt(message -> TokenEstimator.estimateText(message.content()) + 8)
+                .mapToInt(message -> TokenEstimator.estimateText(message.content(), tokenProfile) + 8)
                 .sum();
         int contextTrigger = (int) (maxContextTokens * properties.summaryTriggerRatio());
         int runBudgetTrigger = properties.maxRunTokens() <= 0 ? Integer.MAX_VALUE
@@ -51,9 +57,9 @@ public class ConversationCompactor {
         String summary = summarizer.summarize(archived, summaryMaxChars);
         store.archiveAndAddSummary(sessionId, runId,
                 archived.stream().map(MessageRecord::id).toList(), summary);
-        int afterTokens = fixedPromptTokens + TokenEstimator.estimateText(summary)
+        int afterTokens = fixedPromptTokens + TokenEstimator.estimateText(summary, tokenProfile)
                 + active.subList(cutoff, active.size()).stream()
-                .mapToInt(message -> TokenEstimator.estimateText(message.content()) + 8).sum();
+                .mapToInt(message -> TokenEstimator.estimateText(message.content(), tokenProfile) + 8).sum();
         store.appendEvent(runId, "context.compacted", json(Map.of(
                 "beforeTokens", currentTokens,
                 "afterTokens", afterTokens,

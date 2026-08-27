@@ -166,11 +166,13 @@ public class RunProcessor {
                     : productivity.resolveModelProfile(session.projectKey(), run.modelProfileId());
             ContextManager.PreparedContext context = profile
                     .map(value -> contextManager.prepare(run.sessionId(), run.id(),
-                            value.maxContextTokens(), value.maxOutputTokens(), agentProfile.orElse(null)))
+                            value.maxContextTokens(), value.maxOutputTokens(), agentProfile.orElse(null),
+                            modelClient.name(), value.model()))
                     .orElseGet(() -> contextManager.prepare(run.sessionId(), run.id(),
                             modelProperties == null ? 0 : modelProperties.maxContextTokens(),
                             modelProperties == null ? 0 : modelProperties.maxOutputTokens(),
-                            agentProfile.orElse(null)));
+                            agentProfile.orElse(null), modelClient.name(),
+                            modelProperties == null ? "" : modelProperties.model()));
             var request = profile.map(value -> context.request().withRoute(productivity.route(value)))
                     .orElse(context.request());
             store.appendEvent(run.id(), "context.prepared", json(context.manifest()));
@@ -308,7 +310,9 @@ public class RunProcessor {
                 toolRouter.release(run.id());
                 return;
             }
-            store.appendEvent(run.id(), "model.tool_calls", json(Map.of("count", calls.size())));
+            store.appendEvent(run.id(), "model.tool_calls", json(Map.of(
+                    "count", calls.size(),
+                    "calls", calls.stream().map(this::toolCallEvent).toList())));
             List<ToolCallRecord> readOnly = readOnlyPrefix(calls);
             if (readOnly.size() >= 2) {
                 executeReadOnlyBatch(run, readOnly);
@@ -667,6 +671,26 @@ public class RunProcessor {
             return mapper.writeValueAsString(value);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to encode event", e);
+        }
+    }
+
+    private Map<String, Object> toolCallEvent(ToolCallRecord call) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("toolCallId", call.id());
+        value.put("providerCallId", call.providerCallId() == null ? "" : call.providerCallId());
+        value.put("name", call.toolName());
+        value.put("arguments", parseEventJson(call.arguments()));
+        value.put("argumentBytes", call.arguments() == null
+                ? 0 : call.arguments().getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        return value;
+    }
+
+    private Object parseEventJson(String value) {
+        if (value == null || value.isBlank()) return Map.of();
+        try {
+            return mapper.readTree(value);
+        } catch (Exception ignored) {
+            return value;
         }
     }
 

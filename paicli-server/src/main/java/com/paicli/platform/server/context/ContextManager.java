@@ -98,6 +98,14 @@ public class ContextManager {
 
     public PreparedContext prepare(String sessionId, String runId, int requestedContextTokens,
                                    int requestedOutputTokens, ProductivityStore.AgentProfile agentProfile) {
+        return prepare(sessionId, runId, requestedContextTokens, requestedOutputTokens, agentProfile,
+                modelProperties.provider(), modelProperties.model());
+    }
+
+    public PreparedContext prepare(String sessionId, String runId, int requestedContextTokens,
+                                   int requestedOutputTokens, ProductivityStore.AgentProfile agentProfile,
+                                   String providerName, String modelName) {
+        TokenEstimator.Profile tokenProfile = TokenEstimator.forModel(providerName, modelName);
         int contextLimit = requestedContextTokens <= 0
                 ? modelProperties.maxContextTokens() : requestedContextTokens;
         int outputLimit = requestedOutputTokens <= 0
@@ -136,11 +144,11 @@ public class ContextManager {
         if (!projectRules.isBlank()) stablePrefix.add(ModelMessage.system(projectRules));
         if (!skillIndex.isBlank()) stablePrefix.add(ModelMessage.system(skillIndex));
         if (!languageDirective.isBlank()) stablePrefix.add(ModelMessage.system(languageDirective));
-        int toolTokens = TokenEstimator.estimateTools(toolDefinitions);
-        int fixedTokens = TokenEstimator.estimateMessages(stablePrefix) + toolTokens
-                + messageTokens(runtime) + messageTokens(planState) + messageTokens(workingPlan)
-                + messageTokens(reflection);
-        var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit);
+        int toolTokens = TokenEstimator.estimateTools(toolDefinitions, tokenProfile);
+        int fixedTokens = TokenEstimator.estimateMessages(stablePrefix, tokenProfile) + toolTokens
+                + messageTokens(runtime, tokenProfile) + messageTokens(planState, tokenProfile)
+                + messageTokens(workingPlan, tokenProfile) + messageTokens(reflection, tokenProfile);
+        var compaction = compactor.compactIfNeeded(sessionId, runId, fixedTokens, contextLimit, tokenProfile);
 
         List<MessageRecord> active = store.activeMessages(sessionId);
         // Highest message sequence the model context saw when it was built; the run processor
@@ -164,7 +172,7 @@ public class ContextManager {
         RetrievedKnowledge retrievedKnowledge = autoRetrievedKnowledge(projectKey, runId, active);
         String query = currentUserQuery(runId, active);
         LayeredMemoryService.MemoryContext memoryContext = memoryService == null
-                ? new LayeredMemoryService.MemoryContext(projectMemories(projectKey), List.of(), Map.of())
+                ? new LayeredMemoryService.MemoryContext(projectMemories(projectKey), List.of(), Map.of(), List.of())
                 : memoryService.context(projectKey, query, runId);
 
         List<ModelMessage> requiredMessages = new ArrayList<>(stablePrefix);
@@ -176,7 +184,7 @@ public class ContextManager {
         if (!planState.isBlank()) requiredMessages.add(ModelMessage.user(planState));
         appendLanguageReminder(requiredMessages, languageDirective);
         requiredMessages.addAll(currentConversation);
-        int requiredTokens = TokenEstimator.estimateMessages(requiredMessages) + toolTokens;
+        int requiredTokens = TokenEstimator.estimateMessages(requiredMessages, tokenProfile) + toolTokens;
         if (requiredTokens > hardInputLimit) {
             throw new IllegalStateException("Required context and tool definitions exceed model budget after compaction: "
                     + requiredTokens + " > " + hardInputLimit);
@@ -184,7 +192,7 @@ public class ContextManager {
 
         int dynamicBudget = hardInputLimit - requiredTokens;
         DynamicBlocks dynamic = fitDynamicBlocks(
-                retrievedKnowledge.content(), memoryContext.content(), dynamicBudget);
+                retrievedKnowledge.content(), memoryContext.content(), dynamicBudget, tokenProfile);
         List<ModelMessage> messages = new ArrayList<>(stablePrefix);
         messages.addAll(summaries);
         messages.addAll(priorConversation);
@@ -197,19 +205,24 @@ public class ContextManager {
         appendLanguageReminder(messages, languageDirective);
         messages.addAll(currentConversation);
 
-        int estimated = TokenEstimator.estimateMessages(messages) + toolTokens;
+        int rawEstimated = TokenEstimator.estimateMessagesRaw(messages)
+                + TokenEstimator.estimateToolsRaw(toolDefinitions);
+        int estimated = TokenEstimator.estimateMessages(messages, tokenProfile) + toolTokens;
         if (estimated > hardInputLimit) {
             throw new IllegalStateException("Context exceeds model budget after dynamic allocation: "
                     + estimated + " > " + hardInputLimit);
         }
         int reusablePrefixTokens = TokenEstimator.estimateMessages(messages.subList(
-                0, stablePrefix.size() + summaries.size() + priorConversation.size()));
+                0, stablePrefix.size() + summaries.size() + priorConversation.size()), tokenProfile);
         List<String> includedCitations = retrievedKnowledge.citations().stream()
                 .filter(citation -> dynamic.knowledge().contains(citation)).toList();
         Map<String, List<String>> includedKnowledgeReasons = retrievedKnowledge.reasons().entrySet().stream()
                 .filter(entry -> includedCitations.contains(entry.getKey()))
                 .collect(java.util.stream.Collectors.toMap(
                         Map.Entry::getKey, Map.Entry::getValue, (first, ignored) -> first, LinkedHashMap::new));
+        List<KnowledgeSelection> includedKnowledgeSelections = retrievedKnowledge.selections().stream()
+                .filter(selection -> includedCitations.contains(selection.citation()))
+                .map(selection -> knowledgeContextSelection(selection, dynamic.knowledge())).toList();
         List<String> includedMemoryIds = memoryContext.memoryIds().stream()
                 .filter(id -> dynamic.memories().contains("id=" + id + " ")).toList();
         store.touchMemories(includedMemoryIds);
@@ -217,20 +230,23 @@ public class ContextManager {
         Map<String, String> includedMemoryReasons = memoryContext.reasons().entrySet().stream()
                 .filter(entry -> includedMemoryIds.contains(entry.getKey()))
                 .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        List<LayeredMemoryService.MemorySelection> includedMemorySelections = memoryContext.selections().stream()
+                .filter(selection -> includedMemoryIds.contains(selection.memoryId()))
+                .map(selection -> memoryContextSelection(selection, dynamic.memories())).toList();
         List<String> droppedSources = new ArrayList<>();
         if (dynamic.knowledgeTruncated()) droppedSources.add("RAG_TRUNCATED");
         if (dynamic.memoriesTruncated()) droppedSources.add("MEMORY_TRUNCATED");
         if (!retrievedKnowledge.content().isBlank() && dynamic.knowledge().isBlank()) droppedSources.add("RAG_DROPPED");
         if (!memoryContext.content().isBlank() && dynamic.memories().isBlank()) droppedSources.add("MEMORY_DROPPED");
         Map<String, Integer> sectionTokens = new LinkedHashMap<>();
-        sectionTokens.put("stable", TokenEstimator.estimateMessages(stablePrefix));
-        sectionTokens.put("summaries", TokenEstimator.estimateMessages(summaries));
-        sectionTokens.put("priorConversation", TokenEstimator.estimateMessages(priorConversation));
-        sectionTokens.put("runtime", messageTokens(runtime));
-        sectionTokens.put("planState", messageTokens(planState));
-        sectionTokens.put("knowledge", messageTokens(dynamic.knowledge()));
-        sectionTokens.put("memory", messageTokens(dynamic.memories()));
-        sectionTokens.put("currentRun", TokenEstimator.estimateMessages(currentConversation));
+        sectionTokens.put("stable", TokenEstimator.estimateMessages(stablePrefix, tokenProfile));
+        sectionTokens.put("summaries", TokenEstimator.estimateMessages(summaries, tokenProfile));
+        sectionTokens.put("priorConversation", TokenEstimator.estimateMessages(priorConversation, tokenProfile));
+        sectionTokens.put("runtime", messageTokens(runtime, tokenProfile));
+        sectionTokens.put("planState", messageTokens(planState, tokenProfile));
+        sectionTokens.put("knowledge", messageTokens(dynamic.knowledge(), tokenProfile));
+        sectionTokens.put("memory", messageTokens(dynamic.memories(), tokenProfile));
+        sectionTokens.put("currentRun", TokenEstimator.estimateMessages(currentConversation, tokenProfile));
         sectionTokens.put("tools", toolTokens);
         List<String> toolNames = toolDefinitions.stream().map(ModelToolDefinition::name).toList();
         Map<String, String> toolSelectionReasons = toolNames.stream().collect(
@@ -239,13 +255,17 @@ public class ContextManager {
                     return activatedTools.contains(name) ? "tool-search-activation" : "core-context-tool";
                 }, (first, ignored) -> first, LinkedHashMap::new));
         ContextManifest manifest = new ContextManifest(
-                contextLimit, outputLimit, hardInputLimit, estimated, toolTokens,
+                contextLimit, outputLimit, hardInputLimit, rawEstimated, estimated, toolTokens,
                 reusablePrefixTokens, stablePrefix.size(), summaries.size(), priorConversation.size(),
                 currentConversation.size(), !dynamic.knowledge().isBlank(), dynamic.knowledgeTruncated(),
                 !dynamic.memories().isBlank(), dynamic.memoriesTruncated(),
                 !planState.isBlank(), includedCitations, Map.copyOf(includedKnowledgeReasons),
-                includedMemoryIds, includedMemoryReasons, toolNames, Map.copyOf(toolSelectionReasons),
+                includedKnowledgeSelections, includedMemoryIds, includedMemoryReasons, includedMemorySelections,
+                toolNames, Map.copyOf(toolSelectionReasons),
                 activatedTools.stream().sorted().toList(), List.copyOf(droppedSources), Map.copyOf(sectionTokens),
+                tokenProfile.provider(), tokenProfile.model(), tokenProfile.tokenizer(),
+                tokenProfile.exactTokenizer(), tokenProfile.calibrationFactor(),
+                tokenProfile.calibrationSource(), contextFieldGroups(),
                 hashMessages(messages.subList(0,
                         stablePrefix.size() + summaries.size() + priorConversation.size())));
         return new PreparedContext(new ModelRequest(messages, toolDefinitions,
@@ -253,39 +273,42 @@ public class ContextManager {
                 estimated, compaction, manifest, maxMessageSequence);
     }
 
-    private static DynamicBlocks fitDynamicBlocks(String knowledge, String memories, int tokenBudget) {
+    private static DynamicBlocks fitDynamicBlocks(String knowledge, String memories, int tokenBudget,
+                                                  TokenEstimator.Profile tokenProfile) {
         if (tokenBudget <= 6 || (knowledge.isBlank() && memories.isBlank())) {
             return new DynamicBlocks("", "", !knowledge.isBlank(), !memories.isBlank());
         }
-        int knowledgeTokens = messageTokens(knowledge);
-        int memoryTokens = messageTokens(memories);
+        int knowledgeTokens = messageTokens(knowledge, tokenProfile);
+        int memoryTokens = messageTokens(memories, tokenProfile);
         if (knowledgeTokens + memoryTokens <= tokenBudget) {
             return new DynamicBlocks(knowledge, memories, false, false);
         }
         if (knowledge.isBlank()) {
-            String fitted = fitBlock(memories, tokenBudget);
+            String fitted = fitBlock(memories, tokenBudget, tokenProfile);
             return new DynamicBlocks("", fitted, false, !fitted.equals(memories));
         }
         if (memories.isBlank()) {
-            String fitted = fitBlock(knowledge, tokenBudget);
+            String fitted = fitBlock(knowledge, tokenBudget, tokenProfile);
             return new DynamicBlocks(fitted, "", !fitted.equals(knowledge), false);
         }
 
         int memoryReserve = Math.min(memoryTokens, Math.max(64, tokenBudget * 35 / 100));
-        String fittedKnowledge = fitBlock(knowledge, Math.max(0, tokenBudget - memoryReserve));
-        int remaining = Math.max(0, tokenBudget - messageTokens(fittedKnowledge));
-        String fittedMemories = fitBlock(memories, remaining);
-        remaining = Math.max(0, tokenBudget - messageTokens(fittedKnowledge) - messageTokens(fittedMemories));
+        String fittedKnowledge = fitBlock(knowledge, Math.max(0, tokenBudget - memoryReserve), tokenProfile);
+        int remaining = Math.max(0, tokenBudget - messageTokens(fittedKnowledge, tokenProfile));
+        String fittedMemories = fitBlock(memories, remaining, tokenProfile);
+        remaining = Math.max(0, tokenBudget - messageTokens(fittedKnowledge, tokenProfile)
+                - messageTokens(fittedMemories, tokenProfile));
         if (remaining > 6 && !fittedKnowledge.equals(knowledge)) {
-            fittedKnowledge = fitBlock(knowledge, messageTokens(fittedKnowledge) + remaining);
+            fittedKnowledge = fitBlock(knowledge,
+                    messageTokens(fittedKnowledge, tokenProfile) + remaining, tokenProfile);
         }
         return new DynamicBlocks(fittedKnowledge, fittedMemories,
                 !fittedKnowledge.equals(knowledge), !fittedMemories.equals(memories));
     }
 
-    private static String fitBlock(String value, int messageTokenBudget) {
+    private static String fitBlock(String value, int messageTokenBudget, TokenEstimator.Profile tokenProfile) {
         if (value == null || value.isBlank() || messageTokenBudget <= 6) return "";
-        if (messageTokens(value) <= messageTokenBudget) return value;
+        if (messageTokens(value, tokenProfile) <= messageTokenBudget) return value;
         int textBudget = messageTokenBudget - 6;
         int closingStart = value.lastIndexOf("</");
         String closing = closingStart >= 0 ? value.substring(closingStart) : "";
@@ -295,7 +318,7 @@ public class ContextManager {
         while (low < high) {
             int middle = (low + high + 1) >>> 1;
             String candidate = value.substring(0, middle) + marker + closing;
-            if (TokenEstimator.estimateText(candidate) <= textBudget) low = middle;
+            if (TokenEstimator.estimateText(candidate, tokenProfile) <= textBudget) low = middle;
             else high = middle - 1;
         }
         if (low == 0) return "";
@@ -306,8 +329,42 @@ public class ContextManager {
         return value.substring(0, low) + marker + closing;
     }
 
-    private static int messageTokens(String value) {
-        return value == null || value.isBlank() ? 0 : 6 + TokenEstimator.estimateText(value);
+    private static int messageTokens(String value, TokenEstimator.Profile tokenProfile) {
+        return value == null || value.isBlank() ? 0 : 6 + TokenEstimator.estimateText(value, tokenProfile);
+    }
+
+    private static KnowledgeSelection knowledgeContextSelection(KnowledgeSelection source, String contextBlock) {
+        String marker = "[" + source.citation();
+        int header = contextBlock.indexOf(marker);
+        int contentStart = header < 0 ? -1 : contextBlock.indexOf('\n', header);
+        String actual = contentStart < 0 ? "" : blockContent(contextBlock, contentStart + 1,
+                "\n[", "\n</retrieved_knowledge>");
+        return new KnowledgeSelection(source.citation(), source.fullCitation(), source.document(), source.chunk(),
+                source.startChar(), source.endChar(), source.documentVersion(), source.heading(), actual,
+                source.sourceContent(), !actual.equals(source.sourceContent()), source.score(),
+                source.vectorSimilarity(), source.lexicalScore(), source.rerankScore(),
+                source.retrievalStrategy(), source.selectionReasons());
+    }
+
+    private static LayeredMemoryService.MemorySelection memoryContextSelection(
+            LayeredMemoryService.MemorySelection source, String contextBlock) {
+        String marker = "- [id=" + source.memoryId() + " ";
+        int header = contextBlock.indexOf(marker);
+        int contentStart = header < 0 ? -1 : contextBlock.indexOf("] ", header);
+        String actual = contentStart < 0 ? "" : blockContent(contextBlock, contentStart + 2,
+                "\n- [id=", "\n[context truncated", "\n</memory>");
+        return new LayeredMemoryService.MemorySelection(source.memoryId(), source.memoryKey(), source.layer(),
+                source.memoryType(), source.scopeType(), source.sourceType(), source.sourceId(), actual,
+                source.sourceContent(), !actual.equals(source.sourceContent()));
+    }
+
+    private static String blockContent(String block, int start, String... terminators) {
+        int end = block.length();
+        for (String terminator : terminators) {
+            int candidate = block.indexOf(terminator, start);
+            if (candidate >= 0) end = Math.min(end, candidate);
+        }
+        return block.substring(Math.min(start, end), end).stripTrailing();
     }
 
     private static String hashMessages(List<ModelMessage> messages) {
@@ -390,6 +447,7 @@ public class ContextManager {
             }
             List<String> citations = new ArrayList<>();
             Map<String, List<String>> reasons = new LinkedHashMap<>();
+            List<KnowledgeSelection> selections = new ArrayList<>();
             for (var hit : hits) {
                 String citation = hit.document() + "#chunk-" + hit.chunk();
                 String block = "\n[" + citation
@@ -402,11 +460,17 @@ public class ContextManager {
                         hit.matchReasons() == null ? List.of() : hit.matchReasons());
                 why.add("strategy=" + hit.retrievalStrategy());
                 reasons.put(citation, List.copyOf(why));
+                selections.add(new KnowledgeSelection(citation, hit.citation(), hit.document(), hit.chunk(),
+                        hit.startChar(), hit.endChar(), hit.documentVersion(), hit.heading(), hit.content(),
+                        hit.content(), false,
+                        hit.score(), hit.vectorSimilarity(), hit.lexicalScore(), hit.rerankScore(),
+                        hit.retrievalStrategy(), List.copyOf(why)));
             }
             value.append("</retrieved_knowledge>");
             store.appendEvent(runId, "context.rag_retrieved", "{\"hits\":" + hits.size()
                     + ",\"attachedDocuments\":" + attachedDocuments.size() + "}");
-            return new RetrievedKnowledge(value.toString(), List.copyOf(citations), Map.copyOf(reasons));
+            return new RetrievedKnowledge(value.toString(), List.copyOf(citations), Map.copyOf(reasons),
+                    List.copyOf(selections));
         } catch (Exception e) {
             store.appendEvent(runId, "context.rag_failed", "{\"error\":\""
                     + escapeAttribute(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()) + "\"}");
@@ -525,10 +589,16 @@ public class ContextManager {
 
     private record DynamicBlocks(String knowledge, String memories,
                                  boolean knowledgeTruncated, boolean memoriesTruncated) { }
+    public record KnowledgeSelection(String citation, String fullCitation, String document, int chunk,
+                                     int startChar, int endChar, int documentVersion, String heading,
+                                     String content, String sourceContent, boolean contentTruncated,
+                                     double score, double vectorSimilarity, double lexicalScore,
+                                     double rerankScore, String retrievalStrategy, List<String> selectionReasons) { }
+
     private record RetrievedKnowledge(String content, List<String> citations,
-                                      Map<String, List<String>> reasons) {
+                                      Map<String, List<String>> reasons, List<KnowledgeSelection> selections) {
         private static RetrievedKnowledge empty() {
-            return new RetrievedKnowledge("", List.of(), Map.of());
+            return new RetrievedKnowledge("", List.of(), Map.of(), List.of());
         }
     }
 
@@ -536,6 +606,7 @@ public class ContextManager {
             int contextLimit,
             int outputLimit,
             int hardInputLimit,
+            int rawEstimatedInputTokens,
             int estimatedInputTokens,
             int toolDefinitionTokens,
             int reusablePrefixTokens,
@@ -550,15 +621,43 @@ public class ContextManager {
             boolean planStateIncluded,
             List<String> knowledgeCitations,
             Map<String, List<String>> knowledgeSelectionReasons,
+            List<KnowledgeSelection> knowledgeSelections,
             List<String> memoryIds,
             Map<String, String> memorySelectionReasons,
+            List<LayeredMemoryService.MemorySelection> memorySelections,
             List<String> toolNames,
             Map<String, String> toolSelectionReasons,
             List<String> activatedToolNames,
             List<String> droppedSources,
             Map<String, Integer> sectionTokens,
+            String tokenizerProvider,
+            String tokenizerModel,
+            String tokenizer,
+            boolean exactTokenizer,
+            double tokenCalibrationFactor,
+            String tokenCalibrationSource,
+            Map<String, List<String>> fieldGroups,
             String reusablePrefixSha256
     ) { }
+
+    private static Map<String, List<String>> contextFieldGroups() {
+        return Map.of(
+                "actualModelContext", List.of(
+                        "ModelRequest.messages[].role/content/reasoningContent/images/toolCalls",
+                        "ModelRequest.tools[].name/description/parameters",
+                        "ModelRequest.maxOutputTokens/thinkingMode/reasoningEffort"),
+                "serverEnforced", List.of(
+                        "contextLimit", "outputLimit", "hardInputLimit", "estimatedInputTokens",
+                        "knowledgeTruncated", "memoryTruncated", "droppedSources"),
+                "auditOnly", List.of(
+                        "all ContextManifest fields, including counts and included/truncated flags",
+                        "knowledgeCitations/knowledgeSelections/knowledgeSelectionReasons",
+                        "memoryIds/memorySelections/memorySelectionReasons",
+                        "toolNames/toolSelectionReasons/activatedToolNames", "sectionTokens",
+                        "rawEstimatedInputTokens/toolDefinitionTokens/reusablePrefixTokens",
+                        "tokenizerProvider/tokenizerModel/tokenizer/exactTokenizer",
+                        "tokenCalibrationFactor/tokenCalibrationSource/reusablePrefixSha256"));
+    }
 
     private String workingPlanPrompt(WorkingPlanRecord record) {
         StringBuilder value = new StringBuilder("<working_plan>\n");

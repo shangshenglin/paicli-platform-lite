@@ -19,7 +19,7 @@
 - 变更：`context.prepared` 保存实际纳入的 Knowledge document/chunk/version/字符范围/citation/评分以及 Memory id/key/source；对受预算裁剪的条目同时记录源全文、实际进入模型的片段和 `contentTruncated`。`fieldGroups` 明确标识真正进入供应商请求的 `ModelRequest.messages/tools` 与请求参数、服务端强制的限额/预算/裁剪，以及仅审计的 ID、分数、计数、选择理由和哈希；`knowledgeSelectionReasons` 只解释服务端选择，不注入模型 Context。
 - 变更：TokenEstimator 按 Provider/模型生成 Tokenizer Profile，并在 Manifest 记录 provider、model、tokenizer、是否精确、校准系数和来源，同时保留 raw/calibrated 两种估算。当前 DeepSeek 无精确 Tokenizer 时使用 code-point fallback，并依据本机 18 次真实供应商调用 `actual input / raw estimate` 的 P90（约 1.58、最大约 1.60）采用保守 `1.60` 系数；该校准后的数值用于上下文准入、RAG/Memory 动态预算、压缩与预算预留，不再把字符数除以 4 直接当最终值。
 - 思路：业务界面继续优先显示可读名称，但执行详情是事实审计边界，必须能从 Event → ToolCall → Provider Call、父 Run → Delegation → 子 Run、Context → Knowledge/Memory 来源逐级回跳。Manifest 保存的是请求组成的审计证明，不是第二份 Prompt；选择理由、ID 和评分不能因为被记录而进入模型。事件 payload 为向后兼容的加法变更，旧 count-only Event 仍由 Console 的空列表回退正常展示；数据库 Schema、Sandbox、配置、启动方式和产品站能力均未变化，因此迁移/Store 测试、`docs/docker-sandbox.md`、`.env.example` 与 `paicli-site/README.md` 不适用。
-- 验证：bundled Node `--check paicli-server/src/main/resources/static/app.js` 通过；48 项定向测试曾通过，覆盖 ToolCall 对象事件、Memory 提取对象、Token Profile、Context 字段处置、Run 审计父子导航与 Web/OpenAPI 启动。随后新增 Knowledge Chunk 源全文/实际片段断言；完整定向与全 Reactor 验证见本条最终补充。
+- 验证：bundled Node `--check paicli-server/src/main/resources/static/app.js` 通过；定向回归覆盖 ToolCall 对象事件、Memory 提取对象、真实 Knowledge Chunk 源全文/Context 实际片段、Token Profile、Context 字段处置、Run 审计父子导航与 Web/OpenAPI 启动。`mvnw.cmd clean test` 与 `mvnw.cmd clean package` 均通过，全 Reactor 共 349 项（Common 3、Server 341、Sandbox Agent 5）；同时修正迁移 44 已存在但旧 Store 回归仍只断言到 43 的分支内测试漂移。`git diff --check` 通过，仅有既有 Windows LF/CRLF 提示。
 
 ## 2026-08-25
 

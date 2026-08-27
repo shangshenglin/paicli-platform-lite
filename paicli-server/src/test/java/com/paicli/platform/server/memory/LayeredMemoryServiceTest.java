@@ -89,6 +89,15 @@ class LayeredMemoryServiceTest {
         assertThat(stored).filteredOn(memory -> "L1".equals(memory.layer())).hasSize(1);
         assertThat(stored).filteredOn(memory -> "L2".equals(memory.layer())).hasSize(2);
         assertThat(stored).filteredOn(memory -> "L3".equals(memory.layer())).isEmpty();
+        var extracted = store.events(run.id(), 0).stream()
+                .filter(event -> "memory.extracted".equals(event.type())).findFirst().orElseThrow();
+        var payload = new ObjectMapper().readTree(extracted.data());
+        assertThat(payload.path("count").asInt()).isEqualTo(3);
+        assertThat(payload.path("items").size()).isEqualTo(3);
+        assertThat(payload.path("items").get(0).path("memoryId").asText()).startsWith("memory_");
+        assertThat(payload.path("items").get(0).path("memorySourceId").asText()).startsWith("memory_source_");
+        assertThat(payload.path("items").get(0).path("sourceRunId").asText()).isEqualTo(run.id());
+        assertThat(payload.path("items").get(0).path("content").asText()).isNotBlank();
     }
 
     @Test
@@ -135,6 +144,11 @@ class LayeredMemoryServiceTest {
 
         assertThat(context.memoryIds()).containsExactly(relevant.id()).doesNotContain(irrelevant.id());
         assertThat(context.reasons().get(relevant.id())).contains("provider=tei-cross-encoder", "rerank=");
+        assertThat(context.selections()).singleElement().satisfies(selection -> {
+            assertThat(selection.memoryId()).isEqualTo(relevant.id());
+            assertThat(selection.memoryKey()).isEqualTo("java-build");
+            assertThat(selection.content()).isEqualTo("Use Java 17 and Maven Wrapper for reproducible builds.");
+        });
     }
 
     @Test

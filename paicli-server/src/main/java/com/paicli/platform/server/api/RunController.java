@@ -207,8 +207,8 @@ public class RunController {
 
     @GetMapping("/runs/{runId}/audit")
     @Operation(summary = "Read consolidated Run audit details",
-            description = "Returns the Run and Session, model messages, tool calls, approvals, events, "
-                    + "bound Plan Step, and validation evidence in one read-only response.")
+             description = "Returns the Run and Session, model messages, tool calls, approvals, events, "
+                    + "parent/child Run navigation, bound Plan Step, and validation evidence in one read-only response.")
     public Map<String, Object> runAudit(@PathVariable String runId) {
         RunRecord run = requireRun(runId);
         SessionRecord session = store.findSession(run.sessionId()).orElseThrow();
@@ -227,6 +227,9 @@ public class RunController {
         value.put("validationChecks", checks);
         value.put("workingPlan", store.latestWorkingPlan(runId).orElse(null));
         value.put("reflection", store.latestReflection(runId).orElse(null));
+        value.put("parent", parentNavigation(runId));
+        value.put("children", store.delegationsForRun(runId).stream()
+                .map(this::collaborationTask).toList());
         value.put("verifications", store.events(runId, 0, 1_000).stream()
                 .filter(event -> "run.verification".equals(event.type())).toList());
         return value;

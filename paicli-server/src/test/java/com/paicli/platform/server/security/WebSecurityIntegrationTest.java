@@ -291,6 +291,8 @@ class WebSecurityIntegrationTest {
         store.appendMessage(session.id(), run.id(), "assistant", "model output");
         var tool = store.createToolCall(run.id(), "call-audit", "execute_command",
                 "{\"command\":\"mvn test\"}", "audit-" + run.id());
+        var delegation = store.createOrGetDelegation(run.id(), tool.id(), "Audit Child", "inspect child run",
+                null, null, null, null, "{}");
         store.createApproval(run.id(), tool.id(), "verification command requires approval");
         store.appendEvent(run.id(), "verification.recorded", "{\"evidence\":\"tests pending\"}");
         store.completeRun(run.id());
@@ -303,10 +305,22 @@ class WebSecurityIntegrationTest {
                 .andExpect(jsonPath("$.messages[0].content").value("inspect the execution"))
                 .andExpect(jsonPath("$.messages[1].content").value("model output"))
                 .andExpect(jsonPath("$.toolCalls[0].toolName").value("execute_command"))
+                .andExpect(jsonPath("$.toolCalls[0].id").value(tool.id()))
+                .andExpect(jsonPath("$.toolCalls[0].providerCallId").value("call-audit"))
                 .andExpect(jsonPath("$.approvals[0].toolCallId").value(tool.id()))
+                .andExpect(jsonPath("$.children[0].delegationId").value(delegation.id()))
+                .andExpect(jsonPath("$.children[0].parentRunId").value(run.id()))
+                .andExpect(jsonPath("$.children[0].childRunId").value(delegation.childRunId()))
                 .andExpect(jsonPath("$.events[?(@.type == 'verification.recorded')]").isNotEmpty())
                 .andExpect(jsonPath("$.planStep").isMap())
                 .andExpect(jsonPath("$.validationChecks").isArray());
+
+        mvc.perform(get("/v1/runs/{runId}/audit", delegation.childRunId())
+                        .header("X-API-Key", "test-secret"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.run.id").value(delegation.childRunId()))
+                .andExpect(jsonPath("$.parent.runId").value(run.id()))
+                .andExpect(jsonPath("$.parent.sessionId").value(session.id()));
     }
 
     @Test

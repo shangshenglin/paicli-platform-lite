@@ -170,6 +170,7 @@ public class LayeredMemoryService {
                 .append("Memories are historical context. Prefer newer explicit user statements when conflicts exist.\n");
         List<String> ids = new ArrayList<>();
         Map<String, String> reasons = new LinkedHashMap<>();
+        List<MemorySelection> selections = new ArrayList<>();
         for (ScoredMemory value : selected) {
             var unit = value.unit();
             String conflict = "CONFLICTED".equals(unit.status()) ? " conflicted=true" : "";
@@ -182,6 +183,9 @@ public class LayeredMemoryService {
             if (out.length() + line.length() > properties.maxContextChars()) break;
             out.append(line);
             ids.add(unit.id());
+            selections.add(new MemorySelection(unit.id(), unit.memoryKey(), unit.layer(), unit.memoryType(),
+                    normalizedScopeType(unit.scopeType()), unit.sourceType(), unit.sourceId(), unit.content(),
+                    unit.content(), false));
             reasons.put(unit.id(), "type=" + unit.memoryType() + ",layer=" + unit.layer()
                     + ",scope=" + normalizedScopeType(unit.scopeType())
                     + ",score=" + String.format(Locale.ROOT, "%.4f", value.score())
@@ -191,7 +195,7 @@ public class LayeredMemoryService {
         }
         out.append("</memory>");
         return ids.isEmpty() ? MemoryContext.empty()
-                : new MemoryContext(out.toString(), List.copyOf(ids), Map.copyOf(reasons));
+                : new MemoryContext(out.toString(), List.copyOf(ids), Map.copyOf(reasons), List.copyOf(selections));
     }
 
     private void extract(String runId) {
@@ -233,6 +237,7 @@ public class LayeredMemoryService {
             JsonNode root = parseJson(response.content());
             int stored = 0;
             Map<String, Integer> storedByLayer = new HashMap<>();
+            List<Map<String, Object>> extractedItems = new ArrayList<>();
             for (JsonNode node : root.path("memories")) {
                 if (stored >= MAX_MEMORIES_PER_RUN) break;
                 String content = node.path("content").asText("").trim();
@@ -269,6 +274,22 @@ public class LayeredMemoryService {
                 var saved = store.upsertAutomaticMemory(session.projectKey(), key, content, tags, layer, type,
                         confidence, session.id(), runId, vector, evidenceIds, startSequence, endSequence,
                         sourceExcerpt, memoryScope);
+                var savedSource = store.memorySources(saved.id()).stream()
+                        .filter(source -> runId.equals(source.sourceId()))
+                        .max(Comparator.comparing(SqliteRuntimeStore.MemorySource::createdAt)).orElse(null);
+                Map<String, Object> extracted = new LinkedHashMap<>();
+                extracted.put("memoryId", saved.id());
+                extracted.put("action", saved.createdAt().equals(saved.updatedAt()) ? "CREATED" : "UPDATED");
+                extracted.put("memorySourceId", savedSource == null ? "" : savedSource.id());
+                extracted.put("sourceRunId", runId);
+                extracted.put("sourceMessageIds", evidenceIds);
+                extracted.put("memoryKey", saved.memoryKey());
+                extracted.put("layer", layer);
+                extracted.put("memoryType", type);
+                extracted.put("scopeType", normalizedScopeType(memoryScope.scopeType()));
+                extracted.put("confidence", confidence);
+                extracted.put("content", saved.content());
+                extractedItems.add(Map.copyOf(extracted));
                 if (similar != null && similar.score() >= 0.65 && similar.score() < 0.90
                         && !similar.unit().id().equals(saved.id())) {
                     store.openMemoryConflict(session.projectKey(), saved.id(), similar.unit().id(),
@@ -279,7 +300,9 @@ public class LayeredMemoryService {
                 storedByLayer.merge(layer, 1, Integer::sum);
             }
             store.finishMemoryExtraction(runId, null);
-            store.appendEvent(runId, "memory.extracted", "{\"count\":" + stored + "}");
+            store.appendEvent(runId, "memory.extracted", mapper.writeValueAsString(Map.of(
+                    "count", stored,
+                    "items", List.copyOf(extractedItems))));
         } catch (Exception e) {
             String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             store.finishMemoryExtraction(runId, error);
@@ -509,7 +532,12 @@ public class LayeredMemoryService {
     private record ScoredMemory(SqliteRuntimeStore.MemoryUnit unit, double score, double baseScore,
                                 double rerankScore, String rerankProvider) { }
     private record SimilarCandidate(SqliteRuntimeStore.MemoryUnit unit, double score) { }
-    public record MemoryContext(String content, List<String> memoryIds, Map<String, String> reasons) {
-        public static MemoryContext empty() { return new MemoryContext("", List.of(), Map.of()); }
+    public record MemorySelection(String memoryId, String memoryKey, String layer, String memoryType,
+                                  String scopeType, String sourceType, String sourceId, String content,
+                                  String sourceContent, boolean contentTruncated) { }
+
+    public record MemoryContext(String content, List<String> memoryIds, Map<String, String> reasons,
+                                List<MemorySelection> selections) {
+        public static MemoryContext empty() { return new MemoryContext("", List.of(), Map.of(), List.of()); }
     }
 }

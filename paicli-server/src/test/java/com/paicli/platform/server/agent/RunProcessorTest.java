@@ -72,6 +72,14 @@ class RunProcessorTest {
                 .containsExactly("user", "assistant", "tool", "assistant");
         assertThat(store.events(run.id(), 0)).extracting("type")
                 .contains("tool.requested", "tool.completed", "run.completed");
+        var toolEvent = store.events(run.id(), 0).stream()
+                .filter(event -> "model.tool_calls".equals(event.type())).findFirst().orElseThrow();
+        var toolPayload = mapper.readTree(toolEvent.data());
+        assertThat(toolPayload.path("calls")).hasSize(1);
+        assertThat(toolPayload.path("calls").get(0).path("name").asText()).isEqualTo("list_dir");
+        assertThat(toolPayload.path("calls").get(0).path("toolCallId").asText()).startsWith("tool_");
+        assertThat(toolPayload.path("calls").get(0).path("providerCallId").asText()).startsWith("call_");
+        assertThat(toolPayload.path("calls").get(0).path("arguments").path("path").asText()).isEqualTo(".");
     }
 
     @Test

@@ -6,8 +6,11 @@ import com.paicli.platform.common.ToolResult;
 import com.paicli.platform.common.RunStatus;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.config.PlatformProperties;
+import com.paicli.platform.server.config.RagProperties;
+import com.paicli.platform.server.artifact.ImageAttachmentService;
 import com.paicli.platform.server.agent.WorkingPlanService;
 import com.paicli.platform.server.agent.WorkingPlanToolProvider;
+import com.paicli.platform.server.knowledge.KnowledgeService;
 import com.paicli.platform.server.model.ModelToolDefinition;
 import com.paicli.platform.server.plan.PlanToolProvider;
 import com.paicli.platform.server.prompt.PromptAssembler;
@@ -15,6 +18,7 @@ import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.tool.ServerToolProvider;
 import com.paicli.platform.server.tool.ToolCatalog;
+import com.paicli.platform.server.skill.SkillService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -235,6 +239,48 @@ class ContextManagerTest {
         assertThat(first.estimatedInputTokens()).isEqualTo(
                 TokenEstimator.estimateMessages(first.request().messages())
                         + TokenEstimator.estimateTools(first.request().tools()));
+        assertThat(first.manifest().rawEstimatedInputTokens()).isEqualTo(first.estimatedInputTokens());
+        assertThat(first.manifest().fieldGroups()).containsKeys(
+                "actualModelContext", "serverEnforced", "auditOnly");
+        assertThat(first.manifest().fieldGroups().get("actualModelContext"))
+                .contains("ModelRequest.messages[].role/content/reasoningContent/images/toolCalls",
+                        "ModelRequest.tools[].name/description/parameters");
+        assertThat(first.manifest().fieldGroups().get("auditOnly"))
+                .contains("knowledgeCitations/knowledgeSelections/knowledgeSelectionReasons");
+    }
+
+    @Test
+    void recordsExactKnowledgeChunkSnapshotButKeepsSelectionReasonsOutOfModelContext() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        RagProperties rag = new RagProperties("local", "", "", "", 25 * 1024 * 1024, true, 5);
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        KnowledgeService knowledge = new KnowledgeService(platform);
+        String source = "Runtime recovery must reuse the persisted idempotency key.";
+        knowledge.upsert("alpha", "runtime.md", source);
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper,
+                new SkillService(platform), new ImageAttachmentService(platform, store), null, knowledge, rag, null);
+        var session = store.createSession("knowledge audit", "alpha");
+        var run = store.createRun(session.id(), "Which idempotency key is required for runtime recovery?");
+
+        var prepared = manager.prepare(session.id(), run.id());
+
+        assertThat(prepared.manifest().knowledgeSelections()).singleElement().satisfies(selection -> {
+            assertThat(selection.document()).isEqualTo("runtime.md");
+            assertThat(selection.chunk()).isPositive();
+            assertThat(selection.fullCitation()).contains("runtime.md#chunk-").contains("@v1");
+            assertThat(selection.content()).contains(source);
+            assertThat(selection.sourceContent()).isEqualTo(selection.content());
+            assertThat(selection.contentTruncated()).isFalse();
+        });
+        String modelContext = prepared.request().messages().stream()
+                .map(message -> message.content() == null ? "" : message.content())
+                .collect(java.util.stream.Collectors.joining("\n"));
+        assertThat(modelContext).contains(source).doesNotContain("knowledgeSelectionReasons");
     }
 
     @Test
