@@ -1,5 +1,12 @@
 # 交付阶段
 
+## 2026-08-27 本地 Langfuse 基础链路与独立评测
+
+- [x] 新增默认关闭的 Langfuse OTLP/HTTP 导出，按 Run 根 observation、模型 Generation、工具 Span 组成基础链路，并关联 Session、Run、模型、Token、TTFT、耗时与终态。
+- [x] 内容默认不采集；显式开启后递归脱敏敏感字段并限制长度。导出失败与队列压力不影响本地 Run、Approval、Audit、ModelUsage 或 Evaluation。
+- [x] 保留现有 Suite/Case/Trial/Baseline 与发布门禁，不向 Langfuse 投影本地分数；Langfuse 侧使用根 observation 独立配置 LLM-as-a-Judge。
+- [x] 增加 Langfuse v4 六服务 Compose、随机本地凭据初始化、Docker Desktop CLI 自动发现和 start/stop/status/logs/config/credentials 管理入口；端口仅 loopback、数据使用 named volumes。
+
 ## 2026-08-26 执行详情真实标识与 Context 审计语义
 
 - [x] Run 审计返回并展示数据库真实 Run/Session、ToolCall/Provider Call、父子 Run 与 Delegation 标识；原始事件数据不再用业务占位词掩盖 ID。

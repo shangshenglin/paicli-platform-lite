@@ -18,6 +18,8 @@ import com.paicli.platform.server.model.ModelClient;
 import com.paicli.platform.server.model.ModelResponse;
 import com.paicli.platform.server.config.ModelProperties;
 import com.paicli.platform.server.observability.RuntimeMetrics;
+import com.paicli.platform.server.observability.AgentTelemetry;
+import com.paicli.platform.server.observability.NoopAgentTelemetry;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import com.paicli.platform.server.store.ProductivityStore;
 import com.paicli.platform.server.productivity.CompletionNotificationService;
@@ -62,6 +64,7 @@ public class RunProcessor {
     private final RunVerificationService runVerification;
     private final ReflectionService reflectionService;
     private final DeferredAgentResultService deferredAgentResultService;
+    private final AgentTelemetry telemetry;
 
     @Autowired
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -71,10 +74,11 @@ public class RunProcessor {
                         LayeredMemoryService memoryService, ModelProperties modelProperties,
                         RuntimeMetrics metrics, ProductivityStore productivity,
                         CompletionNotificationService notifications,
-                        CollaborationService collaboration,
-                        RunVerificationService runVerification,
-                        ReflectionService reflectionService,
-                        DeferredAgentResultService deferredAgentResultService) {
+                         CollaborationService collaboration,
+                         RunVerificationService runVerification,
+                         ReflectionService reflectionService,
+                         DeferredAgentResultService deferredAgentResultService,
+                         AgentTelemetry telemetry) {
         this.store = store;
         this.modelClient = modelClient;
         this.toolRouter = toolRouter;
@@ -92,6 +96,7 @@ public class RunProcessor {
         this.runVerification = runVerification;
         this.reflectionService = reflectionService;
         this.deferredAgentResultService = deferredAgentResultService;
+        this.telemetry = telemetry == null ? NoopAgentTelemetry.INSTANCE : telemetry;
     }
 
     public RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -100,7 +105,7 @@ public class RunProcessor {
                         ContextManager contextManager, ToolResultMaterializer resultMaterializer) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, NoopAgentTelemetry.INSTANCE);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -112,7 +117,7 @@ public class RunProcessor {
                  DeferredAgentResultService deferredAgentResultService) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, null, modelProperties, null, null, null, null,
-                runVerification, reflectionService, deferredAgentResultService);
+                runVerification, reflectionService, deferredAgentResultService, NoopAgentTelemetry.INSTANCE);
     }
 
     RunProcessor(SqliteRuntimeStore store, ModelClient modelClient,
@@ -124,7 +129,7 @@ public class RunProcessor {
                  CompletionNotificationService notifications) {
         this(store, modelClient, toolRouter, mapper, approvalService, auditService,
                 contextManager, resultMaterializer, memoryService, modelProperties, metrics,
-                productivity, notifications, null, null, null, null);
+                productivity, notifications, null, null, null, null, NoopAgentTelemetry.INSTANCE);
     }
 
     public void process(RunRecord claimedRun) {
@@ -132,6 +137,7 @@ public class RunProcessor {
         try {
             processInternal(claimedRun);
         } finally {
+            finishTelemetryIfTerminal(claimedRun.id());
             MDC.remove("runId");
             MDC.remove("toolCallId");
         }
@@ -140,6 +146,8 @@ public class RunProcessor {
     private void processInternal(RunRecord claimedRun) {
         long processStarted = System.nanoTime();
         RunRecord run = store.findRun(claimedRun.id()).orElseThrow();
+        var session = store.findSession(run.sessionId()).orElseThrow();
+        telemetry.ensureRun(run, session.projectKey());
         String budgetReservationKey = null;
         if (run.status() == RunStatus.CANCELED) return;
         try {
@@ -159,7 +167,6 @@ public class RunProcessor {
             store.markRunStatus(run.id(), RunStatus.WAITING_MODEL);
             if (metrics != null) metrics.modelCall(modelClient.name(), run.modelProfileId());
             store.appendEvent(run.id(), "model.started", json(Map.of("provider", modelClient.name())));
-            var session = store.findSession(run.sessionId()).orElseThrow();
             var agentProfile = productivity == null ? java.util.Optional.<ProductivityStore.AgentProfile>empty()
                     : productivity.resolveAgentProfile(session.projectKey(), run.agentProfileId());
             var profile = productivity == null ? java.util.Optional.<ProductivityStore.ModelProfile>empty()
@@ -190,12 +197,26 @@ public class RunProcessor {
             ModelResponse response;
             long modelStarted = System.nanoTime();
             long ttftMs;
-            try (ModelDeltaEventBuffer deltas = new ModelDeltaEventBuffer(store, mapper, run.id(), modelStarted)) {
-                response = modelClient.complete(run.id(), request, deltas);
-                ttftMs = deltas.timeToFirstTokenMs();
+            String modelName = profile.map(ProductivityStore.ModelProfile::model)
+                    .orElse(request.route() == null ? modelClient.name() : request.route().model());
+            try (AgentTelemetry.Observation observation = telemetry.startModel(
+                    run, request, modelClient.name(), modelName, run.currentStep())) {
+                try (ModelDeltaEventBuffer deltas = new ModelDeltaEventBuffer(store, mapper, run.id(), modelStarted)) {
+                    response = modelClient.complete(run.id(), request, deltas);
+                    ttftMs = deltas.timeToFirstTokenMs();
+                } catch (RuntimeException error) {
+                    observation.failure(error);
+                    throw error;
+                }
+                long observedDurationMs = (System.nanoTime() - modelStarted) / 1_000_000;
+                observation.output(modelTelemetryOutput(response));
+                observation.usage(response.usage().inputTokens(), response.usage().outputTokens(),
+                        response.usage().cachedInputTokens());
+                observation.attribute("duration_ms", observedDurationMs);
+                observation.attribute("time_to_first_token_ms", ttftMs);
+                observation.success();
             }
             long durationMs = (System.nanoTime() - modelStarted) / 1_000_000;
-            String modelName = profile.map(ProductivityStore.ModelProfile::model).orElse(modelClient.name());
             store.recordModelUsage(run.id(), modelClient.name(), modelName, context.estimatedInputTokens(),
                     response.usage().inputTokens(), response.usage().outputTokens(),
                     response.usage().cachedInputTokens(), durationMs, store.modelRetriesForRun(run.id()),
@@ -501,8 +522,27 @@ public class RunProcessor {
             auditService.record("tool.started", run.id(), call.id(), Map.of(
                     "tool", call.toolName(), "arguments", call.arguments(),
                     "target", toolRouter.executionTarget(call.toolName())));
-            return toolRouter.execute(new ToolRequest(
-                    call.id(), run.id(), call.toolName(), arguments, call.idempotencyKey()));
+            try (AgentTelemetry.Observation observation = telemetry.startTool(
+                    run, call, toolRouter.executionTarget(call.toolName()), arguments)) {
+                try {
+                    ToolResult result = toolRouter.execute(new ToolRequest(
+                            call.id(), run.id(), call.toolName(), arguments, call.idempotencyKey()));
+                    Map<String, Object> output = new LinkedHashMap<>(result.metadata());
+                    output.put("success", result.success());
+                    output.put("durationMs", result.durationMs());
+                    output.put("content", result.content() == null ? "" : result.content());
+                    output.put("error", result.error() == null ? "" : result.error());
+                    observation.output(output);
+                    observation.attribute("duration_ms", result.durationMs());
+                    observation.attribute("success", Boolean.toString(result.success()));
+                    if (result.success()) observation.success();
+                    else observation.failure(result.error());
+                    return result;
+                } catch (RuntimeException error) {
+                    observation.failure(error);
+                    throw error;
+                }
+            }
         } catch (Exception e) {
             return ToolResult.failure(call.id(),
                     e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), 0);
@@ -672,6 +712,33 @@ public class RunProcessor {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to encode event", e);
         }
+    }
+
+    private Map<String, Object> modelTelemetryOutput(ModelResponse response) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("content", response.content());
+        output.put("toolCalls", response.toolCalls().stream().map(call -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("callId", call.callId() == null ? "" : call.callId());
+            value.put("name", call.name() == null ? "" : call.name());
+            value.put("arguments", call.arguments());
+            return value;
+        }).toList());
+        return output;
+    }
+
+    private void finishTelemetryIfTerminal(String runId) {
+        if (!telemetry.enabled()) return;
+        try {
+            store.findRun(runId).filter(value -> value.status().terminal()).ifPresent(run -> {
+                String output = store.messagesForRun(run.id()).stream()
+                        .filter(message -> "assistant".equals(message.role()))
+                        .map(com.paicli.platform.server.domain.MessageRecord::content)
+                        .reduce((first, second) -> second).orElse("");
+                var usage = store.modelTokenUsageForRun(run.id());
+                telemetry.finishRun(run, output, usage.totalTokens(), store.countToolCallsForRun(run.id()));
+            });
+        } catch (RuntimeException ignored) { }
     }
 
     private Map<String, Object> toolCallEvent(ToolCallRecord call) {

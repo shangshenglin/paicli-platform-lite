@@ -37,7 +37,7 @@ PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Ma
 | 受管能力 | Skill、混合 RAG、历史会话检索、可选联网、远程 MCP、持久化 Multi-Agent、多模态/OCR |
 | 协作工作层 | 增强 AgentTeam、结构化 Route Decision、持久化 CollaborationTask、评论/提及/时间线、Task-Run 与会话续作关联、阶段屏障与 Leader 唤醒 |
 | 长期使用 | 自动分层 Memory、统一检索、知识/Artifact 治理、模板、模型方案、智能体专家、预算、队列、定时任务、通知、迁移 |
-| 质量闭环 | 官方入门评测集、Context/Memory Harness 专项集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline |
+| 质量闭环 | 官方入门评测集、Context/Memory Harness 专项集、真实内部 Run、多 Trial、确定性评分、审批不旁路、人工 Baseline；可选本地 Langfuse 独立观测级评测 |
 | 运维交付 | API Key、OpenAPI、Actuator 指标、WAL 维护、保留策略、备份恢复、CI、Dependabot、SBOM |
 
 ## 总体架构
@@ -55,6 +55,7 @@ paicli-server（Agent Runtime / 脑）
   ├─ ContextManager（规则 / Memory / RAG / 摘要 / Token 预算）
   ├─ Server Tool Provider（Skill / Knowledge / Web / MCP / Delegation）
   ├─ EvaluationService（Suite / Case / Trial / Baseline）
+  ├─ AgentTelemetry（可选 Langfuse OTLP：Run / Generation / Tool Span）
   └─ SQLite WAL + 本地 Artifact / Knowledge / Audit
         │ SandboxDriver
         ├─ LocalSandboxDriver（开发模式）
@@ -174,6 +175,37 @@ PAICLI_KIMI_API_KEY=replace-with-kimi-key
 - `PAICLI_MODEL_API_KEY`：Server 访问模型供应商的密钥，只留在 Server，不能填写到浏览器，也不会进入 Sandbox。
 
 Console 只在当前标签页的 `sessionStorage` 保存 `PAICLI_API_KEY`；关闭标签页后需重新填写。接口返回 401 时会进入连接设置，验证成功后才加载工作台。
+
+### 5. 本地 Langfuse 链路追踪与独立评测
+
+Langfuse 是可选旁路能力，不替代 SQLite、Run Event、ModelUsage、Audit 或现有 Agent 评测中心。Docker Desktop 启动后执行：
+
+```powershell
+.\scripts\langfuse.ps1 init
+.\scripts\langfuse.ps1 start
+```
+
+脚本使用官方 Langfuse v4 拓扑启动 Web、Worker、Postgres、ClickHouse、Redis 和 MinIO，端口仅绑定 `127.0.0.1`，数据保存在 Docker named volumes。首次 `init` 生成的管理员密码和项目 Key 只写入被 Git 忽略的 `deploy/langfuse/.env`；之后用显式命令查看，不会在普通 `start` 中回显：
+
+```powershell
+.\scripts\langfuse.ps1 credentials
+```
+
+按命令输出把 `PAICLI_LANGFUSE_ENABLED`、`BASE_URL`、`PUBLIC_KEY` 和 `SECRET_KEY` 放入项目根 `.env` 或 Server 进程环境，再重启 PaiCLI。默认 `PAICLI_LANGFUSE_CAPTURE_CONTENT=false`，只上传结构和计数；要让 Langfuse 侧 LLM-as-a-Judge 读取输入/输出，需显式设为 `true`。内容开启后仍会递归脱敏常见 token、authorization、cookie、secret、password 等字段，并按 `PAICLI_LANGFUSE_MAX_CONTENT_CHARS` 截断。
+
+每个 PaiCLI Run 对应根 observation `paicli.agent.run`，其下记录 `paicli.model.complete` Generation 和 `paicli.tool.execute` Span；附带 Session、环境、Run ID、模型、Token 用量、TTFT、耗时、工具目标与终态。OTLP 批量异步导出失败不会改变 Run 状态；Server 重启后恢复的 Run 创建带 `recovered=true` 的新追踪段，不伪造跨进程父子关系。
+
+Langfuse 评测与本地评测分开配置：在 Langfuse 的 LLM-as-a-Judge 中创建 **Observation-level evaluator**，选择根 observation 名 `paicli.agent.run`，并只匹配 `content-captured` 标签及所需终态。Langfuse Score 不回写 PaiCLI；本地 Suite/Case/Trial/Baseline 与发布门禁继续独立运行和持久化。
+
+常用运维命令：
+
+```powershell
+.\scripts\langfuse.ps1 status
+.\scripts\langfuse.ps1 logs
+.\scripts\langfuse.ps1 stop
+```
+
+`stop` 只停止容器并保留 named volumes。若 Docker Hub 在当前网络不可达，可在 `deploy/langfuse/.env` 通过 `LANGFUSE_WEB_IMAGE`、`LANGFUSE_WORKER_IMAGE`、`LANGFUSE_CLICKHOUSE_IMAGE`、`LANGFUSE_REDIS_IMAGE`、`LANGFUSE_POSTGRES_IMAGE` 和 `LANGFUSE_MINIO_IMAGE` 指向组织内可信镜像仓库；不要把不受信任的公共镜像代理用于生产。
 
 ## 第一次使用
 

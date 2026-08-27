@@ -1,5 +1,15 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-27
+
+### 本地 Langfuse 基础链路追踪与独立评测
+
+- 变更：新增默认关闭的 `paicli.langfuse` 配置与独立 OpenTelemetry OTLP/HTTP 导出器。每个 Run 建立 `paicli.agent.run` 根 observation，模型调用记录为 Generation，持久化后实际执行的工具记录为子 Span；关联 Session/Run、Provider/模型、Token、TTFT、耗时、工具目标与终态，取消和 Server 关闭均收口未完成根段。导出使用有界异步批处理并吞掉旁路异常，不改变 Runtime 正确性。
+- 变更：内容采集默认关闭；启用时递归脱敏 authorization、token、cookie、secret、password 等敏感字段并按字符预算截断。根 observation 同时保存整体输入和最终输出，供 Langfuse Observation-level LLM-as-a-Judge 独立评测；现有本地 Suite/Case/Trial/Baseline、确定性断言与发布门禁原样保留，不上传本地分数、不调用 Langfuse Score API、不增加数据库迁移。
+- 变更：新增 Langfuse v4 Web/Worker/Postgres/ClickHouse/Redis/MinIO Compose 和 `scripts/langfuse.ps1`，提供随机本地凭据初始化、Docker Desktop 用户级 CLI 自动发现、pull/start/stop/status/logs/config/credentials；端口只绑定 loopback，数据保存在 named volumes，凭据只进入被 Git 忽略的部署 `.env`。镜像引用支持通过部署环境文件覆盖为组织内可信 Registry。
+- 思路：以旁路 OTLP 保持改动最小化，避免将 Langfuse 变成 Run 完成、工具执行或本地评测的同步依赖；跨 Worker 处理仍在同进程根 Context 下关联，并行工具显式挂到根 Span，进程重启后的恢复 Run 新建带 recovered 标记的追踪段，不伪造不可证明的跨进程连续性。README、`.env.example`、架构与阶段文档已同步；REST 路径/请求/响应和 SQLite 行为未变，OpenAPI、迁移与 Store 测试不适用；Sandbox 镜像/协议/隔离和产品站展示未变，`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用。
+- 验证：Langfuse 配置、内容脱敏、OTLP Span 父子关系、取消/关闭清理和部署文件定向测试共 12 项通过；PowerShell 语法与 `docker compose config --quiet` 通过。本机 Docker Hub 直连超时后，通过被忽略的本地部署 `.env` 切换既有可信镜像源，Langfuse 六个容器均成功启动并由 Compose `--wait` 判定 healthy，Web 地址为 `127.0.0.1:3000`；随后 Docker Desktop Linux Engine API 出现 500/长时间无响应，UI 回查超时，未擅自重启会影响其他容器的 Docker Desktop，因此不把最终在线状态误报为通过。当前运行服务锁定主工作区旧 JAR，故在排除 `.git`、`.env`、`data`、`backups`、`target` 的无密钥临时源码快照中，以 `PAICLI_SANDBOX_MODE=local` 执行全模块 `clean test` 与 `clean package`，两者均通过，共 361 项（Common 3、Server 353、Sandbox 5），Spring 上下文和可执行 JAR 打包成功；主工作区 `git diff --check` 通过，并按文件清单完成文档覆盖核对。
+
 ## 2026-08-26
 
 ### 评测可信度、版本化夹具、执行指纹与发布门禁

@@ -6,7 +6,7 @@ A Run that exhausts its step, token, tool-call, or elapsed-time budget always te
 
 ## 部署边界
 
-平台由一个 Spring Boot Server、一个 SQLite 数据库、可选的 Docker Sandbox、可选的 Milvus Standalone 检索索引和可选的本地 TEI Cross-Encoder 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界；Milvus 与 TEI 不进入 Sandbox，也不取代 SQLite 或本地知识文件的权威数据地位。
+平台由一个 Spring Boot Server、一个 SQLite 数据库、可选的 Docker Sandbox、可选的 Milvus Standalone 检索索引、可选的本地 TEI Cross-Encoder 和可选的自托管 Langfuse 组成。`paicli-sandbox-agent` 是 Docker 容器内独立的执行边界；Milvus、TEI 与 Langfuse 不进入 Sandbox，也不取代 SQLite、本地知识文件或本地评测数据的权威地位。
 
 ```text
 客户端
@@ -22,10 +22,21 @@ PaiCLI Server
   -> ContextManager：Prompt / Memory / 摘要 / Token 预算
   -> KnowledgeVectorStore：本地 JSON（默认）或 Milvus REST（可选、失败回退）
   -> KnowledgeReranker：本地确定性特征（默认）或 TEI Cross-Encoder（可选、整批失败回退）
+  -> AgentTelemetry：Noop（默认）或 Langfuse OTLP/HTTP（可选、旁路失败隔离）
   -> ToolRouter
        -> SandboxDriver：Local（仅开发）或 Docker
        -> ServerToolProvider：Skill / Knowledge / Web / MCP / Delegation
 ```
+
+## Langfuse 可观测与独立评测
+
+Langfuse 接入采用 OpenTelemetry OTLP/HTTP，不引入 Langfuse Java SDK、Score API、数据库映射或第二套 Runtime。根 Span `paicli.agent.run` 在 Run 首次被 Worker 处理时创建，模型调用以 Generation 子 Span 记录输入输出、模型、Token 用量、TTFT 与耗时，已持久化且实际开始执行的工具以普通子 Span 记录调用 ID、工具、目标、结果和耗时。Run 终态或取消时关闭根 Span；多个并行只读工具通过显式父 Context 归入同一链路。
+
+追踪是 best-effort 旁路：使用独立 `SdkTracerProvider` 和有界 BatchSpanProcessor，导出超时、队列拥塞或 Langfuse 不可达不会修改 Run、ToolCall、Approval、Event 或本地评测状态。根追踪 Context 只保存在进程内；Server 重启后恢复的非终态 Run 创建带 `recovered=true` 的新根段，避免把不可证明的跨进程关系伪装成连续 Trace。关闭 Server 时尚未终态的根段标记为 `INTERRUPTED` 并有限等待批量导出。
+
+内容采集默认关闭；metadata-only 模式只记录结构、状态和计数。显式开启后才发送 Prompt、模型回复和工具输入输出，同时递归脱敏常见密钥字段并执行字符上限截断。Langfuse 的 Observation-level LLM-as-a-Judge 只针对内容已采集的根 observation `paicli.agent.run` 配置，因此能读取整次 Run 输入和最终输出。该评测产生的 Score 仅留在 Langfuse；PaiCLI 的 Suite/Case/Trial/Baseline、确定性硬门禁与发布门禁继续以 SQLite 为权威事实源，两套结果不投影、不双写，也不互相阻塞。
+
+本地部署使用独立 Compose 项目：Langfuse Web/Worker 配合 Postgres、ClickHouse、Redis、MinIO，端口仅绑定 loopback，密钥由被忽略的部署 `.env` 初始化，数据使用 Docker named volumes。它属于 Server 可观测侧车，不改变 Docker Sandbox 的网络、密钥与工具执行边界。
 
 ## Runtime 恢复契约
 

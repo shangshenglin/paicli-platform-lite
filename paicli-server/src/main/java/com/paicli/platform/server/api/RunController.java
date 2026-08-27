@@ -18,6 +18,7 @@ import com.paicli.platform.server.plan.PlanService;
 import com.paicli.platform.server.collaboration.CollaborationService;
 import com.paicli.platform.server.tool.ToolRouter;
 import com.paicli.platform.server.model.ModelClient;
+import com.paicli.platform.server.observability.AgentTelemetry;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -58,11 +59,13 @@ public class RunController {
     private final PlanStore planStore;
     private final Path workspaceRoot;
     private final CollaborationService collaborationService;
+    private final AgentTelemetry telemetry;
 
     public RunController(SqliteRuntimeStore store, SseEventService sseEventService,
                          ToolRouter toolRouter, ModelClient modelClient, ProductivityStore productivity,
                          CompletionNotificationService notifications, ObjectMapper mapper, PlanService plans,
-                         PlanStore planStore, PlatformProperties properties, CollaborationService collaborationService) {
+                         PlanStore planStore, PlatformProperties properties, CollaborationService collaborationService,
+                         AgentTelemetry telemetry) {
         this.store = store;
         this.sseEventService = sseEventService;
         this.toolRouter = toolRouter;
@@ -74,6 +77,7 @@ public class RunController {
         this.planStore = planStore;
         this.workspaceRoot = properties.workspaceRoot().toAbsolutePath().normalize();
         this.collaborationService = collaborationService;
+        this.telemetry = telemetry;
     }
 
     @PostMapping("/sessions/{sessionId}/runs")
@@ -324,6 +328,7 @@ public class RunController {
         for (String canceledRun : canceledRuns) {
             modelRequestCanceled |= modelClient.cancel(canceledRun);
             sandboxExecutionCanceled |= toolRouter.cancel(canceledRun);
+            telemetry.cancelRun(canceledRun);
         }
         return Map.of("id", runId, "canceled", canceledRuns.contains(runId),
                 "canceledRunIds", canceledRuns, "modelRequestCanceled", modelRequestCanceled,

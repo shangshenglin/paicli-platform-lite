@@ -36,6 +36,15 @@ paicli:
     api-key: ${PAICLI_API_KEY:}
     require-api-key: ${PAICLI_SECURITY_REQUIRE_API_KEY:false}
     protect-management: ${PAICLI_SECURITY_PROTECT_MANAGEMENT:false}
+  langfuse:
+    enabled: ${PAICLI_LANGFUSE_ENABLED:false}
+    base-url: ${PAICLI_LANGFUSE_BASE_URL:}
+    public-key: ${PAICLI_LANGFUSE_PUBLIC_KEY:}
+    secret-key: ${PAICLI_LANGFUSE_SECRET_KEY:}
+    environment: ${PAICLI_LANGFUSE_ENVIRONMENT:local}
+    capture-content: ${PAICLI_LANGFUSE_CAPTURE_CONTENT:false}
+    max-content-chars: ${PAICLI_LANGFUSE_MAX_CONTENT_CHARS:20000}
+    export-timeout-millis: ${PAICLI_LANGFUSE_EXPORT_TIMEOUT_MILLIS:3000}
   model:
     provider: ${PAICLI_MODEL_PROVIDER:demo}
     base-url: ${PAICLI_MODEL_BASE_URL:https://api.openai.com/v1}
