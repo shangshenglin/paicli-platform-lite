@@ -91,6 +91,43 @@ class RepositoryEvaluationServiceTest {
     }
 
     @Test
+    void repositoryResolutionStillFailsWhenOutputTokenBudgetIsExceeded() throws Exception {
+        PlatformProperties properties = properties();
+        SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);
+        runtime.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        RepositoryEvaluationService repositories = new RepositoryEvaluationService(runtime,
+                request -> ToolResult.success(request.toolCallId(), "tests passed", 10,
+                        Map.of("exitCode", 0, "timedOut", false)), mapper, properties);
+        prepareFixture("budget");
+        String fixtureSha = repositories.inspectFixture("budget").sha256();
+        EvaluationStore evaluations = new EvaluationStore(properties);
+        var suite = evaluations.saveSuite(null, "repository-eval", "Budget gate", "", 1, 80);
+        evaluations.saveCase(null, suite.id(), "budget", "Fix src/App.txt", "[]", "[]", "[]", "[]",
+                20, 5, 60_000, true, "REPOSITORY", "budget", fixtureSha,
+                mapper.writeValueAsString(Map.of("shell", "bash", "failToPassCommand", "f2p",
+                        "passToPassCommand", "p2p", "timeoutSeconds", 30,
+                        "hiddenFiles", List.of(Map.of("source", "HiddenTest.txt", "target", "src/HiddenTest.txt")))),
+                mapper.writeValueAsString(Map.of("maxChangedFiles", 5, "maxPatchBytes", 10_000)));
+        EvaluationService service = new EvaluationService(evaluations, runtime, null, mapper, repositories);
+        var execution = service.start(suite.id(), null, 1, 80);
+        var trial = evaluations.trials(execution.id()).get(0);
+        var run = runtime.findRun(trial.runId()).orElseThrow();
+        runtime.claimNextRun().orElseThrow();
+        Path workspace = properties.workspaceRoot().resolve(runtime.workspaceOwnerRunId(run.id()));
+        Files.writeString(workspace.resolve("src/App.txt"), "fixed");
+        runtime.appendAssistantMessage(run.sessionId(), run.id(), "Implemented", "");
+        runtime.recordModelUsage(run.id(), "demo", "demo", 10, 10, 6, 0, 10, 0, true);
+        runtime.completeRun(run.id());
+
+        var result = service.report(execution.id()).trials().get(0);
+
+        assertThat(result.details()).containsEntry("resolved", true).containsEntry("budgetPassed", false);
+        assertThat(result.trial().score()).isZero();
+        assertThat(result.trial().passed()).isFalse();
+    }
+
+    @Test
     void rejectsFixtureDriftBeforeRunIsQueued() throws Exception {
         PlatformProperties properties = properties();
         SqliteRuntimeStore runtime = new SqliteRuntimeStore(properties);

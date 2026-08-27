@@ -3,6 +3,7 @@ package com.paicli.platform.server.api;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.evaluation.EvaluationService;
+import com.paicli.platform.server.evaluation.EvaluationAnalyticsService;
 import com.paicli.platform.server.evaluation.EvaluationStarterPackService;
 import com.paicli.platform.server.evaluation.RepositoryEvaluationService;
 import com.paicli.platform.server.evaluation.RepositoryEvaluationSpec;
@@ -37,16 +38,18 @@ public class EvaluationController {
     private final EvaluationStarterPackService starterPack;
     private final RepositoryEvaluationService repositoryEvaluations;
     private final ObjectMapper mapper;
+    private final EvaluationAnalyticsService analytics;
 
     public EvaluationController(EvaluationStore store, EvaluationService service,
                                 EvaluationStarterPackService starterPack,
                                 RepositoryEvaluationService repositoryEvaluations,
-                                ObjectMapper mapper) {
+                                ObjectMapper mapper, EvaluationAnalyticsService analytics) {
         this.store = store;
         this.service = service;
         this.starterPack = starterPack;
         this.repositoryEvaluations = repositoryEvaluations;
         this.mapper = mapper;
+        this.analytics = analytics;
     }
 
     @PostMapping("/starter-pack")
@@ -139,6 +142,27 @@ public class EvaluationController {
         return store.executions(suiteId, limit);
     }
 
+    @GetMapping("/suites/{suiteId}/trends")
+    @Operation(summary = "Evaluation history with stable-case, quality, token, and duration trends")
+    public List<EvaluationAnalyticsService.ExecutionMetrics> trends(@PathVariable String suiteId,
+            @RequestParam(defaultValue = "20") int limit) {
+        return analytics.trends(suiteId, limit);
+    }
+
+    @GetMapping("/executions/{leftId}/compare/{rightId}")
+    @Operation(summary = "Compare two executions of the same suite and their immutable fingerprints")
+    public EvaluationAnalyticsService.ExecutionComparison compare(@PathVariable String leftId,
+            @PathVariable String rightId) {
+        return analytics.compare(leftId, rightId);
+    }
+
+    @PostMapping("/executions/{id}/release-gate")
+    @Operation(summary = "Evaluate and persist deterministic release gates for a completed execution")
+    public EvaluationAnalyticsService.ReleaseGate releaseGate(@PathVariable String id) {
+        service.report(id);
+        return analytics.evaluateGate(id);
+    }
+
     @GetMapping("/executions/{id}")
     public EvaluationService.EvaluationReport report(@PathVariable String id) {
         return service.report(id);
@@ -152,7 +176,8 @@ public class EvaluationController {
     private EvaluationStore.EvaluationSuite saveSuite(String id, ApiDtos.EvaluationSuiteRequest request) {
         return store.saveSuite(id, request.projectKey(), request.name(), request.description(),
                 request.defaultTrials() == null ? 1 : request.defaultTrials(),
-                request.passThreshold() == null ? 80 : request.passThreshold());
+                request.passThreshold() == null ? 80 : request.passThreshold(),
+                request.datasetVersion() == null ? "custom-v1" : request.datasetVersion());
     }
 
     private EvaluationStore.EvaluationCase saveCase(String id, String suiteId,
@@ -161,6 +186,9 @@ public class EvaluationController {
                 ? "RULE" : request.caseType().trim().toUpperCase(Locale.ROOT);
         String graderJson = writeObject(request.grader());
         String patchPolicyJson = writeObject(request.patchPolicy());
+        String assertionSpecJson = writeObject(request.assertions());
+        String fixtureSpecJson = writeObject(request.fixture());
+        String judgeSpecJson = writeObject(request.judge());
         String fixtureRef = request.fixtureRef();
         String fixtureSha256 = request.fixtureSha256();
         if ("REPOSITORY".equals(caseType)) {
@@ -176,7 +204,8 @@ public class EvaluationController {
                 request.maxTokens() == null ? 0 : request.maxTokens(),
                 request.maxDurationMs() == null ? 0 : request.maxDurationMs(),
                 request.enabled() == null || request.enabled(), caseType, fixtureRef,
-                fixtureSha256, graderJson, patchPolicyJson);
+                fixtureSha256, graderJson, patchPolicyJson, assertionSpecJson,
+                fixtureSpecJson, judgeSpecJson);
     }
 
     private EvaluationCaseView view(EvaluationStore.EvaluationCase value) {
@@ -185,7 +214,9 @@ public class EvaluationController {
                 read(value.requiredResponseJson()), read(value.forbiddenResponseJson()),
                 value.maxToolCalls(), value.maxTokens(), value.maxDurationMs(), value.enabled(),
                 value.caseType(), value.fixtureRef(), value.fixtureSha256(),
-                readObject(value.graderSpecJson()), readObject(value.patchPolicyJson()));
+                readObject(value.graderSpecJson()), readObject(value.patchPolicyJson()),
+                readObject(value.assertionSpecJson()), readObject(value.fixtureSpecJson()),
+                readObject(value.judgeSpecJson()));
     }
 
     private String write(List<String> values) {
@@ -214,5 +245,6 @@ public class EvaluationController {
                                      int maxToolCalls, int maxTokens, long maxDurationMs,
                                      boolean enabled, String caseType, String fixtureRef,
                                      String fixtureSha256, Map<String, Object> grader,
-                                     Map<String, Object> patchPolicy) { }
+                                     Map<String, Object> patchPolicy, Map<String, Object> assertions,
+                                     Map<String, Object> fixture, Map<String, Object> judge) { }
 }

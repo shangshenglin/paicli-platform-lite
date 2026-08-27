@@ -85,7 +85,8 @@ final class ApiDtos {
                                       @NotNull List<String> events, Boolean enabled) { }
 
     record EvaluationSuiteRequest(@NotBlank String projectKey, @NotBlank String name,
-                                  String description, Integer defaultTrials, Integer passThreshold) { }
+                                  String description, Integer defaultTrials, Integer passThreshold,
+                                  String datasetVersion) { }
 
     record EvaluationCaseRequest(@NotBlank String name, @NotBlank String prompt,
                                  List<String> requiredTools, List<String> forbiddenTools,
@@ -93,7 +94,8 @@ final class ApiDtos {
                                  Integer maxToolCalls, Integer maxTokens, Long maxDurationMs,
                                  Boolean enabled, String caseType, String fixtureRef,
                                  String fixtureSha256, Map<String, Object> grader,
-                                 Map<String, Object> patchPolicy) { }
+                                 Map<String, Object> patchPolicy, Map<String, Object> assertions,
+                                 Map<String, Object> fixture, Map<String, Object> judge) { }
 
     record EvaluationStartRequest(String modelProfileId, String agentTeamId,
                                   Integer trialCount, Integer passThreshold) { }

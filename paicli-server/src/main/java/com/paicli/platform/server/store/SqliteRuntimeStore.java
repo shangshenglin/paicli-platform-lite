@@ -532,6 +532,8 @@ public class SqliteRuntimeStore {
                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_key,name))");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_suites_project " +
                     "ON evaluation_suites(project_key,updated_at)");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_suites", "dataset_version",
+                    "TEXT NOT NULL DEFAULT 'custom-v1'");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_cases (" +
                     "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, " +
                     "required_tools_json TEXT NOT NULL DEFAULT '[]', forbidden_tools_json TEXT NOT NULL DEFAULT '[]', " +
@@ -550,12 +552,24 @@ public class SqliteRuntimeStore {
                     "TEXT NOT NULL DEFAULT '{}'");
             SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "patch_policy_json",
                     "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "assertion_spec_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "fixture_spec_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_cases", "judge_spec_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_executions (" +
                     "id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, project_key TEXT NOT NULL, status TEXT NOT NULL, " +
                     "model_profile_id TEXT, trial_count INTEGER NOT NULL, pass_threshold INTEGER NOT NULL, " +
                     "average_score REAL, passed INTEGER, created_at TEXT NOT NULL, completed_at TEXT, " +
                     "FOREIGN KEY(suite_id) REFERENCES evaluation_suites(id))");
             SqliteSchemaMigrator.ensureColumn(connection, "evaluation_executions", "agent_team_id", "TEXT");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_executions", "fingerprint_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_executions", "gate_status",
+                    "TEXT NOT NULL DEFAULT 'PENDING'");
+            SqliteSchemaMigrator.ensureColumn(connection, "evaluation_executions", "gate_details_json",
+                    "TEXT NOT NULL DEFAULT '{}'");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_executions_suite " +
                     "ON evaluation_executions(suite_id,created_at)");
             statement.execute("CREATE TABLE IF NOT EXISTS evaluation_trials (" +
@@ -3118,6 +3132,17 @@ public class SqliteRuntimeStore {
             return workspaceOwnerRunId(connection, runId);
         } catch (SQLException e) {
             throw failure("resolve delegated workspace", e);
+        }
+    }
+
+    public int memorySelectionsForRun(String runId) {
+        if (runId == null || runId.isBlank()) return 0;
+        try (Connection connection = open(); PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM memory_usage_feedback WHERE run_id=?")) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
+        } catch (SQLException e) {
+            throw failure("count run memory selections", e);
         }
     }
 

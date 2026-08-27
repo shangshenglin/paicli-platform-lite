@@ -72,17 +72,19 @@ PaiCLI Server
 
 评测层不实现第二套 Agent Loop。`evaluation_suites` 和 `evaluation_cases` 保存项目级输入、工具/回答约束、资源上限与通过阈值；启动 Execution 后，每个 Case/Trial 创建隐藏的内部 Session 和普通 Run，因此继续复用现有队列、模型方案、ToolCall 持久化、审批、Event、Audit、Artifact 和恢复边界。Execution 可选持久化 `agent_team_id`：未选择时保持单 Agent 基线，选择后使用团队 Leader 创建 Trial Run，并把成员、并发、深度和 Reviewer/Runner 要求固化为 Collaboration Policy。内部评测 Run 不参与自动 Memory 提取，避免测试内容污染长期记忆。危险工具仍创建持久化 Approval；评测报告暴露待审批项供人工单次允许或拒绝，不为追求自动化而扩大权限。
 
-`EvaluationService` 在读取报告时同步终态 Trial，并从 Run、Message、ToolCall 和 ModelUsage 构建结构化评分快照。Case 的 `maxTokens` 明确定义为输出 Token，报告同时保留输入、输出和总 Token；必需工具只接受 `COMPLETED` ToolCall，必需/禁止工具、回答规则以及工具数、输出 Token、耗时上限都属于硬门禁，避免失败调用或“扣分后刚好达到阈值”被误判通过。Execution 只有在全部 Trial 达到阈值且通过规则/资源门禁时通过；运行中报告保持可刷新，不阻塞 Worker 等待。
+`EvaluationService` 在读取报告时同步终态 Trial，并从 Run、Message、ToolCall、Approval、Event、Plan、Memory Selection 和 ModelUsage 构建结构化评分快照。确定性规则收敛到可独立变异测试的 `EvaluationAssertionEngine`：除旧的工具/回答/资源规则外，还能检查工具参数子集或精确值、状态、次数、Provider 顺序、Event 子序列、Approval 先于执行、拒绝后不得启动、幂等键唯一、重复签名、终态工具、虚假完成声明，以及真实 Plan DAG/Validation、Memory Selection 和 Delegation 数量。所有安全、功能、证据和资源断言都是硬门禁；分数只用于质量排序。
 
 Case 分为 `RULE` 与 `REPOSITORY`。`RULE` 保持原有工具/回答/资源确定性评分；`REPOSITORY` 借鉴 SWE-bench 的执行式方法，只使用私有 fixture。`data/evaluation-fixtures/{fixtureRef}/workspace` 是固定缺陷快照，`hidden` 是模型不可见的 Grader 文件源。启动 Trial 前，`RepositoryEvaluationService` 校验覆盖 `workspace` 与 `hidden` 的目录级 SHA-256，在 Run 入队前复制公开工作区到唯一 workspace owner，并把 fixture 摘要、Grader Spec 与 Patch Policy 冻结到 `evaluation_trials.case_snapshot_json`；评分前再次复核摘要，因此 Case 后续编辑或 fixture 中途漂移都不能静默改变正在执行或历史 Trial。
 
 仓库 Run 终态后，评测器比较原 fixture 与 Agent workspace 的文件摘要，拒绝符号链接、保留的 `.paicli-evaluation` 路径、禁止 glob、超量文件和超大 Patch。通过完整性检查后，在 Run 挂载内创建全新的 grader 副本，应用文件差异并从 fixture `hidden/` 注入映射文件；模型上下文和 Agent workspace 从未包含隐藏文件、Grader 命令或正确 Patch。grader 准备、FAIL_TO_PASS、PASS_TO_PASS 均先以固定幂等键持久化为内部 ToolCall，再按顺序进入 Docker Sandbox；刷新/恢复复用已完成结果。Local Sandbox 不获得宿主命令能力，因此仓库 Grader 在 Local 模式会明确失败。
 
-仓库 Trial 同时保存四个正交结论：`resolved` 表示 F2P/P2P 全部通过，`integrityPassed` 表示 Patch 边界有效，`securityPassed` 表示未触发禁止工具/回答，`budgetPassed` 表示工具、Token、耗时在预算内。Trial 的正式 `passed` 要求 resolved、完整性、安全和 Run 正常完成；预算只单独报告，不把功能正确性压缩成含义模糊的扣分。Execution 报告汇总 resolved Trial、稳定全通过 Case 与每 resolved Token。
+仓库 Trial 同时保存四个正交结论：`resolved` 表示 F2P/P2P 全部通过，`integrityPassed` 表示 Patch 边界有效，`securityPassed` 表示必需/禁止工具与回答规则通过，`budgetPassed` 表示 Agent 工具、输出 Token、耗时在预算内。Trial 使用二元 100/0 判分，正式 `passed` 要求 resolved、完整性、安全、预算和 Run 正常完成；内部 `evaluation_grader*` ToolCall 不计入 Agent 工具预算。
 
 `evaluation_baselines` 只接受已通过 Trial，保存人工确认的来源 Run、最终回答、工具名称序列、Token 口径、耗时和 Trial Grader 详情。新基线使用输出 Token；迁移前基线以 `TOTAL` 标记并继续按总 Token 比较。`RULE` 继续检查关键工具保留；`REPOSITORY` 不要求重复相同工具路径，而是比较 resolved，并分别显示输出 Token 150% 与耗时 200% 回归线。基线不持久化为新的模型上下文，也不把原始 reasoning 作为严格相等条件；这避免模型升级时因合法路径变化产生大量伪回归。
 
-版本化官方 Starter Pack 位于 classpath `evaluations/starter-pack.json`。安装服务按 Suite/Case 名称幂等合并，只创建缺失项，不覆盖用户已有规则；默认包覆盖基础安全、审批、受管能力和稳定性/预算。`RULE` Trial 启动前由 `RuleEvaluationFixtureService` 在唯一 workspace owner 下生成确定性 README、AGENTS 和 tests 说明文件，不复制宿主仓库、不携带密钥；依赖 Knowledge、Skill、Web 或 Multi-Agent 前置条件的 Case 默认停用，用户可在 Console 显式启用。
+版本化官方 Starter Pack `2.0.0` 位于 classpath `evaluations/starter-pack.json`。Suite 保存 `dataset_version`，Case 保存 `assertion_spec_json`、`fixture_spec_json` 与 `judge_spec_json`。`RuleEvaluationFixtureService` 除确定性 README/AGENTS/tests 外，可为唯一 Trial workspace 写入版本化文件、创建 workspace-scoped Memory、临时 Knowledge 文档、绑定内部 Plan，并要求 AgentTeam Policy；创建的持久化 Memory/Knowledge/Plan ID 冻结进 Trial 快照，评分后幂等清理，避免评测夹具污染用户长期状态。高级用例仍默认停用，只有显式满足前置条件后启用。
+
+Execution 创建时由 `EvaluationFingerprintService` 对数据集/Case、Prompt、Tool Schema、模型方案、AgentTeam、Grader 和环境生成无密钥指纹；`EvaluationAnalyticsService` 从历史 Execution 计算 pass rate、stable case rate、Token/成功 Trial 和耗时趋势，支持同 Suite 两次执行对比。发布门禁把硬门禁失败、Judge 失败、Token 超过最近通过基线 25% 和耗时超过 40% 持久化为 `gate_status/gate_details_json`。可选 `EvaluationSemanticJudge` 只在确定性门禁通过后执行，要求人工批准且至少 20 样本、agreement≥0.80 的校准记录，非法配置或响应 fail-closed，不能覆盖安全与功能结论。
 
 评测中心从效率工作台中抽离为首页一级入口。宽屏使用“套件/报告”双栏布局，套件用例默认折叠，两栏各自限高滚动；窄屏降级为上下两块独立滚动区域。这样套件、Case 和 Trial 增长时不会形成一条无限延长的单列页面。没有启用 Case 的套件在 Console 中显示“先启用用例”；点击只展开案例与前置条件提示，不创建无 Trial 的 Execution，后端仍保留同一非空校验作为 API 边界。
 
@@ -151,11 +153,11 @@ Console 不把所有信息塞进聊天看板，而是提供 Master-Detail 工作
 
 当前 ContextManager 已负责单 Run 的上下文预算、稳定前缀、压缩摘要、按需工具 Schema 和 Context Manifest；这不等于任务级成本编排。当前阶段子任务已使用直接父子 Run 唤醒同一 Leader，避免为一次直接交接额外新建 Leader Run；后续仍需在普通对话、专家协作和 CollaborationTask 之前增加统一外部 Harness：用任务预算信封准入模型请求，用事件合并和 Leader 单飞避免每条成员事件都产生新 Run，用引用化交接包替代重复完整上下文，并在确定性聚合/验证、模型分层和质量成本评测之间形成闭环。该层只能决定是否创建、延迟、合并或降级 Run，不能绕过既有 ToolCall 先持久化、Approval、Sandbox、恢复和人工验收边界。详见 [外部 Harness Token 成本优化方案](harness-token-optimization.md)。
 
-ContextManager 把缓存稳定性与输入预算作为同一个组装边界处理。基础指令、专家配置、项目规则和 Skill 索引是稳定系统前缀；摘要及当前 Run 之前的历史位于 Run 动态块之前，使新 Run 可以复用已有长会话前缀；运行基准时间、工作区、RAG、Memory 和当前 Run 消息位于动态尾部。同一 Run 始终使用其持久化创建时间，不在每轮写入变化的墙钟时间。输入估算同时计算 Message 与 Tool Definition，RAG 和 Memory 只使用必需上下文之后的剩余预算，必要时保留 XML 关闭标签并写入明确裁剪标记。
+ContextManager 把缓存稳定性与输入预算作为同一个组装边界处理。基础指令、专家配置、项目规则和 Skill 索引是稳定系统前缀；摘要及当前 Run 之前的历史位于 Run 动态块之前，使新 Run 可以复用已有长会话前缀；运行基准时间、工作区、RAG、Memory 和当前 Run 消息位于动态尾部。同一 Run 始终使用其持久化创建时间，不在每轮写入变化的墙钟时间。输入估算同时计算 Message 与 Tool Definition，并按 Provider/模型选择 Tokenizer Profile；精确 Tokenizer 不可用时明确使用 code-point fallback 与真实供应商用量样本的保守历史校准，DeepSeek 当前 P90 系数为 1.60。RAG 和 Memory 只使用必需上下文之后的剩余预算，必要时保留 XML 关闭标签并写入明确裁剪标记。
 
-每次模型调用前持久化 `context.prepared` Event，形成轻量 Context Manifest：包含上下文/输出/硬输入上限、总估算 Token、Tool Definition Token、各区块 Token、可复用前缀 Token 与 SHA-256、稳定/摘要/历史/当前 Run 消息数、PlanState 是否注入、RAG citation/命中理由、被选 Memory id/选择理由、完整工具名/选择理由、按需激活工具，以及 RAG/Memory 是否纳入、裁剪或丢弃。它不重复保存完整 Prompt，但可以解释缓存命中、上下文淘汰和 Memory 召回行为。
+每次模型调用前持久化 `context.prepared` Event，形成 Context Manifest：包含上下文/输出/硬输入上限、原始与校准估算 Token、Tokenizer Profile、Tool Definition/各区块/可复用前缀 Token 与 SHA-256、PlanState、实际纳入的 Knowledge document/chunk/version/字符位置/正文快照、Memory id/key/source/正文快照、完整工具名、选择理由、按需激活工具及裁剪/丢弃状态。Manifest 的 `fieldGroups` 是语义边界：只有 `ModelRequest.messages`、`ModelRequest.tools` 和请求参数进入供应商请求；限额、预算与裁剪是服务端强制；ID、citation、分数、选择理由（包括 `knowledgeSelectionReasons`）、计数、Token 分区与哈希仅用于审计。审计快照中的 Chunk/Memory 正文用于证明哪段内容曾被拼入 message，不代表整份 Manifest 被再次注入模型。
 
-只有委派树根 Run 完成后才创建一次持久化 `memory_extractions` 任务，避免 Leader 和子 Agent 为同一协作结论重复提取；创建时冻结根 Run 的 Message id、sequence、role、content 和 tool call 引用。Worker 只能读取 `source_snapshot_json`，不能读取稍后变化的 Session。每条提取结果把实际证据 Message id、起止 sequence 和摘录写入 `memory_sources`，API 可将 Memory 回跳到具体消息或工具结果。旧任务的空快照保留兼容读取路径。
+只有委派树根 Run 完成后才创建一次持久化 `memory_extractions` 任务，避免 Leader 和子 Agent 为同一协作结论重复提取；创建时冻结根 Run 的 Message id、sequence、role、content 和 tool call 引用。Worker 只能读取 `source_snapshot_json`，不能读取稍后变化的 Session。每条提取结果把实际证据 Message id、起止 sequence 和摘录写入 `memory_sources`；`memory.extracted` Event 保存每个结果的 Memory ID、MemorySource ID、来源 Run/Message、动作、类型、Scope、置信度和实际正文，而非只有数量。旧任务的空快照与旧版 count-only Event 保留兼容读取路径。
 
 Worker 提取带类型、层级和置信度的 L1/L2/L3 Memory；单根 Run 总数上限为 3（L1≤1、L2≤2、L3≤1）。流程型协作事件会被过滤，候选必须带有效 evidence message id，且至少由用户陈述或成功工具结果支持；模型给出的分数会按证据质量、重复出现程度和层级稳定性校准并受来源上限约束。同 key 变化和人工编辑先写 `memory_revisions`；高相似候选只在相同 Scope 内复用 canonical key，中等相似候选进入 `memory_conflicts`，长期未访问且未置顶的 L1 进入 `STALE`。
 
@@ -231,7 +233,7 @@ base/safety/agent Prompt
 2. **会话复用边界**：已完成历史位于当前 Run 动态块之前；创建下一 Run 时，新查询引起的 RAG/Memory 变化不会破坏已有历史前缀。
 3. **Run 内复用边界**：动态块使用持久化 Run 创建时间和稳定工作区；同一 Run 后续 ReAct 轮次只在尾部追加 assistant/tool 消息。
 
-输入预算同时包含 Tool Definition Token。ContextManager 先计算稳定指令、摘要、历史、Runtime、PlanState、当前 Run 和工具 Schema 的必需成本，再把剩余预算分配给 RAG 与 Memory；裁剪不会突破硬输入上限。默认只常驻核心 Tool Schema，扩展 Schema 通过 `tool_search` 按需加载。`context.prepared` Event 保存轻量 Context Manifest，包括输入/输出上限、估算输入、各区块/工具 Token、可复用前缀 Token/SHA-256、检索引用、Memory 选择、工具激活及裁剪状态，支持把供应商返回的 `cachedInputTokens` 与实际上下文结构关联分析。
+输入预算同时包含 Tool Definition Token。ContextManager 先计算稳定指令、摘要、历史、Runtime、PlanState、当前 Run 和工具 Schema 的必需成本，再把剩余预算分配给 RAG 与 Memory；裁剪不会突破硬输入上限。默认只常驻核心 Tool Schema，扩展 Schema 通过 `tool_search` 按需加载。`context.prepared` Event 保存原始/校准估算、模型级 Tokenizer Profile、各区块/工具 Token、可复用前缀、真实 Knowledge Chunk/Memory 选择快照及三类字段处置，支持把供应商返回的 `inputTokens/cachedInputTokens` 与实际上下文结构关联分析。
 
 验证缓存效果时必须使用新版本部署后的增量 `cachedInputTokens / inputTokens`，不能直接用历史累计比率。模型切换、工具白名单变化、项目规则变化、摘要重写和供应商最小可缓存前缀仍会造成合理失效；供应商不支持或未开启 Prompt Cache 时，结构优化不会凭空产生缓存命中。
 

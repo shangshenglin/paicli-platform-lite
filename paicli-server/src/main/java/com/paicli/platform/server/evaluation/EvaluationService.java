@@ -9,6 +9,7 @@ import com.paicli.platform.server.domain.RunRecord;
 import com.paicli.platform.server.domain.ToolCallRecord;
 import com.paicli.platform.server.store.EvaluationStore;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.store.PlanStore;
 import com.paicli.platform.server.store.SqliteRuntimeStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -35,18 +36,29 @@ public class EvaluationService {
     private final ObjectMapper mapper;
     private final RepositoryEvaluationService repositoryEvaluations;
     private final RuleEvaluationFixtureService ruleFixtures;
+    private final EvaluationAssertionEngine assertions;
+    private final PlanStore plans;
+    private final EvaluationFingerprintService fingerprints;
+    private final EvaluationSemanticJudge semanticJudge;
 
     @Autowired
     public EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
                              ProductivityStore productivity, ObjectMapper mapper,
                              RepositoryEvaluationService repositoryEvaluations,
-                             RuleEvaluationFixtureService ruleFixtures) {
+                             RuleEvaluationFixtureService ruleFixtures,
+                             EvaluationAssertionEngine assertions, PlanStore plans,
+                             EvaluationFingerprintService fingerprints,
+                             EvaluationSemanticJudge semanticJudge) {
         this.evaluations = evaluations;
         this.runtime = runtime;
         this.productivity = productivity;
         this.mapper = mapper;
         this.repositoryEvaluations = repositoryEvaluations;
         this.ruleFixtures = ruleFixtures;
+        this.assertions = assertions == null ? new EvaluationAssertionEngine(mapper) : assertions;
+        this.plans = plans;
+        this.fingerprints = fingerprints;
+        this.semanticJudge = semanticJudge;
     }
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
@@ -57,11 +69,19 @@ public class EvaluationService {
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
                       ProductivityStore productivity, ObjectMapper mapper) {
-        this(evaluations, runtime, productivity, mapper, null, null);
+        this(evaluations, runtime, productivity, mapper, null, null, null, null, null, null);
     }
 
     EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime, ObjectMapper mapper) {
         this(evaluations, runtime, null, mapper);
+    }
+
+    private EvaluationService(EvaluationStore evaluations, SqliteRuntimeStore runtime,
+                              ProductivityStore productivity, ObjectMapper mapper,
+                              RepositoryEvaluationService repositoryEvaluations,
+                              RuleEvaluationFixtureService ruleFixtures) {
+        this(evaluations, runtime, productivity, mapper, repositoryEvaluations, ruleFixtures,
+                null, null, null, null);
     }
 
     public EvaluationStore.EvaluationExecution start(String suiteId, String modelProfileId,
@@ -88,7 +108,10 @@ public class EvaluationService {
                     .filter(ProductivityStore.AgentProfile::enabled)
                     .orElseThrow(() -> new IllegalArgumentException("evaluation team leader is unavailable"));
         }
-        var execution = evaluations.createExecution(suite, modelProfileId, agentTeamId, trials, threshold);
+        String fingerprint = fingerprints == null ? "{}"
+                : fingerprints.fingerprint(suite, cases, modelProfileId, agentTeamId);
+        var execution = evaluations.createExecution(
+                suite, modelProfileId, agentTeamId, trials, threshold, fingerprint);
         try {
             for (var evaluationCase : cases) {
                 for (int ordinal = 1; ordinal <= trials; ordinal++) {
@@ -101,7 +124,7 @@ public class EvaluationService {
                         }
                         prepared = repositoryEvaluations.prepare(evaluationCase, workspaceOwner);
                     } else if (ruleFixtures != null) {
-                        ruleFixtures.prepare(workspaceOwner);
+                        ruleFixtures.prepare(workspaceOwner, evaluationCase.fixtureSpecJson());
                     } else {
                         workspaceOwner = null;
                     }
@@ -126,8 +149,13 @@ public class EvaluationService {
                                 team.maxExperts(), team.maxConcurrency(), 0, 0, team.maxDepth() > 1,
                                 team.requireReviewer(), team.requireRunner());
                     }
+                    String caseSnapshot = prepared == null ? "{}" : prepared.caseSnapshotJson();
+                    if (prepared == null && ruleFixtures != null && workspaceOwner != null) {
+                        caseSnapshot = ruleFixtures.prepareState(evaluationCase.fixtureSpecJson(),
+                                suite.projectKey(), session.id(), run.id(), workspaceOwner);
+                    }
                     evaluations.addTrial(execution.id(), evaluationCase.id(), ordinal, session.id(), run.id(),
-                            prepared == null ? "{}" : prepared.caseSnapshotJson());
+                            caseSnapshot);
                 }
             }
             return execution;
@@ -201,6 +229,7 @@ public class EvaluationService {
                         write(Map.of("summary", "trial run is missing")));
             } else if (TERMINAL.contains(run.status())) {
                 grade(execution, trial, run);
+                cleanupRuleFixture(execution, trial, run);
             }
         }
         var refreshed = evaluations.trials(executionId);
@@ -219,88 +248,36 @@ public class EvaluationService {
             gradeRepository(execution, trial, run, evaluationCase);
             return;
         }
-        var tools = runtime.toolCallsForRun(run.id());
-        List<String> toolNames = tools.stream().map(ToolCallRecord::toolName).toList();
-        String response = finalResponse(run);
-        var usage = runtime.modelTokenUsageForRun(run.id());
-        int outputTokens = usage.outputTokens();
-        long duration = duration(run);
-        List<Map<String, Object>> checks = new ArrayList<>();
-        int score = 100;
-        boolean ruleRequirementsPassed = true;
-        boolean resourceLimitsPassed = true;
-
-        if (run.status() != RunStatus.COMPLETED) {
-            score = deduct(score, 100, checks, "run_completed", false,
-                    "run ended as " + run.status());
-        }
-        for (String required : readList(evaluationCase.requiredToolsJson())) {
-            boolean ok = tools.stream().anyMatch(tool -> required.equals(tool.toolName())
-                    && tool.status() == ToolCallStatus.COMPLETED);
-            ruleRequirementsPassed &= ok;
-            score = deduct(score, ok ? 0 : 20, checks, "required_tool", ok, required);
-        }
-        for (String forbidden : readList(evaluationCase.forbiddenToolsJson())) {
-            boolean ok = !toolNames.contains(forbidden);
-            ruleRequirementsPassed &= ok;
-            score = deduct(score, ok ? 0 : 50, checks, "forbidden_tool", ok, forbidden);
-        }
-        for (String required : readList(evaluationCase.requiredResponseJson())) {
-            boolean ok = response.contains(required);
-            ruleRequirementsPassed &= ok;
-            score = deduct(score, ok ? 0 : 15, checks, "required_response", ok, required);
-        }
-        for (String forbidden : readList(evaluationCase.forbiddenResponseJson())) {
-            boolean ok = !response.contains(forbidden);
-            ruleRequirementsPassed &= ok;
-            score = deduct(score, ok ? 0 : 50, checks, "forbidden_response", ok, forbidden);
-        }
-        if (evaluationCase.maxToolCalls() > 0) {
-            boolean ok = tools.size() <= evaluationCase.maxToolCalls();
-            resourceLimitsPassed &= ok;
-            score = deduct(score, ok ? 0 : 10, checks, "max_tool_calls", ok,
-                    tools.size() + " / " + evaluationCase.maxToolCalls());
-        }
-        if (evaluationCase.maxTokens() > 0) {
-            boolean ok = outputTokens <= evaluationCase.maxTokens();
-            resourceLimitsPassed &= ok;
-            score = deduct(score, ok ? 0 : 10, checks, "max_output_tokens", ok,
-                    outputTokens + " / " + evaluationCase.maxTokens());
-        }
-        if (evaluationCase.maxDurationMs() > 0) {
-            boolean ok = duration <= evaluationCase.maxDurationMs();
-            resourceLimitsPassed &= ok;
-            score = deduct(score, ok ? 0 : 10, checks, "max_duration_ms", ok,
-                    duration + " / " + evaluationCase.maxDurationMs());
-        }
-
         var baseline = evaluations.baseline(evaluationCase.id()).orElse(null);
-        if (baseline != null) {
-            Set<String> baselineTools = new LinkedHashSet<>(readList(baseline.toolNamesJson()));
-            Set<String> missing = new LinkedHashSet<>(baselineTools); missing.removeAll(toolNames);
-            score = deduct(score, missing.isEmpty() ? 0 : Math.min(15, missing.size() * 5), checks,
-                    "baseline_tools", missing.isEmpty(), missing.isEmpty() ? "all retained" : "missing " + missing);
-            if (baseline.tokens() > 0) {
-                int comparableTokens = "OUTPUT".equals(baseline.tokenMetric())
-                        ? outputTokens : usage.totalTokens();
-                boolean ok = comparableTokens <= Math.ceil(baseline.tokens() * 1.5);
-                score = deduct(score, ok ? 0 : 5, checks, "baseline_tokens", ok,
-                        comparableTokens + " / " + baseline.tokens() + " (" + baseline.tokenMetric() + ")");
-            }
-            if (baseline.durationMs() > 0) {
-                boolean ok = duration <= Math.ceil(baseline.durationMs() * 1.5);
-                score = deduct(score, ok ? 0 : 5, checks, "baseline_duration", ok,
-                        duration + " / " + baseline.durationMs());
+        var result = assertions.grade(new EvaluationAssertionEngine.GradeInput(
+                evaluationCase, run.status(), runtime.toolCallsForRun(run.id()),
+                runtime.approvalsForRun(run.id()), runtime.events(run.id(), 0), finalResponse(run),
+                runtime.modelTokenUsageForRun(run.id()), duration(run), execution.passThreshold(),
+                baseline, stateEvidence(run)));
+        Map<String, Object> details = new LinkedHashMap<>(result.details());
+        boolean passed = result.passed();
+        int score = result.score();
+        if (passed && semanticJudge != null) {
+            var judge = semanticJudge.judge(evaluationCase, finalResponse(run), details);
+            details.put("judge", judge.asMap());
+            if (judge.enabled()) {
+                passed = judge.passed();
+                score = Math.min(score, judge.score());
+                details.put("summary", passed ? "passed" : "failed");
             }
         }
-        boolean passed = score >= execution.passThreshold() && ruleRequirementsPassed && resourceLimitsPassed;
-        Map<String, Object> details = new LinkedHashMap<>();
-        details.put("summary", passed ? "passed" : "failed");
-        details.put("ruleRequirementsPassed", ruleRequirementsPassed);
-        details.put("runStatus", run.status().name()); details.put("toolNames", toolNames);
-        details.put("toolCalls", tools.size()); addTokenDetails(details, usage); details.put("durationMs", duration);
-        details.put("response", response); details.put("checks", checks);
         evaluations.completeTrial(trial.id(), run.status().name(), score, passed, write(details));
+    }
+
+    private void cleanupRuleFixture(EvaluationStore.EvaluationExecution execution,
+                                    EvaluationStore.EvaluationTrial trial, RunRecord run) {
+        if (ruleFixtures == null || isRepositoryTrial(trial)) return;
+        try {
+            ruleFixtures.cleanup(trial.caseSnapshotJson(), execution.projectKey());
+        } catch (Exception e) {
+            runtime.appendEvent(run.id(), "evaluation.fixture_cleanup_failed", write(Map.of(
+                    "error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage())));
+        }
     }
 
     private void gradeRepository(EvaluationStore.EvaluationExecution execution,
@@ -312,26 +289,39 @@ public class EvaluationService {
             return;
         }
         var agentTools = runtime.toolCallsForRun(run.id()).stream()
-                .filter(tool -> !"evaluation_grader".equals(tool.toolName())).toList();
+                .filter(tool -> !tool.toolName().startsWith("evaluation_grader")).toList();
         List<String> toolNames = agentTools.stream().map(ToolCallRecord::toolName).toList();
         var usage = runtime.modelTokenUsageForRun(run.id());
         long duration = duration(run);
         RepositoryEvaluationService.RepositoryGrade grade = repositoryEvaluations.grade(trial, run);
 
         List<Map<String, Object>> checks = new ArrayList<>();
-        boolean securityPassed = true;
+        boolean deterministicRulesPassed = true;
+        for (String required : readList(evaluationCase.requiredToolsJson())) {
+            boolean ok = agentTools.stream().anyMatch(tool -> required.equals(tool.toolName())
+                    && tool.status() == ToolCallStatus.COMPLETED);
+            deterministicRulesPassed &= ok;
+            checks.add(Map.of("rule", "required_tool", "passed", ok, "deduction", ok ? 0 : 100,
+                    "evidence", required, "hardGate", true));
+        }
         for (String forbidden : readList(evaluationCase.forbiddenToolsJson())) {
             boolean ok = !toolNames.contains(forbidden);
-            securityPassed &= ok;
+            deterministicRulesPassed &= ok;
             checks.add(Map.of("rule", "forbidden_tool", "passed", ok, "deduction", ok ? 0 : 100,
-                    "evidence", forbidden));
+                    "evidence", forbidden, "hardGate", true));
         }
         String response = finalResponse(run);
+        for (String required : readList(evaluationCase.requiredResponseJson())) {
+            boolean ok = response.contains(required);
+            deterministicRulesPassed &= ok;
+            checks.add(Map.of("rule", "required_response", "passed", ok, "deduction", ok ? 0 : 100,
+                    "evidence", required, "hardGate", true));
+        }
         for (String forbidden : readList(evaluationCase.forbiddenResponseJson())) {
             boolean ok = !response.contains(forbidden);
-            securityPassed &= ok;
+            deterministicRulesPassed &= ok;
             checks.add(Map.of("rule", "forbidden_response", "passed", ok, "deduction", ok ? 0 : 100,
-                    "evidence", forbidden));
+                    "evidence", forbidden, "hardGate", true));
         }
         boolean toolBudgetPassed = evaluationCase.maxToolCalls() <= 0
                 || agentTools.size() <= evaluationCase.maxToolCalls();
@@ -341,15 +331,17 @@ public class EvaluationService {
                 || duration <= evaluationCase.maxDurationMs();
         boolean budgetPassed = toolBudgetPassed && tokenBudgetPassed && durationBudgetPassed;
         boolean runCompleted = run.status() == RunStatus.COMPLETED;
-        boolean passed = grade.resolved() && grade.integrityPassed() && securityPassed && runCompleted;
-        int score = grade.resolved() && grade.integrityPassed() ? 100 : 0;
+        boolean passed = grade.resolved() && grade.integrityPassed() && deterministicRulesPassed
+                && budgetPassed && runCompleted;
+        int score = passed ? 100 : 0;
 
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("summary", passed ? "passed" : "failed");
         details.put("caseType", "REPOSITORY");
         details.put("resolved", grade.resolved());
         details.put("integrityPassed", grade.integrityPassed());
-        details.put("securityPassed", securityPassed);
+        details.put("securityPassed", deterministicRulesPassed);
+        details.put("deterministicRulesPassed", deterministicRulesPassed);
         details.put("budgetPassed", budgetPassed);
         details.put("budget", Map.of(
                 "toolCalls", toolBudgetPassed,
@@ -364,7 +356,7 @@ public class EvaluationService {
         details.put("response", response);
         details.put("checks", checks);
         details.put("repository", mapper.convertValue(grade, MAP_TYPE));
-        details.put("passThresholdIgnored", execution.passThreshold());
+        details.put("binaryRepositoryGrade", true);
 
         var baseline = evaluations.baseline(evaluationCase.id()).orElse(null);
         if (baseline != null) {
@@ -375,6 +367,15 @@ public class EvaluationService {
                             || usage.outputTokens() <= Math.ceil(baseline.tokens() * 1.5),
                     "durationWithin200Percent", baseline.durationMs() <= 0
                             || duration <= Math.ceil(baseline.durationMs() * 2.0)));
+        }
+        if (passed && semanticJudge != null) {
+            var judge = semanticJudge.judge(evaluationCase, response, details);
+            details.put("judge", judge.asMap());
+            if (judge.enabled()) {
+                passed = judge.passed();
+                score = Math.min(score, judge.score());
+                details.put("summary", passed ? "passed" : "failed");
+            }
         }
         evaluations.completeTrial(trial.id(), run.status().name(), score, passed, write(details));
     }
@@ -429,6 +430,51 @@ public class EvaluationService {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    private EvaluationAssertionEngine.StateEvidence stateEvidence(RunRecord run) {
+        int delegations = runtime.delegationsForRun(run.id()).size();
+        int memorySelections = runtime.memorySelectionsForRun(run.id());
+        if (plans == null) {
+            return new EvaluationAssertionEngine.StateEvidence(
+                    delegations, 0, memorySelections, true, true);
+        }
+        var runPlans = plans.plansForSession(run.sessionId(), 200);
+        boolean dagValid = runPlans.stream().allMatch(plan -> validDag(plans.steps(plan.id()), plans.edges(plan.id())));
+        boolean validated = runPlans.stream().allMatch(plan -> plans.steps(plan.id()).stream()
+                .filter(step -> "COMPLETED".equals(step.status())).allMatch(step -> {
+                    var checks = plans.validationChecks(plan.id(), 1_000).stream()
+                            .filter(check -> step.id().equals(check.stepId())).toList();
+                    return !checks.isEmpty() && checks.stream().allMatch(check -> "PASSED".equals(check.status()));
+                }));
+        return new EvaluationAssertionEngine.StateEvidence(
+                delegations, runPlans.size(), memorySelections, dagValid, validated);
+    }
+
+    private static boolean validDag(List<PlanStore.PlanStep> steps, List<PlanStore.PlanEdge> edges) {
+        Set<String> ids = steps.stream().map(PlanStore.PlanStep::id).collect(java.util.stream.Collectors.toSet());
+        Map<String, List<String>> outgoing = new LinkedHashMap<>();
+        ids.forEach(id -> outgoing.put(id, new ArrayList<>()));
+        for (PlanStore.PlanEdge edge : edges) {
+            if (!ids.contains(edge.fromStepId()) || !ids.contains(edge.toStepId())) return false;
+            outgoing.get(edge.fromStepId()).add(edge.toStepId());
+        }
+        Set<String> visiting = new java.util.HashSet<>();
+        Set<String> visited = new java.util.HashSet<>();
+        for (String id : ids) if (hasCycle(id, outgoing, visiting, visited)) return false;
+        return true;
+    }
+
+    private static boolean hasCycle(String id, Map<String, List<String>> outgoing,
+                                    Set<String> visiting, Set<String> visited) {
+        if (visited.contains(id)) return false;
+        if (!visiting.add(id)) return true;
+        for (String next : outgoing.getOrDefault(id, List.of())) {
+            if (hasCycle(next, outgoing, visiting, visited)) return true;
+        }
+        visiting.remove(id);
+        visited.add(id);
+        return false;
     }
 
     private static Map<String, Object> summary(List<TrialResult> trials) {

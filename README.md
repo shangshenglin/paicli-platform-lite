@@ -8,7 +8,7 @@ Before Docker Sandbox accepts Runs, the Server starts a disposable network-disab
 
 PaiCLI Platform Lite 是一个面向单人开发、单租户私有部署的 **Managed Agent Runtime**。它不只是调用一次模型的聊天页面，而是把 Session、Run、Plan、模型推理、工具调用、人工审批、事件流、恢复、Memory、知识检索、Sandbox 和评测组织成一条可持久化、可审计、可恢复的执行链路。
 
-当前已完成阶段 1–25，并补齐 Memory/RAG/Plan/Agent Harness、持久化 CollaborationTask、结构化团队路由、事件驱动 Leader 唤醒、受控并行、多 Shell 执行、Context/Memory 认知控制层和私有仓库执行式评测；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
+当前已完成阶段 1–26，并补齐 Memory/RAG/Plan/Agent Harness、持久化 CollaborationTask、结构化团队路由、事件驱动 Leader 唤醒、受控并行、多 Shell 执行、Context/Memory 认知控制层、私有仓库执行式评测和带版本化夹具/指纹/发布门禁的评测可信度闭环；自动化测试覆盖 Runtime、Store、Graph 路由、上下文、Memory、Sandbox、Console 与评测链路，并完成真实 Docker 与 Agent 评测 REST 冒烟验证。
 
 外部 Harness 的下一步不再只是压缩单次 Prompt，而是以任务为单位控制模型调用、事件合并、Agent 交接、模型分层与成本质量评测；本机“推箱子”协作任务的真实用量复盘和可落地优化顺序见 [外部 Harness Token 成本优化方案](docs/harness-token-optimization.md)。
 
@@ -253,9 +253,9 @@ X-API-Key: your-key
 - 不再在每轮调用的早期 Prompt 中写入 `Instant.now()`；同一 Run 始终使用持久化的创建时间作为基准时间。
 - 将既有摘要和历史移动到 RAG、Memory、工作区等 Run 动态块之前，使同一会话的新 Run 仍可复用已有长前缀。
 - 基础 Prompt、专家指令、项目规则和 Skill 索引使用稳定顺序与系统消息角色；内容或规则真正变化时才合理失效。
-- Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
+- Tool Definition/Schema 纳入估算输入 Token，避免只计算消息文本而低估真实请求。估算器按 Provider/模型选择 Tokenizer Profile；无法接入供应商精确 Tokenizer 时显式标记为 fallback，并使用真实 `model_usage.input_tokens` 样本校准的保守系数。当前 DeepSeek code-point fallback 使用历史样本 P90 `1.60`，不再直接把“字符数 ÷ 4”当成最终估算。默认上下文只常驻文件、命令、Artifact 与 `tool_search` 等核心工具；Knowledge、Skill、MCP、Multi-Agent 等扩展工具由 `tool_search` 返回能力目录后，在下一模型轮次加载完整 Schema，减少稳定前缀体积和无关 Schema 波动。
 - 必需指令、历史、当前 Run 消息和工具 Schema 先占预算；RAG 与 Memory 共享剩余动态预算，超限时写入明确标记并有界裁剪。
-- 每轮在 `run_events` 写入 `context.prepared` Context Manifest，记录可复用前缀 Token 和 SHA-256、工具 Token、各消息分区 Token、Plan 状态、RAG citation/命中理由、实际选择的 Memory id/理由、完整工具名/选择理由、动态激活工具和被丢弃来源，便于解释后续命中率与上下文选择。
+- 每轮在 `run_events` 写入 `context.prepared` Context Manifest，记录原始/校准估算、Tokenizer Profile、可复用前缀 Token 和 SHA-256、工具 Token、各消息分区 Token、Plan 状态，以及实际选中的 Knowledge document/chunk/version/位置/正文快照、Memory id/key/source/正文快照、完整工具名、选择理由、动态激活工具和被丢弃来源。`fieldGroups` 明确区分：真正发送给模型的是 `ModelRequest.messages`、`ModelRequest.tools` 及请求参数；上下文/输出限额、裁剪与预算判断由服务端强制；citation、ID、分数、`knowledgeSelectionReasons`、Memory/工具选择理由、Token 分区和哈希只用于审计，不会因为出现在 Manifest 中再次进入模型 Context。
 - 每次模型调用把 Context Manifest 的 `reusablePrefixTokens` 和首个 content/reasoning delta 的 TTFT 一并写入 `model_usage`。`GET /v1/productivity/usage` 与效率工作台按增量窗口返回 Reusable Prefix Ratio、Cache Hit Ratio、平均 input/cached/uncached input、平均 TTFT，以及估算费用/成功 Run；不再只展示累计 Token。
 
 缓存效果必须按部署新版本后的增量窗口计算：
@@ -537,7 +537,7 @@ data/workspaces/{runId}/PAI.md
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `1.4.0` 包含 8 个套件、36 个用例：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `2.0.0` 包含 8 个套件、36 个用例，并为各 Suite 保存独立 `datasetVersion`：
 
 套件只有存在启用用例时才可启动。对于默认停用的高级套件，Console 会显示“先启用用例”，点击后展开案例列表并提示先满足对应前置条件，不再向后端提交必然返回 409 的空 Execution。
 
@@ -550,7 +550,7 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 - **AgentTeam 协作 Harness**：Leader 拆分、Reviewer/Runner 角色路由和结果汇总，默认停用，需选择执行团队。
 
 1. Suite 保存项目、默认 Trial 次数和通过阈值。
-2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；报告同时展示输入、输出和总 Token。
+2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；还可保存 `assertions`、`fixture` 与 `judge` JSON。断言支持工具参数/状态/次数/顺序、Event 顺序、Approval 时序、完成证据、幂等恢复以及 Plan/Memory/AgentTeam 状态；报告同时展示输入、输出和总 Token。
 3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。`RULE` Trial 在唯一工作区中注入无密钥、确定性的 README、AGENTS 和 tests 说明夹具，避免空工作区把读取成功错误降级成“只调用过工具”。
 4. 危险工具仍停在持久化审批；报告只允许用户单次批准原 ToolCall 或拒绝，不会为了自动评测绕过安全边界。
 5. 单个 Trial 达到阈值才通过，Execution 要求全部 Trial 通过，形成 `pass^k` 稳定性门禁。
@@ -561,9 +561,11 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 - 缺少必需工具每项扣 20 分；只有终态为 `COMPLETED` 的调用才算满足必需工具。出现禁止工具每项扣 50 分。
 - 缺少必需回答片段每项扣 15 分；出现禁止片段每项扣 50 分。任一必需/禁止工具或回答规则失败都作为硬门禁，不能仅靠分数刚好达到阈值通过。
 - 工具调用数、输出 Token 或耗时超限各扣 10 分，并作为硬门禁；即使扣分后的分数等于阈值也不能通过。
-- 人工确认 Baseline 检查关键工具是否保留；输出 Token 或耗时超过基线 150% 时扣分。迁移前的旧基线仍按原总 Token 口径比较，避免升级时静默改变历史含义。
+- 人工确认 Baseline 检查关键工具是否保留；RULE 的输出 Token 超过基线 125% 或耗时超过 140% 时扣分并影响阈值，REPOSITORY 报告继续展示输出 Token 150% 与耗时 200% 对比线。迁移前的旧基线仍按原总 Token 口径比较，避免升级时静默改变历史含义。
 
-Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。当前版本没有把 LLM-as-Judge 当作硬门禁，也不严格比较原始 reasoning；开放式语义 Rubric 留作后续扩展。
+Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。Case 可选配置 LLM Judge，但只在完整性、安全、功能和预算确定性门禁全部通过后运行，且必须携带人工批准的校准 ID、至少 20 个样本和不低于 0.80 的一致率；配置不足、输出非法或调用失败均 fail-closed，Judge 不能推翻硬门禁。
+
+每次 Execution 冻结无密钥指纹：数据集版本/Case 合同、Prompt、工具 Schema、模型方案、AgentTeam、Java/OS 与 Grader 版本分别取摘要，并生成 `comparisonKey`。趋势 API 汇总 Trial Pass Rate、Stable Case Rate、平均分、每通过 Trial Token 和平均耗时；发布门禁要求全部 Trial 通过且不存在完整性/安全/预算/Judge 失败，并相对最近通过执行阻断 Token/成功 Trial 超过 25% 或平均耗时超过 40% 的退化。
 
 #### SWE-bench 方法借鉴：私有仓库任务评测
 
@@ -573,7 +575,7 @@ Case 新增 `RULE` 与 `REPOSITORY` 两种类型。`RULE` 完全保持上述确�
 
 仓库 Trial 在排队前复制独立 workspace；Run 终态后比较 fixture 与 Agent workspace，检查修改文件数、Patch 字节和禁止路径。通过完整性门禁后，Server 在保留的 Run 挂载内创建新的 `.paicli-evaluation/grader` 副本，应用 Agent 文件差异，再从 fixture 的 `hidden/` 注入映射文件。F2P 与 P2P 命令由 Server 配置并按顺序执行；准备动作和两个 Grader 命令都先以固定 idempotency key 持久化为内部 ToolCall，恢复时复用结果。模型不能看到隐藏目录、Grader 命令或正确 Patch。
 
-仓库任务以 `resolved` 为功能主指标：Patch 完整、F2P 与 P2P 全部退出 0 才为真；正式 Trial 通过还要求 Run 正常完成且无禁止工具/回答违规。Token、耗时和工具数单独报告为 `budgetPassed`，不再用资源扣分掩盖功能结果。Execution 报告额外汇总 resolved 数、稳定通过 Case 数和每 resolved Token。仓库 Grader 必须使用 Docker Sandbox；Local 模式继续拒绝宿主命令执行。
+仓库任务以 `resolved` 为功能主指标：Patch 完整、F2P 与 P2P 全部退出 0 才为真；正式 Trial 通过同时要求 Run 正常完成、必需/禁止工具与回答规则通过，并且工具数、输出 Token 和耗时 `budgetPassed`。REPOSITORY 使用二元 100/0 判分，不再允许“测试通过但预算超限”进入正式通过。Execution 报告额外汇总 resolved 数、稳定通过 Case 数和每 resolved Token。仓库 Grader 必须使用 Docker Sandbox；Local 模式继续拒绝宿主命令执行。
 
 ## 数据目录
 
@@ -615,7 +617,7 @@ SQLite `schema_migrations` 当前记录版本 1–43：版本 1–27 覆盖基�
 - Route Preview 使用团队能力、成员角色、任务词、复杂度与风险生成结构化候选、Leader、原因和预计并发；复杂度/风险是当前文本启发式路由推断，不是任务表单的固定配置。预览不创建 Run，真实 Trigger 会同时持久化 Route Decision，并把有效并发写入根协作策略；同一委派树的活动子 Run 不会超过该上限，且仍受项目最大并发约束。
 - 评论、结论、回复和显式 Mention 写入任务时间线。用户评论默认唤醒任务负责人，回复 Agent 评论回到原 Agent，成员结果事件唤醒团队 Leader；Trigger 以 idempotency key 去重，恢复不会重复派发。若目标负责人已有活跃 Run，不并发创建第二个 Run，而是把评论直接注入该活跃 Run 的会话，让执行中的专家在下一轮读取并回应；返工/评论理由会进入新 Run 的指令，并要求 Leader 原样写入其派发的阶段子任务。已交付待人工验收（IN_REVIEW）的任务若被评论/提及触发新的返工 Run，会先置回 IN_PROGRESS，待返工 Run 终态且重新具备交付证据后再回到 IN_REVIEW，避免状态停留在“待验收”却又有执行在跑。根任务的「评论与决策」按时间顺序聚合整棵任务树的评论（人工、Leader 与各阶段子 Agent 的最终回复都可见，子 Agent 评论带“阶段 N · 负责人”标识，人工评论带“人工评论”标识），「协作动态」同样聚合各阶段的执行、并行交付与阶段屏障事件；返工/阻塞原因会作为人工评论落库，并进入复唤醒摘要的最新人工指令。
 - Agent 可通过受 ToolCall/Approval/幂等边界约束的协作工具读取任务、发评论、报告进度/阻塞和创建阶段子任务。`create_collaboration_subtask` 会原子创建子任务、派发直接专家 Run 并绑定二者；根任务的全部 Leader 唤醒 Run、默认阶段 Run 和委派后代使用同一个稳定任务工作区，即使 Barrier 在新 Session 中唤醒新的 Leader Run，也能读取此前交付。只有显式逻辑 `workspace_ref` 才建立隔离目录，适合需要独立产物和后续显式合并的并行工作；误把当前协作工作区的文件系统路径填入该字段时按继承处理，避免子专家落入空目录。评论和提及始终持久化，但同一任务树中的目标 Agent/Team Leader 已有活跃 Run 时，不再并发创建第二个评论、回复、子专家终态或阶段屏障 Run。阶段 Run 的交付门禁与 DeliveryManifest 都直接消费本 Run 的统一 `RunEvidence`：真实文件/命令 mutation、非 `tool_result` Artifact 或任务评论才可交付，绝不按共享 workspace 时间戳归属文件，也不按命令文本猜测测试；否则阶段和父任务转为 `BLOCKED`，不完成 Barrier。Leader Run 失败但任务树已有已交付阶段时，根任务回到 `IN_REVIEW` 等待人工重新验收，而不是直接 `BLOCKED`。单 Agent 任务只能由被分配 Agent 更新任务级状态，Team 任务只能由 Team Leader 更新；根 Team Leader 只有在除当前 Run 外的阶段、委派和并行 Run 全部终态后才能发布最终结论。Run 完成不会自动把顶层任务改为完成，只有人工 `ACCEPT` 才能进入 `DONE`。
-- Console 的“协作任务”工作区分为任务、协作、执行三层：创建区默认只展示标题和 Agent/AgentTeam 负责人，任务说明与完成条件收在“更多设置”；任务层按当前状态展示可执行的人工动作和 Route Preview；协作层把任务建立、执行派发、专家协作、人工验收组织为阶段进度，并展示参与角色/关联执行/评论指标、评论与决策、中文语义协作动态。任务详情每 3 秒从同一响应同步评论、活动、Run 和状态，输入评论时暂停重绘以保留草稿。执行层在任务未完成时也展示“当前工作区产物”，明确其仍可能被后续阶段修改；`WAITING_AGENT` 显示为 Leader 等待子专家，不再与最终验收混淆。执行层对根任务 Run 显示中文触发语义（触发执行/人工发起/阶段完成触发等）与真实状态（失败/完成）；任务处于待验收且存在失败 Run 时，提示核验交付后再验收（ACCEPT）或带原因返工（REQUEST_REWORK），避免把失败执行误读为卡住。整页刷新会恢复上次查看的页面：普通/专家对话回到最后打开的 Session，协作任务回到选中的任务及其视图（任务/协作/执行层），仅在没有持久化记录时才落到中性首页；历史仍保留在左栏按需打开。主 Header 还会汇总当前项目的待审批项，专家或子专家请求审批时无需进入会话即可直接处理。三模式切换位于始终可见的主 Header，不再只存在于首页内容；左侧历史按项目和既有自定义分组统一展示普通对话、专家协作与协作任务，并使用类型标签区分。一个协作任务树下的根 Leader 会话、阶段子任务会话和复唤醒会话都会折叠到同一条任务记录，不再混入普通/专家对话历史。原“新建对话”按钮已移除，用户通过全局模式切换返回普通对话首页，首次发送时按原有惰性逻辑创建会话。普通/专家会话保留移动分组、删除和打开能力；无 Run 历史的协作任务可以永久删除，已有 Run 历史的任务只能通过“取消任务”保留审计链路。由任务打开关联会话时，顶部固定提供“返回协作任务”，返回后恢复原任务的执行层。执行层把 `agentProfileId`、`modelProfileId` 映射为专家名称和“模型方案 · 实际模型”，评论作者、提及目标、工具、队列、计划审计与审批等常规界面也优先展示业务名称，不把内部 ID 作为主文案。
+- Console 的“协作任务”工作区分为任务、协作、执行三层：创建区默认只展示标题和 Agent/AgentTeam 负责人，任务说明与完成条件收在“更多设置”；任务层按当前状态展示可执行的人工动作和 Route Preview；协作层把任务建立、执行派发、专家协作、人工验收组织为阶段进度，并展示参与角色/关联执行/评论指标、评论与决策、中文语义协作动态。任务详情每 3 秒从同一响应同步评论、活动、Run 和状态，输入评论时暂停重绘以保留草稿。执行层在任务未完成时也展示“当前工作区产物”，明确其仍可能被后续阶段修改；`WAITING_AGENT` 显示为 Leader 等待子专家，不再与最终验收混淆。执行层对根任务 Run 显示中文触发语义（触发执行/人工发起/阶段完成触发等）与真实状态（失败/完成）；任务处于待验收且存在失败 Run 时，提示核验交付后再验收（ACCEPT）或带原因返工（REQUEST_REWORK），避免把失败执行误读为卡住。整页刷新会恢复上次查看的页面：普通/专家对话回到最后打开的 Session，协作任务回到选中的任务及其视图（任务/协作/执行层），仅在没有持久化记录时才落到中性首页；历史仍保留在左栏按需打开。主 Header 还会汇总当前项目的待审批项，专家或子专家请求审批时无需进入会话即可直接处理。三模式切换位于始终可见的主 Header，不再只存在于首页内容；左侧历史按项目和既有自定义分组统一展示普通对话、专家协作与协作任务，并使用类型标签区分。一个协作任务树下的根 Leader 会话、阶段子任务会话和复唤醒会话都会折叠到同一条任务记录，不再混入普通/专家对话历史。原“新建对话”按钮已移除，用户通过全局模式切换返回普通对话首页，首次发送时按原有惰性逻辑创建会话。普通/专家会话保留移动分组、删除和打开能力；无 Run 历史的协作任务可以永久删除，已有 Run 历史的任务只能通过“取消任务”保留审计链路。由任务打开关联会话时，顶部固定提供“返回协作任务”，返回后恢复原任务的执行层。常规界面仍优先把 `agentProfileId`、`modelProfileId` 等映射为业务名称；“执行详情/原始数据”是审计例外，会同时显示数据库真实 Run/Session/ToolCall/Provider Call/Delegation/Memory/Knowledge Chunk 标识，不再用“当前执行”“工具调用”等占位词替换。
 - 协作任务触发时不读取首页当前模型选择：单 Agent 使用该负责人，AgentTeam 使用路由选出的 Leader；负责人绑定模型优先，否则使用项目默认模型，项目未配置默认方案时使用服务端默认模型。团队子专家绑定模型时使用自己的模型，未绑定时继承父 Run。取消 Run 会自动拒绝其未决审批，启动恢复也会清理已终态 Run 遗留的 `PENDING` 审批，避免全局待审批计数滞留。`GET /v1/collaboration/tasks/{taskId}` 的 `runs[]` 同时返回 Agent/模型方案引用、模型方案名称和最近一次真实调用记录的 `modelName`，Console 因此可以展示最终执行者和实际模型；例如服务端默认最终路由到 Kimi 时显示 `kimi-k3`，而不是含糊的内部 ID。
 - 同一专家在同一协作任务内的多次执行通过轻量 `ExpertThread` 保持逻辑连续性：`root_task_id + agent_profile_id + thread_role` 唯一确定一个线程，终端 Run 永远不复活，后续再次执行创建新 Session + 新 Run 并挂到原线程（不同任务/不同专家/不同 role 各自独立线程）。角色规则：只有真正的小队 Leader（TEAM leaderAgentProfileId）使用 `LEADER` 线程并继续由 TaskDigest 提供任务级连续性；团队阶段专家、直接提及的团队专家以及**单 Agent 任务的被指派 Agent** 一律使用 `EXPERT` 线程——普通再次 @ 专家、Leader 再派同一阶段专家（`createAndDispatchSubtask`）、单 Agent REQUEST_REWORK 都会在 Run 输入注入 `<expert_thread_resume>` 紧凑摘要（最新 Run 状态/摘要、仅本专家负责阶段的已完成/剩余工作、blockers、changed files、artifact refs、test 报告引用、最新人工指令），ToolResult 全文、Artifact 正文、reasoning 与全量旧对话一律不进摘要；Digest 的阶段与变更文件只按本专家归属：阶段按 `assigneeId` 过滤，changed_files 只消费该 Run 自己的 DeliveryManifest 记录，共享工作区里其他专家写下的文件不会串入。需要具体内容时模型按需 `read_file/read_artifact`。`GET /v1/collaboration/tasks/{taskId}` 的响应新增 `expertThreads`（线程 + 绑定 Runs 的 ordinal/实时状态），Console 执行层按“专家线程”分组展示 `#序号 状态` 并可直接打开对应会话。永久删除终态 Run 时，其线程绑定同步清理，`latest_run_id` 从剩余绑定重选（无则置空），受影响线程的摘要置空避免注入已删除 Run/Artifact 引用，下一 Run 终态时重建。
 - 模型执行期间收到的新评论不会丢失，且检查与完成在同一事务内：`ContextManager.PreparedContext` 记录本次模型上下文构建时的最大 message sequence，`RunProcessor` 通过 `commitFinalAssistantAndComplete(..., expectedSequence)` 在单个 SQLite 事务里“比对最新 active sequence + 置 COMPLETED”，模型调用期间有新输入则整体回滚不完成，再由 `commitIntermediateAssistantAndRequeue` 单事务持久化 `run.new_input_during_model` 事件（含 `staleAssistantArchived:true`）并把旧模型回答保存为 **archived** assistant 消息（完整保留在审计历史 `messages(sessionId)`，但所有 Agent 语义链路——下一轮模型上下文、ExpertThread Digest、`get_agent_result` 的最终回答、Memory 提取快照——都只读 `archived=0` 的 active 消息，不会让没看到新评论的旧回答误导任何后续消费方）；下一轮必含新增消息。无新增消息时保持原完成流程。`maxMessageSequence` 只统计 `archived=0` 的 active 消息，与模型上下文视图一致。评论投递侧同样原子化：`appendUserMessageIfRunActive` 在事务内重确认 Run 非终态再追加，若 Run 在“看起来活跃”后恰好终态，`CollaborationService.comment()` 会回退创建新的幂等 Trigger/Run，而不是把评论挂在已结束 Run 后面。
@@ -653,7 +655,7 @@ POST                        /v1/sessions/import
 ```
 
 `/v1/sessions/{sessionId}/messages` 返回 Console 消息视图，保留原 Message 字段，并为每条消息补充 `runArtifacts`，用于在对话页展示最终交付物、Artifact 下载/预览入口和可点击的网页/本地文件引用。
-`/v1/runs/{runId}/audit` 聚合返回该 Run 所属 Session、模型输入与输出、ToolCall 原始参数和结果、持久化 Approval、事件、绑定的 Plan Step 与 Validation Check。Console 的 Plan 摘要和完整详情会在每个已绑定 Run 的 Step 上显示“打开 Run”，无需切换会话即可核对执行与验证证据。
+`/v1/runs/{runId}/audit` 聚合返回该 Run 所属 Session、模型输入与输出、ToolCall 内部 ID、Provider Call ID、原始参数和结果、持久化 Approval、事件、真实父 Run 与子 Run/Delegation、绑定的 Plan Step 与 Validation Check。Console 的 Plan 摘要和完整详情会在每个已绑定 Run 的 Step 上显示“打开 Run”，无需切换会话即可核对执行与验证证据。
 `/v1/runs/{runId}/workspace-file` 只读取该 Run 所属受控 workspace 下的相对文件路径，并通过认证请求返回文件内容，供 Console 以带 API Key 的方式打开或下载最终 HTML、Markdown、图片等交付物。
 
 创建或重试 Run 时可传 `executionShell: "sh" | "bash" | "powershell"`。若绑定的 Agent Profile 配置了 `executionShell`，专家配置优先；最终值写入 Run。`POST /v1/runs/{runId}/cancel` 除了关闭活跃模型请求，还会销毁该 Run 的 Docker 容器以中断正在执行的命令，并返回 `sandboxExecutionCanceled`。
@@ -831,10 +833,13 @@ GET/POST                    /v1/evaluations/suites/{suiteId}/cases
 PUT/DELETE                  /v1/evaluations/cases/{caseId}
 POST/GET                    /v1/evaluations/suites/{suiteId}/executions
 GET                         /v1/evaluations/executions/{executionId}
+GET                         /v1/evaluations/suites/{suiteId}/trends
+GET                         /v1/evaluations/executions/{leftId}/compare/{rightId}
+POST                        /v1/evaluations/executions/{executionId}/release-gate
 POST                        /v1/evaluations/trials/{trialId}/baseline
 ```
 
-`POST /v1/evaluations/suites/{suiteId}/executions` 可选传 `agentTeamId`。未传时保持单 Agent 基线；传入时每个 Trial 绑定该团队 Leader，并将成员、并发、深度和 Reviewer/Runner 约束固化到普通 Run 的协作策略。`EvaluationCaseRequest.caseType=REPOSITORY` 时还需传 `fixtureRef`、`fixtureSha256`、`grader` 和 `patchPolicy`；详情见上方“私有仓库任务评测”。
+`POST /v1/evaluations/suites/{suiteId}/executions` 可选传 `agentTeamId`。未传时保持单 Agent 基线；传入时每个 Trial 绑定该团队 Leader，并将成员、并发、深度和 Reviewer/Runner 约束固化到普通 Run 的协作策略。Suite 请求可传 `datasetVersion`；Case 请求可传 `assertions`、`fixture`、`judge`。`EvaluationCaseRequest.caseType=REPOSITORY` 时还需传 `fixtureRef`、`fixtureSha256`、`grader` 和 `patchPolicy`；详情见上方“私有仓库任务评测”。
 
 ### CollaborationTask 与结构化路由
 
@@ -890,10 +895,10 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - RunProcessor、恢复、工具失败 observation、多 ToolCall 顺序和 Approval Flow。
 - ContextManager、Context Manifest、稳定缓存前缀、统一预算、结构化摘要、按需工具 Schema、Memory 来源冻结/反馈、Knowledge、RAG、Skill、MCP、Multi-Agent 和附件。
 - OpenAI-compatible/DeepSeek/多模态请求与 SSE 解析、模型重试/Fallback。
-- SQLite Store、迁移 1–34、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
+- SQLite Store、迁移 1–44、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- Agent 评测多 Trial、单 Agent/AgentTeam 执行、输出 Token 硬门禁、Baseline、内部 Session 隐藏、审批不旁路、8 套件/36 Case Starter Pack，以及私有仓库 fixture 摘要、Case 快照、Patch 完整性、隐藏测试注入和 F2P/P2P 独立判分。
+- Agent 评测多 Trial、单 Agent/AgentTeam 执行、参数/顺序/状态/Event/Approval/幂等/完成证据硬断言、输出 Token 硬门禁、Baseline、执行指纹、趋势/对比/发布门禁、人工校准 Judge、内部 Session 隐藏、8 套件/36 Case Starter Pack，以及私有仓库 fixture 摘要、Case 快照、Patch 完整性、隐藏测试注入和 F2P/P2P 独立判分。
 
 此外已完成：
 

@@ -204,6 +204,7 @@
       <label class="form-field"><span>套件名称 *</span><input id="evaluationSuiteName" maxlength="120" required placeholder="例如：Runtime 安全回归"></label>
       <label class="form-field"><span>默认 Trial 次数</span><input id="evaluationSuiteTrials" type="number" min="1" max="10" value="1"></label>
       <label class="form-field"><span>通过分数</span><input id="evaluationSuiteThreshold" type="number" min="1" max="100" value="80"></label>
+      <label class="form-field"><span>数据集版本</span><input id="evaluationSuiteDatasetVersion" maxlength="80" value="custom-v1" placeholder="例如 runtime-safety-v2"></label>
       <label class="form-field full"><span>说明</span><textarea id="evaluationSuiteDescription" rows="3" maxlength="1000" placeholder="说明评测目标和发布门禁"></textarea></label>
     </div>
     <div class="form-error" id="evaluationSuiteError"></div>
@@ -237,6 +238,9 @@
       <label class="form-field"><span>最多输出 Token</span><input id="evaluationMaxTokens" type="number" min="0" value="0"><small>0 表示不限制，并作为通过硬门禁</small></label>
       <label class="form-field"><span>最长耗时（毫秒）</span><input id="evaluationMaxDuration" type="number" min="0" value="0"><small>0 表示不限制</small></label>
       <label class="form-field"><span>状态</span><span class="checkbox-row"><label><input id="evaluationCaseEnabled" type="checkbox" checked> 启用</label></span></label>
+      <label class="form-field full"><span>确定性断言（JSON）</span><textarea id="evaluationAssertions" rows="5" spellcheck="false">{}</textarea><small>可断言工具参数/顺序/状态、事件序列、Approval、证据、恢复幂等及 Plan/Memory/AgentTeam 状态。</small></label>
+      <label class="form-field full"><span>版本化夹具（JSON）</span><textarea id="evaluationFixtureSpec" rows="5" spellcheck="false">{}</textarea><small>支持 files、memories、knowledgeDocuments、plan 和 requireAgentTeam；Trial 完成后清理持久化夹具。</small></label>
+      <label class="form-field full"><span>语义 Judge（JSON，可选）</span><textarea id="evaluationJudgeSpec" rows="5" spellcheck="false">{}</textarea><small>仅确定性门禁通过后运行；必须提供 approved、agreement ≥ 0.80、samples ≥ 20 的人工校准记录。</small></label>
     </div>
     <div class="form-error" id="evaluationCaseError"></div>
     <div class="dialog-actions"><button class="primary" type="submit" id="saveEvaluationCase">保存用例</button></div>

@@ -1,5 +1,12 @@
 # 交付阶段
 
+## 2026-08-26 执行详情真实标识与 Context 审计语义
+
+- [x] Run 审计返回并展示数据库真实 Run/Session、ToolCall/Provider Call、父子 Run 与 Delegation 标识；原始事件数据不再用业务占位词掩盖 ID。
+- [x] `model.tool_calls` 保存每个调用的内部 ID、Provider Call ID、工具名和参数；`memory.extracted` 保存每个 Memory/MemorySource、来源 Run/Message、动作、类型、Scope、置信度和正文，旧 count-only Event 仍可读取。
+- [x] Context Manifest 保存真实 Knowledge Chunk 与 Memory 选择快照，并明确区分模型请求字段、服务端预算/裁剪强制项和仅审计字段；选择原因不进入模型 Context。
+- [x] Token 估算按 Provider/模型选择 Tokenizer Profile，记录 raw/calibrated 两种口径；DeepSeek 不可用精确 Tokenizer 时使用历史 P90 `1.60` 校准 fallback。
+
 ## 2026-08-25 Memory Scope、动态召回与 Cross-Encoder
 
 - [x] Memory 候选复用现有 TEI Cross-Encoder；TEI 禁用或失败时整批回退确定性相关性分，不改变 SQLite 的事实源地位。
@@ -313,7 +320,17 @@
 - [x] 仓库报告分离 `resolved`、完整性、安全、预算和 Run 完成状态，汇总 resolved 数、稳定全通过 Case 与每 resolved Token；不把内部结果称为官方 SWE-bench Verified 成绩。
 - [x] Schema 迁移 39、Fixture Inspect/API、Console Case 配置与 F2P/P2P 报告、Store/Service 回归测试以及 README/架构/OpenAPI 文档同步。
 
-## 阶段 26（规划）：外部 Harness 成本与协作效率控制
+## 阶段 26：评测可信度、版本化夹具与发布门禁
+
+- [x] Schema 迁移 44：Suite 数据集版本、Case 确定性断言/夹具/Judge 规范、Execution 指纹与发布门禁结果；旧 Suite/Case/Execution 使用兼容默认值。
+- [x] RULE 评分收敛为可变异测试的断言引擎，覆盖工具参数/顺序/状态、Event、Approval、证据、重复签名、幂等键、终态 ToolCall 以及 Plan/Memory/Delegation 状态硬门禁。
+- [x] REPOSITORY 二元判分要求 resolved、完整性、必需/禁止规则、Run 完成和工具/输出 Token/耗时预算全部通过；内部 Grader ToolCall 不计入 Agent 预算。
+- [x] Starter Pack 2.0.0 为 8 Suite 保存独立数据集版本，Harness Loop v3 使用真实参数/顺序/事件断言；Plan、Memory、RAG、AgentTeam 使用版本化、可清理夹具并默认保持显式启用边界。
+- [x] Execution 冻结数据集、Prompt、Tool Schema、模型、AgentTeam、Grader 与环境无密钥指纹；提供趋势、同套件模型/版本对比和可持久化发布门禁 API/Console。
+- [x] 可选 LLM Judge 仅在确定性门禁通过后运行，要求人工批准、至少 20 样本和 agreement≥0.80 的校准元数据，配置/响应/调用失败均 fail-closed。
+- [x] 评测器元测试覆盖错误参数、顺序、状态、Event、Approval 时序、拒绝后执行、重复幂等、虚假测试通过、状态门禁、Fixture 清理、指纹、趋势和预算回归。
+
+## 阶段 27（规划）：外部 Harness 成本与协作效率控制
 
 - [ ] 在普通对话、专家协作与 CollaborationTask 之前增加统一的任务级 Token/费用信封、原子预留和结算；保留现有项目/Run 级预算作为下层硬上限。
 - [ ] 增加 Trigger 合并、Leader 单飞、证据版本、429 冷却与可读的 Harness 决策审计，避免每条成员事件或评论都直接创建新的模型 Run。

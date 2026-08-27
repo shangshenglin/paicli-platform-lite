@@ -3231,7 +3231,18 @@ function parseData(value) {
 function eventSummary(type, data) {
   if (type === 'model.delta') return '正在生成回答';
   if (type === 'model.reasoning.delta') return '收到推理内容';
-  if (type === 'model.tool_calls') return `模型请求 ${data.count || 0} 个工具`;
+  if (type === 'model.tool_calls') {
+    const names = (data.calls || []).map(call => `${call.name} (${call.toolCallId})`).join('、');
+    return `模型请求 ${data.count || 0} 个工具${names ? `：${names}` : ''}`;
+  }
+  if (type === 'context.prepared') {
+    return `上下文已组装 · 原始估算 ${data.rawEstimatedInputTokens ?? data.estimatedInputTokens ?? 0}`
+      + ` · 校准估算 ${data.estimatedInputTokens ?? 0}`;
+  }
+  if (type === 'memory.extracted') {
+    const ids = (data.items || []).map(item => item.memoryId).join('、');
+    return `Memory 已提取 ${data.count || 0} 条${ids ? `：${ids}` : ''}`;
+  }
   if (type === 'tool.requested') return `请求工具：${toolDisplayName(data.name)}`;
   if (type === 'tool.started') {
     return data.shell
@@ -3265,9 +3276,21 @@ function addEvent(event, data) {
   const details = element('details');
   details.append(
     element('summary', 'hint', '原始数据'),
-    element('pre', 'raw', replaceEntityReferences(JSON.stringify(data, null, 2)))
+    element('pre', 'raw', JSON.stringify(data, null, 2))
   );
   item.append(details);
+  if (event.type === 'context.prepared' && data.fieldGroups) {
+    const labels = {
+      actualModelContext: '实际进入模型 Context',
+      serverEnforced: '服务端强制',
+      auditOnly: '仅审计记录'
+    };
+    const groups = element('div', 'context-field-groups');
+    Object.entries(data.fieldGroups).forEach(([key, fields]) => {
+      groups.append(element('small', 'hint', `${labels[key] || key}：${(fields || []).join('、')}`));
+    });
+    item.append(groups);
+  }
   container.append(item);
   while (container.children.length > 160) container.firstElementChild.remove();
   if (followTail) container.scrollTop = container.scrollHeight;
@@ -3568,6 +3591,7 @@ async function setEvaluationCaseEnabled(value, enabled) {
 function openEvaluationSuiteDialog() {
   $('evaluationSuiteForm').reset();
   $('evaluationSuiteTrials').value = '1'; $('evaluationSuiteThreshold').value = '80';
+  $('evaluationSuiteDatasetVersion').value = 'custom-v1';
   setFormError('evaluationSuiteError'); $('evaluationSuiteDialog').showModal(); $('evaluationSuiteName').focus();
 }
 
@@ -3577,7 +3601,8 @@ async function submitEvaluationSuite(event) {
     await api('/v1/evaluations/suites', {method: 'POST', body: JSON.stringify({
       projectKey: currentProjectKey(), name: $('evaluationSuiteName').value.trim(),
       description: $('evaluationSuiteDescription').value.trim(),
-      defaultTrials: +$('evaluationSuiteTrials').value, passThreshold: +$('evaluationSuiteThreshold').value
+      defaultTrials: +$('evaluationSuiteTrials').value, passThreshold: +$('evaluationSuiteThreshold').value,
+      datasetVersion: $('evaluationSuiteDatasetVersion').value.trim() || 'custom-v1'
     })});
     $('evaluationSuiteDialog').close(); await loadEvaluations(); showNotice('评测套件已创建');
   } catch (error) { setFormError('evaluationSuiteError', error.message); }
@@ -3591,6 +3616,8 @@ function openEvaluationCaseDialog(suite) {
   $('evaluationCaseType').value = 'RULE'; $('evaluationGraderShell').value = 'bash';
   $('evaluationGraderTimeout').value = '90'; $('evaluationHiddenFiles').value = '[]';
   $('evaluationPatchMaxFiles').value = '40'; $('evaluationPatchMaxBytes').value = '2000000';
+  $('evaluationAssertions').value = '{}'; $('evaluationFixtureSpec').value = '{}';
+  $('evaluationJudgeSpec').value = '{}';
   $('evaluationFixtureInspection').textContent = '';
   toggleRepositoryEvaluationFields();
   setFormError('evaluationCaseError'); $('evaluationCaseDialog').showModal(); $('evaluationCaseName').focus();
@@ -3630,6 +3657,12 @@ async function submitEvaluationCase(event) {
     const repository = caseType === 'REPOSITORY';
     const hiddenFiles = repository ? evaluationJson('evaluationHiddenFiles', []) : [];
     if (!Array.isArray(hiddenFiles)) throw new Error('隐藏文件映射必须是 JSON 数组');
+    const assertions = evaluationJson('evaluationAssertions', {});
+    const fixture = evaluationJson('evaluationFixtureSpec', {});
+    const judge = evaluationJson('evaluationJudgeSpec', {});
+    if ([assertions, fixture, judge].some(value => !value || Array.isArray(value) || typeof value !== 'object')) {
+      throw new Error('断言、夹具和 Judge 配置必须是 JSON 对象');
+    }
     await api(`/v1/evaluations/suites/${suiteId}/cases`, {method: 'POST', body: JSON.stringify({
       name: $('evaluationCaseName').value.trim(), prompt: $('evaluationCasePrompt').value.trim(),
       requiredTools: evaluationRuleList('evaluationRequiredTools'), forbiddenTools: evaluationRuleList('evaluationForbiddenTools'),
@@ -3650,7 +3683,7 @@ async function submitEvaluationCase(event) {
         maxChangedFiles: +$('evaluationPatchMaxFiles').value,
         maxPatchBytes: +$('evaluationPatchMaxBytes').value,
         forbiddenPaths: evaluationRuleList('evaluationForbiddenPaths')
-      } : {}
+      } : {}, assertions, fixture, judge
     })});
     $('evaluationCaseDialog').close(); await loadEvaluations(); showNotice('评测用例已创建');
   } catch (error) { setFormError('evaluationCaseError', error.message); }
@@ -3687,10 +3720,27 @@ async function loadEvaluationReport(executionId, notify = true) {
     const score = execution.averageScore == null ? '执行中' : `${execution.averageScore.toFixed(1)} 分`;
     const team = state.agentTeams.find(value => value.id === execution.agentTeamId);
     header.append(element('strong', '', `${report.suite.name} · ${score}`),
-      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过${team ? ` · 团队 ${team.name}` : ''}`));
+      element('small', '', `${execution.status} · ${execution.trialCount} Trial/用例 · ${execution.passThreshold} 分通过 · Gate ${execution.gateStatus || 'PENDING'}${team ? ` · 团队 ${team.name}` : ''}`));
+    let fingerprint = {};
+    try {
+        fingerprint = execution.fingerprintJson ? JSON.parse(execution.fingerprintJson) : {};
+    } catch (_error) {
+        fingerprint = {comparisonKey: 'invalid legacy fingerprint'};
+    }
+    if (fingerprint.comparisonKey) header.append(element('small', '',
+      `数据集 ${report.suite.datasetVersion || 'custom-v1'} · Grader ${fingerprint.graderVersion || '-'} · 指纹 ${fingerprint.comparisonKey.slice(0, 12)}`));
     if ((report.summary?.repositoryTrials || 0) > 0) header.append(element('small', '',
       `仓库任务 ${report.summary.resolvedTrials}/${report.summary.repositoryTrials} resolved · 稳定通过 ${report.summary.stableCases} Case · 每 resolved ${report.summary.tokensPerResolved || 0} Token`));
     const refresh = element('button', 'secondary', '刷新报告'); refresh.onclick = () => loadEvaluationReport(executionId); header.append(refresh);
+    if (execution.status === 'COMPLETED') {
+      const gate = element('button', 'secondary', '执行发布门禁');
+      gate.onclick = async () => {
+        const result = await api(`/v1/evaluations/executions/${executionId}/release-gate`, {method: 'POST'});
+        showNotice(result.passed ? '发布门禁通过' : `发布门禁失败：${result.blockers.join('；')}`, !result.passed);
+        await loadEvaluationReport(executionId, false);
+      };
+      header.append(gate);
+    }
     const nodes = [header];
     report.trials.forEach(value => {
       const trial = value.trial; const details = value.details || {};
@@ -3713,6 +3763,8 @@ async function loadEvaluationReport(executionId, notify = true) {
           item.append(element('pre', 'evaluation-checks', repository.changedFiles.join('\n')));
         }
       }
+      if (details.judge?.enabled) item.append(element('div', 'evaluation-checks',
+        `Judge ${details.judge.verdict} · ${details.judge.score} 分 · 校准 ${details.judge.calibrationId} / agreement ${details.judge.calibrationAgreement}\n${details.judge.reason || ''}`));
       (details.approvals || []).filter(approval => approval.status === 'PENDING').forEach(approval => {
         const approvalText = element('div', 'evaluation-checks', `等待审批：${approval.reason}`);
         const allow = element('button', 'primary', '仅本次允许');
@@ -5359,6 +5411,8 @@ async function openPlanStepRun(plan, step) {
     const content = $('runAuditContent');
     content.replaceChildren();
     content.append(auditSummary([
+      ['Run ID', audit.run.id],
+      ['Session ID', audit.session.id],
       ['执行者', agentProfileName(audit.run.agentProfileId, '默认专家')],
       ['模型', modelProfileName(audit.run.modelProfileId)],
       ['所属会话', audit.session.title],
@@ -5380,12 +5434,21 @@ async function openPlanStepRun(plan, step) {
       return card;
     })));
     content.append(auditListSection('工具调用', (audit.toolCalls || []).map(call => {
-      const card = auditCard(`${call.status} · ${toolDisplayName(call.toolName)}`, call.createdAt || '',
+      const card = auditCard(`${call.status} · ${call.toolName} · ${call.id}`,
+        `Provider Call：${call.providerCallId || '无'} · ${call.createdAt || ''}`,
         call.error || call.result || '尚无结果');
       card.append(auditDetails('持久化参数', formatAuditValue(call.arguments)));
       if (call.result) card.append(auditDetails('完整结果', formatAuditValue(call.result)));
       return card;
     })));
+    if (audit.parent?.runId) {
+      content.append(auditTextSection('父 Run',
+        `runId: ${audit.parent.runId}\nsessionId: ${audit.parent.sessionId}\nagentName: ${audit.parent.agentName || ''}`));
+    }
+    content.append(auditListSection('子 Run', (audit.children || []).map(child =>
+      auditCard(`${child.agentName} · ${child.childRunId}`,
+        `delegationId: ${child.delegationId} · sessionId: ${child.childSessionId}`,
+        `parentRunId: ${child.parentRunId}\nstatus: ${child.status}`))));
     content.append(auditListSection('审批', (audit.approvals || []).map(approval => {
       const card = auditCard(`审批 · ${approval.status}`, approval.createdAt || '', approval.reason || '');
       if (approval.status === 'PENDING') {
@@ -5445,7 +5508,7 @@ function auditSummary(values) {
 
 function auditTextSection(title, text) {
   const section = element('section', 'audit-section');
-  section.append(element('h3', '', title), element('pre', 'raw', replaceEntityReferences(text || '无')));
+  section.append(element('h3', '', title), element('pre', 'raw', text || '无'));
   return section;
 }
 
@@ -5462,15 +5525,15 @@ function auditListSection(title, cards) {
 function auditCard(title, meta = '', body = '') {
   const card = element('article', 'audit-card');
   const head = element('div', 'audit-card-head');
-  head.append(element('strong', '', replaceEntityReferences(title)), element('small', 'hint', replaceEntityReferences(meta)));
+  head.append(element('strong', '', title), element('small', 'hint', meta));
   card.append(head);
-  if (body) card.append(element('p', '', replaceEntityReferences(body)));
+  if (body) card.append(element('p', '', body));
   return card;
 }
 
 function auditDetails(title, value) {
   const details = element('details', '');
-  details.append(element('summary', '', title), element('pre', '', replaceEntityReferences(value || '')));
+  details.append(element('summary', '', title), element('pre', '', value || ''));
   return details;
 }
 

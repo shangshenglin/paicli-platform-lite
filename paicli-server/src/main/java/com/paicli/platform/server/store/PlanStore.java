@@ -77,6 +77,20 @@ public class PlanStore {
         }
     }
 
+    public boolean deleteEvaluationFixturePlan(String id) {
+        Plan plan = findPlan(id).orElse(null);
+        if (plan == null) return false;
+        if (plan.source() == null || !plan.source().startsWith("EVALUATION_FIXTURE")) {
+            throw new IllegalStateException("only evaluation fixture plans can be deleted by the fixture cleanup");
+        }
+        try (Connection c = open(); PreparedStatement ps = c.prepareStatement("DELETE FROM plans WHERE id=?")) {
+            ps.setString(1, id);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw failure("delete evaluation fixture plan", e);
+        }
+    }
+
     public Optional<Plan> findPlanBySource(String projectKey, String source) {
         try (Connection c = open(); PreparedStatement ps = c.prepareStatement(
                 "SELECT * FROM plans WHERE project_key=? AND source=? ORDER BY created_at DESC LIMIT 1")) {

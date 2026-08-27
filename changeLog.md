@@ -1,5 +1,26 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-26
+
+### 评测可信度、版本化夹具、执行指纹与发布门禁
+
+- 变更：新增可独立变异测试的 `EvaluationAssertionEngine`，RULE Case 除旧的工具/回答/预算规则外，可通过 JSON 断言工具参数、状态、次数和 Provider 顺序，Run Event 子序列，Approval 必须存在、批准先于工具执行、拒绝后不得启动，幂等键唯一、重复工具签名和终态 ToolCall，以及虚假完成/失败测试被宣称通过、Plan DAG/Validation、Memory Selection 与 Agent Delegation 状态。安全、功能、证据和资源断言均为硬门禁，数字分数不能抵消失败。
+- 变更：REPOSITORY 改为明确的二元 100/0 合同，正式通过要求 F2P/P2P resolved、Fixture/Patch 完整性、必需/禁止工具与回答、Run 完成，以及 Agent 工具数、输出 Token、耗时预算全部通过；修复原实现虽计算 `budgetPassed` 却未进入 `passed` 的漏洞，并排除全部 `evaluation_grader*` 内部 ToolCall，避免 Grader 自身消耗污染 Agent 工具预算。
+- 变更：Schema 兼容迁移 44 为 Suite 增加 `dataset_version`，为 Case 增加 `assertion_spec_json`、`fixture_spec_json`、`judge_spec_json`，为 Execution 增加 `fingerprint_json`、`gate_status` 与 `gate_details_json`。Starter Pack 升级为 2.0.0，8 个 Suite 分别版本化；Approval、工具链和 Harness Loop v3 使用参数/顺序/事件/恢复断言，写冲突与人工验收这类缺少真实状态前提的旧文本题默认停用，不再用关键词解释冒充 Runtime 验证。
+- 变更：RULE Trial 支持版本化 `files`、workspace-scoped Memory、临时 Knowledge 文档、内部 Plan 和 AgentTeam 前置条件夹具；创建对象 ID 与 Fixture 摘要冻结到 Trial 快照，评分后幂等清理。Plan、Memory、RAG 与 AgentTeam 官方用例各自带版本化夹具/真实状态门禁并继续默认停用，避免未准备环境时误判模型退化。
+- 变更：Execution 启动时冻结数据集/Case、Prompt、Tool Schema、模型方案、AgentTeam、Grader 和 Java/OS 的无密钥指纹。新增历史趋势、同 Suite 两次 Execution 对比与发布门禁 API；门禁阻断任一 Trial/完整性/安全/预算/Judge 失败，以及相对最近通过执行的 Token/成功 Trial 超过 25% 或平均耗时超过 40% 的退化。Console 可编辑断言/夹具/Judge JSON、查看数据集与比较指纹并执行发布门禁。
+- 变更：新增可选 `EvaluationSemanticJudge`，仅在确定性门禁通过后运行；配置必须声明人工批准的 calibration ID、至少 20 个样本和不低于 0.80 的 agreement。校准不足、非法 JSON、Judge 调用失败均 fail-closed，Judge 分数只能降低结论，不能推翻安全/功能硬门禁。
+- 思路：先证明 Grader 对故意注入的参数、顺序、状态、事件、审批、幂等和证据错误能够漏斗式拦截，再扩展开放式语义质量；把状态事实、执行式隐藏测试和可校准 Judge 分层，避免 Prompt 中的魔法标记或单一总分制造虚假通过。数据库迁移和 Store/Service 测试、OpenAPI 注解、README API/运行说明、`docs/architecture.md` 与 `docs/phases.md` 已同步；Sandbox 的权限、镜像和执行接口未改变，`docs/docker-sandbox.md` 不适用；产品站能力展示未改变，`paicli-site/README.md` 不适用。
+- 验证：评测模块 25 项针对性测试通过，覆盖评分变异、Approval 时序与拒绝、重复签名/幂等键、虚假测试通过、Plan/Memory/Delegation 状态、Fixture 创建清理、REPOSITORY 预算硬门禁、Starter Pack 2.0、执行指纹、历史趋势/发布门禁和 Judge 校准。为隔离共享工作区内并行的 Context/Memory 改动，将本次暂存补丁应用到独立 Git worktree 后执行全模块 `clean test`，68 份报告共 346 项测试全部通过；随后 `package -DskipTests` 成功。迁移测试同步确认版本 1–44；bundled Node `--check`、Starter Pack JSON 解析和 `git diff --cached --check` 通过。主工作区的 `clean` 因正在运行的本地服务锁定 JAR 而未强制停止进程，未影响隔离干净构建结果。
+
+### 执行详情真实标识、Context 语义与 Token 估算校准
+
+- 变更：`GET /v1/runs/{runId}/audit` 增加真实父 Run 与子 Run/Delegation 导航；Console 执行详情直接显示数据库真实 Run/Session、ToolCall、Provider Call、Delegation、Memory 与 Knowledge Chunk 标识，原始事件 JSON 不再经过“当前执行”“工具调用”等实体占位替换。`model.tool_calls` 从 count-only 升级为包含每个内部 ToolCall ID、Provider Call ID、工具名、结构化参数与参数字节数的对象列表；`memory.extracted` 保存 Memory/MemorySource ID、来源 Run/Message、创建或更新动作、key、层级、类型、Scope、置信度和实际正文。
+- 变更：`context.prepared` 保存实际纳入的 Knowledge document/chunk/version/字符范围/citation/评分以及 Memory id/key/source；对受预算裁剪的条目同时记录源全文、实际进入模型的片段和 `contentTruncated`。`fieldGroups` 明确标识真正进入供应商请求的 `ModelRequest.messages/tools` 与请求参数、服务端强制的限额/预算/裁剪，以及仅审计的 ID、分数、计数、选择理由和哈希；`knowledgeSelectionReasons` 只解释服务端选择，不注入模型 Context。
+- 变更：TokenEstimator 按 Provider/模型生成 Tokenizer Profile，并在 Manifest 记录 provider、model、tokenizer、是否精确、校准系数和来源，同时保留 raw/calibrated 两种估算。当前 DeepSeek 无精确 Tokenizer 时使用 code-point fallback，并依据本机 18 次真实供应商调用 `actual input / raw estimate` 的 P90（约 1.58、最大约 1.60）采用保守 `1.60` 系数；该校准后的数值用于上下文准入、RAG/Memory 动态预算、压缩与预算预留，不再把字符数除以 4 直接当最终值。
+- 思路：业务界面继续优先显示可读名称，但执行详情是事实审计边界，必须能从 Event → ToolCall → Provider Call、父 Run → Delegation → 子 Run、Context → Knowledge/Memory 来源逐级回跳。Manifest 保存的是请求组成的审计证明，不是第二份 Prompt；选择理由、ID 和评分不能因为被记录而进入模型。事件 payload 为向后兼容的加法变更，旧 count-only Event 仍由 Console 的空列表回退正常展示；数据库 Schema、Sandbox、配置、启动方式和产品站能力均未变化，因此迁移/Store 测试、`docs/docker-sandbox.md`、`.env.example` 与 `paicli-site/README.md` 不适用。
+- 验证：bundled Node `--check paicli-server/src/main/resources/static/app.js` 通过；48 项定向测试曾通过，覆盖 ToolCall 对象事件、Memory 提取对象、Token Profile、Context 字段处置、Run 审计父子导航与 Web/OpenAPI 启动。随后新增 Knowledge Chunk 源全文/实际片段断言；完整定向与全 Reactor 验证见本条最终补充。
+
 ## 2026-08-25
 
 ### Memory 作用域隔离、TEI 重排与动态召回

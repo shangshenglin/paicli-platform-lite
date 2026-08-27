@@ -38,7 +38,8 @@ public class EvaluationStarterPackService {
             EvaluationStore.EvaluationSuite suite = existingSuites.get(definition.name());
             if (suite == null) {
                 suite = store.saveSuite(null, projectKey, definition.name(), definition.description(),
-                        definition.defaultTrials(), definition.passThreshold());
+                        definition.defaultTrials(), definition.passThreshold(),
+                        pack.version() + ":" + definition.datasetVersion());
                 installedSuites++;
             }
             var existingCases = store.cases(suite.id()).stream()
@@ -52,7 +53,9 @@ public class EvaluationStarterPackService {
                         write(evaluationCase.requiredTools()), write(evaluationCase.forbiddenTools()),
                         write(evaluationCase.requiredResponse()), write(evaluationCase.forbiddenResponse()),
                         evaluationCase.maxToolCalls(), evaluationCase.maxTokens(),
-                        evaluationCase.maxDurationMs(), evaluationCase.enabled());
+                        evaluationCase.maxDurationMs(), evaluationCase.enabled(), "RULE", null, null,
+                        "{}", "{}", writeObject(evaluationCase.assertions()),
+                        writeObject(evaluationCase.fixture()), writeObject(evaluationCase.judge()));
                 installedCases++;
             }
         }
@@ -77,16 +80,29 @@ public class EvaluationStarterPackService {
         }
     }
 
+    private String writeObject(Map<String, Object> value) {
+        try {
+            return mapper.writeValueAsString(value == null ? Map.of() : value);
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to serialize evaluation object", e);
+        }
+    }
+
     public record InstallResult(String version, int totalSuites, int totalCases,
                                 int installedSuites, int installedCases, int skippedCases) { }
 
     private record StarterPack(String version, List<StarterSuite> suites) { }
 
     private record StarterSuite(String name, String description, int defaultTrials,
-                                int passThreshold, List<StarterCase> cases) { }
+                                int passThreshold, String datasetVersion, List<StarterCase> cases) {
+        private StarterSuite {
+            datasetVersion = datasetVersion == null || datasetVersion.isBlank() ? "v1" : datasetVersion;
+        }
+    }
 
     private record StarterCase(String name, String prompt, List<String> requiredTools,
                                List<String> forbiddenTools, List<String> requiredResponse,
                                List<String> forbiddenResponse, int maxToolCalls, int maxTokens,
-                               long maxDurationMs, boolean enabled) { }
+                               long maxDurationMs, boolean enabled, Map<String, Object> assertions,
+                               Map<String, Object> fixture, Map<String, Object> judge) { }
 }

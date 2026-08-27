@@ -24,7 +24,7 @@ class EvaluationStarterPackServiceTest {
         EvaluationStarterPackService service = new EvaluationStarterPackService(store, new ObjectMapper());
 
         var first = service.install("starter-project");
-        assertThat(first.version()).isEqualTo("1.4.0");
+        assertThat(first.version()).isEqualTo("2.0.0");
         assertThat(first.totalSuites()).isEqualTo(8);
         assertThat(first.totalCases()).isEqualTo(36);
         assertThat(first.installedSuites()).isEqualTo(8);
@@ -40,11 +40,17 @@ class EvaluationStarterPackServiceTest {
         var advanced = suites.stream().filter(value -> value.name().contains("上下文")).findFirst().orElseThrow();
         assertThat(store.cases(advanced.id())).hasSize(6).allMatch(value -> !value.enabled());
         var harnessLoop = suites.stream().filter(value -> value.name().contains("Harness Loop")).findFirst().orElseThrow();
-        assertThat(store.cases(harnessLoop.id())).hasSize(8).allMatch(EvaluationStore.EvaluationCase::enabled);
+        assertThat(store.cases(harnessLoop.id())).hasSize(8)
+                .filteredOn(EvaluationStore.EvaluationCase::enabled).hasSize(6)
+                .allMatch(value -> value.assertionSpecJson().contains("harness-v3"));
         var harness = suites.stream().filter(value -> value.name().contains("Memory Harness")).findFirst().orElseThrow();
         assertThat(store.cases(harness.id())).hasSize(6).allMatch(value -> !value.enabled());
         var teamHarness = suites.stream().filter(value -> value.name().contains("AgentTeam")).findFirst().orElseThrow();
         assertThat(store.cases(teamHarness.id())).hasSize(3).allMatch(value -> !value.enabled());
+        assertThat(suites).allMatch(value -> value.datasetVersion().startsWith("2.0.0:"));
+        assertThat(store.cases(teamHarness.id())).anyMatch(value ->
+                value.fixtureSpecJson().contains("agent-team-review-v1")
+                        && value.assertionSpecJson().contains("minDelegations"));
 
         var second = service.install("starter-project");
         assertThat(second.installedSuites()).isZero();
