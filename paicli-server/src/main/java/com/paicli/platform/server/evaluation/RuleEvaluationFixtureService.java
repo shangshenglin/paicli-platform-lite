@@ -19,6 +19,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Creates a deterministic, non-secret workspace for RULE evaluation trials. */
 @Service
@@ -97,6 +98,23 @@ public class RuleEvaluationFixtureService {
         List<String> memoryIds = new ArrayList<>();
         List<String> knowledgeNames = new ArrayList<>();
         List<String> planIds = new ArrayList<>();
+        List<String> sessionIds = new ArrayList<>();
+        List<Map<String, Object>> workspaceFiles = new ArrayList<>();
+        Path root = workspaceRoot.resolve(workspaceOwner).normalize();
+        for (Map.Entry<String, Object> file : new TreeMap<>(object(fixture.get("files"))).entrySet()) {
+            Path target = safe(root, file.getKey());
+            try {
+                if (!Files.isRegularFile(target)) {
+                    throw new IllegalStateException("evaluation fixture file is missing: " + file.getKey());
+                }
+                workspaceFiles.add(Map.of(
+                        "path", file.getKey().replace('\\', '/'),
+                        "bytes", Files.size(target),
+                        "sha256", sha256(Files.readString(target, StandardCharsets.UTF_8))));
+            } catch (IOException e) {
+                throw new IllegalStateException("inspect evaluation fixture file failed", e);
+            }
+        }
         if (runtime != null) {
             int ordinal = 0;
             for (Map<String, Object> memory : listOfMaps(fixture.get("memories"))) {
@@ -109,6 +127,17 @@ public class RuleEvaluationFixtureService {
                         null, null, "evaluation fixture", new SqliteRuntimeStore.MemoryScope(
                                 "WORKSPACE", null, workspaceOwner, "EVALUATION"));
                 memoryIds.add(created.id());
+            }
+            for (Map<String, Object> sessionFixture : listOfMaps(fixture.get("sessions"))) {
+                var created = runtime.createSession(
+                        String.valueOf(sessionFixture.getOrDefault("title", "Evaluation history fixture")),
+                        projectKey);
+                for (Map<String, Object> message : listOfMaps(sessionFixture.get("messages"))) {
+                    runtime.appendMessage(created.id(), null,
+                            String.valueOf(message.getOrDefault("role", "user")),
+                            String.valueOf(message.getOrDefault("content", "evaluation history")));
+                }
+                sessionIds.add(created.id());
             }
         }
         if (knowledge != null) {
@@ -136,7 +165,8 @@ public class RuleEvaluationFixtureService {
             throw new IllegalStateException("evaluation fixture requires an AgentTeam execution");
         }
         snapshot.put("memoryIds", memoryIds); snapshot.put("knowledgeNames", knowledgeNames);
-        snapshot.put("planIds", planIds);
+        snapshot.put("planIds", planIds); snapshot.put("sessionIds", sessionIds);
+        snapshot.put("workspaceFiles", workspaceFiles);
         return json(snapshot);
     }
 
@@ -144,6 +174,7 @@ public class RuleEvaluationFixtureService {
         Map<String, Object> snapshot = object(snapshotJson);
         if (!"RULE".equals(snapshot.get("caseType"))) return;
         if (runtime != null) stringList(snapshot.get("memoryIds")).forEach(runtime::deleteMemory);
+        if (runtime != null) stringList(snapshot.get("sessionIds")).forEach(runtime::deleteSession);
         if (knowledge != null) stringList(snapshot.get("knowledgeNames")).forEach(name -> knowledge.delete(projectKey, name));
         if (plans != null) stringList(snapshot.get("planIds")).forEach(plans::deleteEvaluationFixturePlan);
     }

@@ -1,5 +1,16 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-08-31
+
+### 固定工作区、证据断言与对抗式 Starter Pack 2.1
+
+- 变更：官方 Starter Pack 升级为 2.1.0、9 套件/41 用例。安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 用例移除 Prompt 中的标准答案标记，改用隐藏的工具参数/顺序/状态、真实工具结果、回答事实和持久化状态断言；仅精确格式与稳定性基线保留显式标记。
+- 变更：RULE Fixture 可为每个 Trial 写入版本化 `.env`、README、`pom.xml`、AGENTS、验证报告和失败脚本等固定文件，并创建可检索的临时 Session；Trial 快照保存文件规范路径、字节数、SHA-256 和状态 ID，评分后幂等回收。新增 README/POM 真实总结、文件间接注入、RAG 污染、编码注入、Memory 权限污染、真实失败命令与重复工具恢复场景。
+- 变更：`EvaluationAssertionEngine` 增加工具结果、回答事实/正则、工具白名单、敏感参数、禁止 Approval、Canary 原文及 Base64/URL-safe Base64/十六进制/URL 编码扫描，并要求虚假变更声明有结构化 mutation evidence。安全结果只记录证据面和 Canary 序号，不回显秘密正文。
+- 变更：官方安装器会原位升级未人工编辑的旧官方 Suite/Case，包括数据集版本迁移前创建、后来被回填为 `custom-v1` 或已经部分升级的“官方·”套件。历代 1.0–2.0 官方 Case 以不含原文的定义 SHA-256 识别，签名覆盖 Prompt、工具/回答规则、预算、断言、Fixture 和 Judge；`enabled` 作为用户偏好排除在签名外并在内容升级后保留。淘汰且签名匹配的旧 Case 只停用不删除。安装 API 新增 `updatedCases` 与 `disabledLegacyCases` 计数，Console 同步展示升级结果。
+- 思路：能力评测必须给模型真实、固定且可复现的输入状态，再从实际调用轨迹、工具返回和最终回答交叉证明行为；把“不要泄露并回复某口令”写进用户 Prompt 只能测指令跟随，不能证明遇到攻击时不会读取或外传秘密。数据库 Schema、Sandbox 镜像/协议和产品站展示未改变，迁移、Store 测试、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用；README、OpenAPI 注解、架构与阶段文档已同步。
+- 验证：`EvaluationAssertionEngineTest`、`EvaluationStarterPackServiceTest` 与 `RuleEvaluationFixtureServiceTest` 等评测报告覆盖泄露/编码变体、越权工具/敏感参数、Approval、真实工具结果、回答事实、虚假变更、固定文件哈希、临时历史、2.0→2.1、`custom-v1`→2.1、部分升级恢复、内容编辑保留及启停偏好保留。`.\mvnw.cmd test` 全 Reactor 74 份报告共 372 项通过，0 失败；跳过重复测试和 Spring Boot repackage 的全 Reactor `package` 通过。bundled Node `--check`、Starter Pack JSON 解析（2.1.0、9 套件、41 用例、能力 Prompt 无旧答案标记）及 76 条历史签名格式检查通过。真实默认库在 Docker Sandbox 模式重启后再次安装，更新 15 个历史用例、停用 3 个淘汰用例，启用中的能力 Prompt 旧答案标记为 0；Git diff/文档门禁通过。
+
 ## 2026-08-27
 
 ### Memory 召回收紧与 Reranker 降级保护

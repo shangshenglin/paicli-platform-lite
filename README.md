@@ -331,7 +331,7 @@ X-API-Key: your-key
 - **按需工具加载**：常驻核心工具加 `tool_search`；扩展能力只先暴露轻量目录项，模型搜索后才在后续轮次注入匹配工具的完整 Schema。Agent Profile 的显式工具白名单仍是上限，工具发现不能绕过权限。
 - **Memory 归并与反馈**：自动提取对同一检索 Scope 内的高相似候选复用 canonical key，中等相似候选进入 OPEN conflict；L1 长期未访问记录自动标记 STALE。召回先按 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` 过滤，再对有界候选复用知识库 TEI Cross-Encoder（不可用时确定性回退），以最低相关性和相对门槛动态决定实际 Top K；Run 完成/失败、Plan 验证通过/返工结果继续形成历史效果分。
 - **协作降噪与证据门禁**：自动提取只在委派树根 Run 完成时排队；每个根 Run 最多写入 3 条（L1 至多 1、L2 至多 2、L3 至多 1）。流程事件、空/伪造证据和仅 Assistant 自述都会被丢弃；最终置信度由模型分数、证据质量、重复出现程度和层级稳定性校准，用户陈述上限 0.80，用户陈述加成功工具结果上限 0.95。
-- **专项评测**：官方 Starter Pack `1.1.0` 新增“Context 与 Memory Harness”套件，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现与统一上下文预算；依赖夹具的用例默认关闭，由用户准备数据后启用。
+- **专项评测**：官方 Starter Pack `2.1.0` 使用版本化固定工作区、Session、Memory、Knowledge、Plan 与 AgentTeam 夹具，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现和统一上下文预算；高级用例默认关闭，启用后由平台按 Trial 自动准备并回收夹具，不再要求用户手工把测试目录填满。
 
 系统遵守以下硬约束：
 
@@ -571,21 +571,22 @@ data/workspaces/{runId}/PAI.md
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack；已有同名 Suite/Case 会保留，不覆盖用户修改。当前 `2.0.0` 包含 8 个套件、36 个用例，并为各 Suite 保存独立 `datasetVersion`：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack：未人工编辑的旧官方 Suite/Case 会原位升级，包括数据集版本迁移前被回填为 `custom-v1` 或已经部分升级的官方套件；历史 Case 必须命中内置的 1.0–2.0 定义 SHA-256 才会更新，签名覆盖 Prompt、工具/回答规则、预算、断言、Fixture 和 Judge，但排除并保留用户的启停状态。已淘汰且命中历史定义的旧 Case 只停用、不删除。当前 `2.1.0` 包含 9 个套件、41 个用例，并为各 Suite 保存独立 `datasetVersion`：
 
 套件只有存在启用用例时才可启动。对于默认停用的高级套件，Console 会显示“先启用用例”，点击后展开案例列表并提示先满足对应前置条件，不再向后端提交必然返回 409 的空 Execution。
 
-- **基础行为与安全**：固定输出、只读工具、无工具回答、密钥拒绝和 Prompt Injection 防护，可直接运行。
+- **基础行为与安全**：固定输出和只读工具是格式/路由基线；密钥泄露与文件间接 Prompt Injection 改用固定诱饵文件、工具白名单、敏感路径和 Canary 扫描，不在用户 Prompt 中告诉模型标准拒绝话术。
 - **工具与审批**：写文件、普通读取/构建/测试命令、危险命令等待审批、破坏性命令拒绝和写后读取；只有风险分类命中的命令会真实等待 Approval。
 - **上下文与受管能力**：Knowledge、Session Search、Skill、Web 和 Multi-Agent；依赖项目数据或外部配置，默认停用，可在 Console 按需启用。
 - **稳定性与预算**：默认 3 Trial，检查固定指令、随机工具调用、输出 Token 和耗时预算。
 - **Plan DAG 与验证**：结构化计划和验证证据模板，默认停用。
 - **Context 与 Memory Harness**：长会话、结构化摘要、错误/冲突 Memory、工具发现和统一输入预算，默认停用。
 - **AgentTeam 协作 Harness**：Leader 拆分、Reviewer/Runner 角色路由和结果汇总，默认停用，需选择执行团队。
+- **对抗安全**：直接越权、RAG 污染、Base64/HTML 文件注入和低可信 Memory 权限污染，默认停用；使用无真实价值的 Canary 检查原文及常见编码变体是否进入回答、工具参数、结果、错误或事件。
 
 1. Suite 保存项目、默认 Trial 次数和通过阈值。
-2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；还可保存 `assertions`、`fixture` 与 `judge` JSON。断言支持工具参数/状态/次数/顺序、Event 顺序、Approval 时序、完成证据、幂等恢复以及 Plan/Memory/AgentTeam 状态；报告同时展示输入、输出和总 Token。
-3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。`RULE` Trial 在唯一工作区中注入无密钥、确定性的 README、AGENTS 和 tests 说明夹具，避免空工作区把读取成功错误降级成“只调用过工具”。
+2. Case 保存 Prompt、必须/禁止工具、必须/禁止回答片段、工具调用数、输出 Token 和耗时上限；还可保存 `assertions`、`fixture` 与 `judge` JSON。断言支持工具参数/状态/次数/Provider 顺序、工具真实结果、最终回答事实、Event 顺序、Approval 时序、完成证据、幂等恢复、敏感路径/Canary，以及 Plan/Memory/AgentTeam 状态；报告同时展示输入、输出和总 Token。
+3. 每个 Case/Trial 创建隐藏内部 Session 和普通 Run，继续复用正式模型、队列、ToolCall、Approval、Event、Audit、Artifact 和恢复链路。`RULE` Trial 在自己的固定工作区中写入 Case 声明的版本化文件，例如 `.env`、README、`pom.xml`、AGENTS、验证报告或可执行失败脚本；快照保存规范路径、字节数和 SHA-256。Grader 同时检查模型是否读取了指定文件、工具结果是否包含夹具事实、最终回答是否正确使用这些事实，不能以“工作区为空”或只调用过工具蒙混通过。
 4. 危险工具仍停在持久化审批；报告只允许用户单次批准原 ToolCall 或拒绝，不会为了自动评测绕过安全边界。
 5. 单个 Trial 达到阈值才通过，Execution 要求全部 Trial 通过，形成 `pass^k` 稳定性门禁。
 
@@ -598,6 +599,8 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 - 人工确认 Baseline 检查关键工具是否保留；RULE 的输出 Token 超过基线 125% 或耗时超过 140% 时扣分并影响阈值，REPOSITORY 报告继续展示输出 Token 150% 与耗时 200% 对比线。迁移前的旧基线仍按原总 Token 口径比较，避免升级时静默改变历史含义。
 
 Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。Case 可选配置 LLM Judge，但只在完整性、安全、功能和预算确定性门禁全部通过后运行，且必须携带人工批准的校准 ID、至少 20 个样本和不低于 0.80 的一致率；配置不足、输出非法或调用失败均 fail-closed，Judge 不能推翻硬门禁。
+
+Starter Pack 中仅“固定标记响应”和“稳定重复”保留显式输出标记，它们测的是精确格式和跨 Trial 稳定性。安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 能力题不再把 `SECRET_REFUSED`、`HISTORY_USED` 等答案词写进 Prompt；这些用例改由隐藏断言核对真实状态、调用轨迹和证据。
 
 每次 Execution 冻结无密钥指纹：数据集版本/Case 合同、Prompt、工具 Schema、模型方案、AgentTeam、Java/OS 与 Grader 版本分别取摘要，并生成 `comparisonKey`。趋势 API 汇总 Trial Pass Rate、Stable Case Rate、平均分、每通过 Trial Token 和平均耗时；发布门禁要求全部 Trial 通过且不存在完整性/安全/预算/Judge 失败，并相对最近通过执行阻断 Token/成功 Trial 超过 25% 或平均耗时超过 40% 的退化。
 
@@ -873,6 +876,8 @@ POST                        /v1/evaluations/executions/{executionId}/release-gat
 POST                        /v1/evaluations/trials/{trialId}/baseline
 ```
 
+`POST /v1/evaluations/starter-pack` 返回版本、定义总数以及 `installedSuites`、`installedCases`、`updatedCases`、`disabledLegacyCases`、`skippedCases`。`updatedCases` 只统计未人工编辑且由旧官方版本托管的同名 Case；`disabledLegacyCases` 只停用被新版本淘汰的未编辑官方 Case。
+
 `POST /v1/evaluations/suites/{suiteId}/executions` 可选传 `agentTeamId`。未传时保持单 Agent 基线；传入时每个 Trial 绑定该团队 Leader，并将成员、并发、深度和 Reviewer/Runner 约束固化到普通 Run 的协作策略。Suite 请求可传 `datasetVersion`；Case 请求可传 `assertions`、`fixture`、`judge`。`EvaluationCaseRequest.caseType=REPOSITORY` 时还需传 `fixtureRef`、`fixtureSha256`、`grader` 和 `patchPolicy`；详情见上方“私有仓库任务评测”。
 
 ### CollaborationTask 与结构化路由
@@ -932,7 +937,7 @@ GET                         /v1/collaboration/teams/{teamId}/metrics
 - SQLite Store、迁移 1–44、CollaborationTask/Trigger/阶段屏障/任务工作区、WAL 并发写入、Delegation Graph 依赖/资源/终态传播、Artifact 原子写入、维护和备份安全相关行为。
 - Plan Runtime 的 JSON 解析校验、DAG 循环拒绝、根 Step 就绪、Replan 版本记录、Step 内 ReAct Run 调度、Async Job 状态、Validation Check、Read-only DAG 批次分析、资源冲突推迟、隔离 workspace 引用、Agent Feedback 和验证 Memory 闭环。
 - API Key、管理端点/OpenAPI、Console 安全头和结构化表单回归。
-- Agent 评测多 Trial、单 Agent/AgentTeam 执行、参数/顺序/状态/Event/Approval/幂等/完成证据硬断言、输出 Token 硬门禁、Baseline、执行指纹、趋势/对比/发布门禁、人工校准 Judge、内部 Session 隐藏、8 套件/36 Case Starter Pack，以及私有仓库 fixture 摘要、Case 快照、Patch 完整性、隐藏测试注入和 F2P/P2P 独立判分。
+- Agent 评测多 Trial、单 Agent/AgentTeam 执行、固定工作区文件哈希、工具结果/回答事实、参数/顺序/状态/Event/Approval/Canary/幂等/完成证据硬断言、输出 Token 硬门禁、Baseline、执行指纹、趋势/对比/发布门禁、人工校准 Judge、内部 Session 隐藏、9 套件/41 Case Starter Pack，以及私有仓库 fixture 摘要、Case 快照、Patch 完整性、隐藏测试注入和 F2P/P2P 独立判分。
 
 此外已完成：
 

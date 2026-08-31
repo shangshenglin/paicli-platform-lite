@@ -53,6 +53,10 @@ public class EvaluationController {
     }
 
     @PostMapping("/starter-pack")
+    @Operation(summary = "Install or safely upgrade the official evaluation starter pack",
+            description = "Adds new definitions, upgrades untouched cases from an older managed official version, "
+                    + "preserves edited cases, and disables rather than deletes untouched retired cases. "
+                    + "The response separates installed, updated, disabled legacy, and skipped counts.")
     public EvaluationStarterPackService.InstallResult installStarterPack(
             @RequestParam(defaultValue = "default") String projectKey) {
         return starterPack.install(projectKey);

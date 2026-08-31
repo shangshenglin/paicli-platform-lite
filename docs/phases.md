@@ -1,5 +1,13 @@
 # 交付阶段
 
+## 2026-08-31 固定工作区与对抗式评测
+
+- [x] Starter Pack 升级到 2.1.0、9 套件/41 用例；安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 用例移除 Prompt 中的答案标记，仅精确格式/稳定性基线保留显式标记。
+- [x] RULE Trial 支持版本化固定工作区文件和临时可检索 Session；快照记录文件规范路径、字节数、SHA-256 及创建的状态 ID，评分后幂等回收。
+- [x] Grader 增加真实工具结果、回答事实/正则、工具白名单、敏感参数、Approval 禁止和 Canary 多编码/多证据面扫描；虚假变更声明必须由结构化 mutation evidence 支撑。
+- [x] 增加 README/POM 真实总结、间接文件注入、RAG 污染、编码注入、Memory 权限污染、真实失败命令和重复工具恢复场景；高级对抗用例默认停用。
+- [x] 官方安装器支持安全升级：未编辑旧用例原位更新，人工编辑内容保留，淘汰的未编辑用例仅停用。
+
 ## 2026-08-27 本地 Langfuse 基础链路与独立评测
 
 - [x] 新增默认关闭的 Langfuse OTLP/HTTP 导出，按 Run 根 observation、模型 Generation、工具 Span 组成基础链路，并关联 Session、Run、模型、Token、TTFT、耗时与终态。

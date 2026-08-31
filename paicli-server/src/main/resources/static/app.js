@@ -3576,7 +3576,7 @@ async function installEvaluationStarterPack() {
     const result = await api(`/v1/evaluations/starter-pack?projectKey=${encodeURIComponent(currentProjectKey())}`,
       {method: 'POST', body: '{}'});
     await loadEvaluations();
-    showNotice(`官方评测集 ${result.version}：新增 ${result.installedSuites} 个套件、${result.installedCases} 个用例，跳过 ${result.skippedCases} 个已有用例`);
+    showNotice(`官方评测集 ${result.version}：新增 ${result.installedSuites} 个套件、${result.installedCases} 个用例，升级 ${result.updatedCases || 0} 个未编辑用例，停用 ${result.disabledLegacyCases || 0} 个旧用例，保留 ${result.skippedCases} 个已有或人工编辑用例`);
   } catch (error) { showNotice(`官方评测集安装失败：${error.message}`, true); }
   finally { button.disabled = false; }
 }

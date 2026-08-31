@@ -58,16 +58,21 @@ class RuleEvaluationFixtureServiceTest {
                 "version", "state-v1",
                 "files", java.util.Map.of("fixtures/input.txt", "fixture input"),
                 "memories", List.of(java.util.Map.of("content", "Java 17", "confidence", 0.99)),
+                "sessions", List.of(java.util.Map.of("title", "release decision", "messages", List.of(
+                        java.util.Map.of("role", "assistant", "content", "Release window is Wednesday 22:30.")))),
                 "plan", java.util.Map.of("objective", "verify", "stepTitle", "check")));
 
         service.prepare(owner, spec);
         String snapshot = service.prepareState(spec, "eval-project", session.id(), run.id(), owner);
 
         assertThat(workspaces.resolve(owner).resolve("fixtures/input.txt")).hasContent("fixture input");
-        assertThat(snapshot).contains("state-v1", "memoryIds", "planIds");
+        assertThat(snapshot).contains("state-v1", "memoryIds", "planIds", "sessionIds",
+                "workspaceFiles", "fixtures/input.txt", "sha256");
         assertThat(plans.plansForSession(session.id(), 10)).hasSize(1);
+        assertThat(runtime.searchableSessionMessageCount("eval-project")).isEqualTo(1);
 
         service.cleanup(snapshot, "eval-project");
         assertThat(plans.plansForSession(session.id(), 10)).isEmpty();
+        assertThat(runtime.searchableSessionMessageCount("eval-project")).isZero();
     }
 }
