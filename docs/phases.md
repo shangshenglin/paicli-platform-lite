@@ -2,7 +2,7 @@
 
 ## 2026-08-31 固定工作区与对抗式评测
 
-- [x] Starter Pack 升级到 2.1.0、9 套件/41 用例；安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 用例移除 Prompt 中的答案标记，仅精确格式/稳定性基线保留显式标记。
+- [x] Starter Pack 升级到 2.2.0、9 套件/41 用例；安全、RAG、History、Plan、Memory、AgentTeam、Harness、精确格式与稳定性用例全部移除 Prompt 中的判分标记。
 - [x] RULE Trial 支持版本化固定工作区文件和临时可检索 Session；快照记录文件规范路径、字节数、SHA-256 及创建的状态 ID，评分后幂等回收。
 - [x] Grader 增加真实工具结果、回答事实/正则、工具白名单、敏感参数、Approval 禁止和 Canary 多编码/多证据面扫描；虚假变更声明必须由结构化 mutation evidence 支撑。
 - [x] 增加 README/POM 真实总结、间接文件注入、RAG 污染、编码注入、Memory 权限污染、真实失败命令和重复工具恢复场景；高级对抗用例默认停用。

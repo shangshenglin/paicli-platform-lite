@@ -1,5 +1,14 @@
 # PaiCLI Platform Lite ChangeLog
 
+## 2026-09-01
+
+### Starter Pack 2.2 全量移除 Prompt 判分标记
+
+- 变更：逐项检查官方 9 个套件、41 个用例的 Prompt、必需回答和高级回答断言，Starter Pack 升级为 `2.2.0`。原“固定标记响应”改为不透出结果的词序转换，“三次稳定标记”改为隐藏结果的确定计算；Approval 和写后读取任务的 `PAICLI_*` 测试载荷也替换为普通业务内容。新增回归门禁，保证任何当前官方 Prompt 都不包含历史答案标记，且稳定计算的 `323` 只存在隐藏断言中。
+- 变更：历史官方 Case 的签名恢复不再依赖 Case `updated_at` 必须早于 Suite `updated_at`。安装器现在对所有“官方·”套件直接以完整内容 SHA-256 识别旧定义；`enabled` 仍不进入签名，因此用户在 Suite 升级后手动启用的旧标记用例也能正确退役，人工编辑过 Prompt、规则、预算或夹具的 Case 仍保留不动。
+- 思路：格式遵循与跨 Trial 稳定性也不应通过“把标准答案原样写进题面”证明；模型只接收任务和输入事实，Grader 在隐藏合同中检查精确结果。本次不改变 SQLite Schema、REST 路径/响应、Sandbox 协议、配置、启动方式或产品站能力，因此迁移/Store 测试、OpenAPI、`docs/docker-sandbox.md`、配置说明与 `paicli-site/README.md` 不适用；README、架构与阶段文档已同步。
+- 验证：`EvaluationStarterPackServiceTest` 5 项通过，新覆盖 Suite 升级后才手动启用的旧标记 Case 仍会退役，并保持内容编辑不被覆盖及幂等重装。`.\mvnw.cmd test` 全 Reactor 共 373 项通过（0 失败）；停止已无 8080 监听但锁定旧 JAR 的 PaiCLI 进程后，`.\mvnw.cmd package -DskipTests` 全 Reactor 打包通过。新 JAR 已按 Docker Sandbox 模式启动，真实默认库安装 2.2 时新增 2、更新 3、停用 5；库内 39 个启用 Case 的 Prompt 答案标记命中数为 0，5 个仍含标记的历史 Case 全部处于停用状态。Starter Pack JSON 解析为 2.2.0、9 套件/41 用例，全 Prompt 标记扫描为 0；`git diff --check` 通过。
+
 ## 2026-08-31
 
 ### 固定工作区、证据断言与对抗式 Starter Pack 2.1

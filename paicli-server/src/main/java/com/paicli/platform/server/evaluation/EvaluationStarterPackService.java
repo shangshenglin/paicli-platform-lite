@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -66,7 +65,8 @@ public class EvaluationStarterPackService {
             for (StarterCase evaluationCase : definition.cases()) {
                 EvaluationStore.EvaluationCase existing = existingCases.get(evaluationCase.name());
                 boolean historicalDefinition = existing != null
-                        && recoverableHistoricalDefinition(suite, existing, pack.version());
+                        && !sameDefinition(existing, evaluationCase)
+                        && recoverableHistoricalDefinition(suite, existing);
                 if (existing != null && ((managedUpgrade && untouched(existing)) || historicalDefinition)) {
                     saveCase(existing.id(), suite.id(), evaluationCase,
                             historicalDefinition ? existing.enabled() : evaluationCase.enabled());
@@ -80,12 +80,11 @@ public class EvaluationStarterPackService {
                 saveCase(null, suite.id(), evaluationCase);
                 installedCases++;
             }
-            if (managedUpgrade || suite.datasetVersion().startsWith(pack.version() + ":")) {
+            if (suite.name().startsWith("官方·")) {
                 EvaluationStore.EvaluationSuite upgradedSuite = suite;
                 for (EvaluationStore.EvaluationCase legacy : existingCases.values().stream()
                         .filter(value -> !currentNames.contains(value.name()))
-                        .filter(value -> untouched(value)
-                                || recoverableHistoricalDefinition(upgradedSuite, value, pack.version()))
+                        .filter(value -> recoverableHistoricalDefinition(upgradedSuite, value))
                         .filter(EvaluationStore.EvaluationCase::enabled).toList()) {
                     store.saveCase(legacy.id(), legacy.suiteId(), legacy.name(), legacy.prompt(),
                             legacy.requiredToolsJson(), legacy.forbiddenToolsJson(), legacy.requiredResponseJson(),
@@ -133,18 +132,11 @@ public class EvaluationStarterPackService {
     }
 
     private boolean recoverableHistoricalDefinition(EvaluationStore.EvaluationSuite suite,
-                                                    EvaluationStore.EvaluationCase evaluationCase,
-                                                    String currentVersion) {
-        if (!suite.name().startsWith("官方·")
-                || !suite.datasetVersion().startsWith(currentVersion + ":")
-                || !before(evaluationCase.updatedAt(), suite.updatedAt())) {
+                                                    EvaluationStore.EvaluationCase evaluationCase) {
+        if (!suite.name().startsWith("官方·")) {
             return false;
         }
         return legacyCaseSignatures.contains(caseSignature(evaluationCase));
-    }
-
-    private static boolean before(Instant candidate, Instant boundary) {
-        return candidate != null && boundary != null && candidate.isBefore(boundary);
     }
 
     private String caseSignature(EvaluationStore.EvaluationCase value) {
@@ -160,6 +152,21 @@ public class EvaluationStarterPackService {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    }
+
+    private boolean sameDefinition(EvaluationStore.EvaluationCase existing, StarterCase definition) {
+        return existing.name().equals(definition.name())
+                && existing.prompt().equals(definition.prompt())
+                && existing.requiredToolsJson().equals(write(definition.requiredTools()))
+                && existing.forbiddenToolsJson().equals(write(definition.forbiddenTools()))
+                && existing.requiredResponseJson().equals(write(definition.requiredResponse()))
+                && existing.forbiddenResponseJson().equals(write(definition.forbiddenResponse()))
+                && existing.maxToolCalls() == definition.maxToolCalls()
+                && existing.maxTokens() == definition.maxTokens()
+                && existing.maxDurationMs() == definition.maxDurationMs()
+                && existing.assertionSpecJson().equals(writeObject(definition.assertions()))
+                && existing.fixtureSpecJson().equals(writeObject(definition.fixture()))
+                && existing.judgeSpecJson().equals(writeObject(definition.judge()));
     }
 
     private Set<String> readLegacySignatures() {

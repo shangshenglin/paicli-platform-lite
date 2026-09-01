@@ -331,7 +331,7 @@ X-API-Key: your-key
 - **按需工具加载**：常驻核心工具加 `tool_search`；扩展能力只先暴露轻量目录项，模型搜索后才在后续轮次注入匹配工具的完整 Schema。Agent Profile 的显式工具白名单仍是上限，工具发现不能绕过权限。
 - **Memory 归并与反馈**：自动提取对同一检索 Scope 内的高相似候选复用 canonical key，中等相似候选进入 OPEN conflict；L1 长期未访问记录自动标记 STALE。召回先按 `PROJECT / AGENT / WORKSPACE / TASK_TYPE` 过滤，再对有界候选复用知识库 TEI Cross-Encoder（不可用时确定性回退），以最低相关性和相对门槛动态决定实际 Top K；Run 完成/失败、Plan 验证通过/返工结果继续形成历史效果分。
 - **协作降噪与证据门禁**：自动提取只在委派树根 Run 完成时排队；每个根 Run 最多写入 3 条（L1 至多 1、L2 至多 2、L3 至多 1）。流程事件、空/伪造证据和仅 Assistant 自述都会被丢弃；最终置信度由模型分数、证据质量、重复出现程度和层级稳定性校准，用户陈述上限 0.80，用户陈述加成功工具结果上限 0.95。
-- **专项评测**：官方 Starter Pack `2.1.0` 使用版本化固定工作区、Session、Memory、Knowledge、Plan 与 AgentTeam 夹具，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现和统一上下文预算；高级用例默认关闭，启用后由平台按 Trial 自动准备并回收夹具，不再要求用户手工把测试目录填满。
+- **专项评测**：官方 Starter Pack `2.2.0` 使用版本化固定工作区、Session、Memory、Knowledge、Plan 与 AgentTeam 夹具，覆盖长会话约束保持、摘要续作、错误记忆抵抗、冲突修正、按需工具发现和统一上下文预算；高级用例默认关闭，启用后由平台按 Trial 自动准备并回收夹具，不再要求用户手工把测试目录填满。
 
 系统遵守以下硬约束：
 
@@ -571,7 +571,7 @@ data/workspaces/{runId}/PAI.md
 
 评测中心把模型行为回归作为产品能力，而不是只写 Java 单元测试：
 
-Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack：未人工编辑的旧官方 Suite/Case 会原位升级，包括数据集版本迁移前被回填为 `custom-v1` 或已经部分升级的官方套件；历史 Case 必须命中内置的 1.0–2.0 定义 SHA-256 才会更新，签名覆盖 Prompt、工具/回答规则、预算、断言、Fixture 和 Judge，但排除并保留用户的启停状态。已淘汰且命中历史定义的旧 Case 只停用、不删除。当前 `2.1.0` 包含 9 个套件、41 个用例，并为各 Suite 保存独立 `datasetVersion`：
+Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效率工作台中。评测中心采用“套件/报告”双栏工作区，套件用例默认折叠、两栏分别滚动，避免评测集和报告随数量增长连续堆叠。运行前可选择单 Agent 基线或一个 AgentTeam；团队 Trial 由保存的 Leader 启动并固化团队协作策略。“安装官方评测集”会幂等安装版本化 Starter Pack：未人工编辑的旧官方 Suite/Case 会原位升级，包括数据集版本迁移前被回填为 `custom-v1` 或已经部分升级的官方套件；历史 Case 必须命中内置的 1.0–2.1 定义 SHA-256 才会更新，签名覆盖 Prompt、工具/回答规则、预算、断言、Fixture 和 Judge，但排除并保留用户的启停状态。已淘汰且命中历史定义的旧 Case 只停用、不删除；是否曾在 Suite 升级后单独切换启停不影响内容签名识别。当前 `2.2.0` 包含 9 个套件、41 个用例，并为各 Suite 保存独立 `datasetVersion`：
 
 套件只有存在启用用例时才可启动。对于默认停用的高级套件，Console 会显示“先启用用例”，点击后展开案例列表并提示先满足对应前置条件，不再向后端提交必然返回 409 的空 Execution。
 
@@ -600,7 +600,7 @@ Console 首页提供独立的“Agent 评测中心”入口，不再嵌套在效
 
 Baseline 只能从已完成且通过的 Trial 创建，保存来源 Run、最终回答、工具序列、Token 口径和耗时，失败样本不能再被误设为基线。Case 可选配置 LLM Judge，但只在完整性、安全、功能和预算确定性门禁全部通过后运行，且必须携带人工批准的校准 ID、至少 20 个样本和不低于 0.80 的一致率；配置不足、输出非法或调用失败均 fail-closed，Judge 不能推翻硬门禁。
 
-Starter Pack 中仅“固定标记响应”和“稳定重复”保留显式输出标记，它们测的是精确格式和跨 Trial 稳定性。安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 能力题不再把 `SECRET_REFUSED`、`HISTORY_USED` 等答案词写进 Prompt；这些用例改由隐藏断言核对真实状态、调用轨迹和证据。
+Starter Pack 的所有 Prompt（包括格式和稳定性基线）都不再包含用于判分的魔法标记。精确格式改为词序转换，稳定性改为隐藏结果的确定计算；安全、RAG、History、Plan、Memory、AgentTeam 与 Harness 继续由隐藏断言核对真实状态、调用轨迹和证据。
 
 每次 Execution 冻结无密钥指纹：数据集版本/Case 合同、Prompt、工具 Schema、模型方案、AgentTeam、Java/OS 与 Grader 版本分别取摘要，并生成 `comparisonKey`。趋势 API 汇总 Trial Pass Rate、Stable Case Rate、平均分、每通过 Trial Token 和平均耗时；发布门禁要求全部 Trial 通过且不存在完整性/安全/预算/Judge 失败，并相对最近通过执行阻断 Token/成功 Trial 超过 25% 或平均耗时超过 40% 的退化。
 
