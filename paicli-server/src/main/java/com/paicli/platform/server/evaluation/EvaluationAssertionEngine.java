@@ -91,6 +91,7 @@ public class EvaluationAssertionEngine {
         approvalAssertions(grade, checks, input, map(spec.get("approval")));
         evidenceAssertions(grade, checks, input, map(spec.get("evidence")));
         responseAssertions(grade, checks, input.response(), map(spec.get("response")));
+        contextAssertions(grade, checks, input.events(), map(spec.get("context")));
         securityAssertions(grade, checks, input, map(spec.get("security")));
         stateAssertions(grade, checks, input.state(), map(spec.get("state")));
         baselineChecks(grade, checks, input, toolNames);
@@ -165,6 +166,41 @@ public class EvaluationAssertionEngine {
         for (String pattern : stringList(spec.get("forbiddenPatterns"))) {
             hard(grade, checks, "response_forbidden_pattern", !regexMatches(pattern, response), 100,
                     "configured pattern");
+        }
+    }
+
+    private void contextAssertions(MutableGrade grade, List<Map<String, Object>> checks,
+                                   List<RunEventRecord> events, Map<String, Object> spec) {
+        if (spec.isEmpty()) return;
+        List<JsonNode> knowledgeSelections = new ArrayList<>();
+        List<JsonNode> memorySelections = new ArrayList<>();
+        for (RunEventRecord event : events) {
+            if (!"context.prepared".equals(event.type())) continue;
+            try {
+                JsonNode data = mapper.readTree(event.data());
+                data.path("knowledgeSelections").forEach(knowledgeSelections::add);
+                data.path("memorySelections").forEach(memorySelections::add);
+            } catch (Exception ignored) { }
+        }
+        minimum(grade, checks, "minimum_context_knowledge_selections", knowledgeSelections.size(),
+                integer(spec.get("minKnowledgeSelections"), 0));
+        minimum(grade, checks, "minimum_context_memory_selections", memorySelections.size(),
+                integer(spec.get("minMemorySelections"), 0));
+        requiredSelectionFacts(grade, checks, "context_knowledge_fact",
+                knowledgeSelections, stringList(spec.get("knowledgeContentContains")));
+        requiredSelectionFacts(grade, checks, "context_memory_fact",
+                memorySelections, stringList(spec.get("memoryContentContains")));
+    }
+
+    private static void requiredSelectionFacts(MutableGrade grade, List<Map<String, Object>> checks,
+                                               String rule, List<JsonNode> selections,
+                                               List<String> requiredFacts) {
+        String combined = selections.stream()
+                .map(value -> value.path("content").asText("") + "\n" + value.path("sourceContent").asText(""))
+                .collect(java.util.stream.Collectors.joining("\n"));
+        for (int index = 0; index < requiredFacts.size(); index++) {
+            boolean ok = containsIgnoreCase(combined, requiredFacts.get(index));
+            hard(grade, checks, rule, ok, 100, "configured fact #" + (index + 1));
         }
     }
 

@@ -45,8 +45,17 @@ public class KnowledgeToolProvider implements ServerToolProvider {
             String project = store.findSession(run.sessionId()).orElseThrow().projectKey();
             String query = String.valueOf(request.arguments().getOrDefault("query", ""));
             int topK = integer(request.arguments().get("top_k"), 5);
+            String workspaceOwner = store.workspaceOwnerRunId(run.id());
+            List<KnowledgeService.SearchHit> hits;
+            if (workspaceOwner != null && workspaceOwner.startsWith("evaluation-")) {
+                List<String> fixtureDocuments = knowledge.evaluationFixtureDocuments(project, run.id());
+                hits = fixtureDocuments.isEmpty() ? List.of()
+                        : knowledge.searchAttached(project, fixtureDocuments, query, topK);
+            } else {
+                hits = knowledge.search(project, query, topK);
+            }
             return ToolResult.success(request.toolCallId(),
-                    mapper.writeValueAsString(knowledge.search(project, query, topK)), elapsed(start));
+                    mapper.writeValueAsString(hits), elapsed(start));
         } catch (Exception e) {
             return ToolResult.failure(request.toolCallId(), message(e), elapsed(start));
         }

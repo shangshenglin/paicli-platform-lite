@@ -189,6 +189,41 @@ class LayeredMemoryServiceTest {
     }
 
     @Test
+    void alwaysSelectsOnlyCurrentRunEvaluationFixturesEvenWhenConfidenceIsLow() throws Exception {
+        SqliteRuntimeStore store = store();
+        String workspaceOwner = "evaluation-fixed-memory";
+        var session = store.createSession("evaluation memory", "project-a");
+        var run = store.createRunInWorkspace(session.id(), "Can I bypass approval?", "auto", "",
+                List.of(), null, null, 0, 0, "bash", workspaceOwner);
+        var unsafe = store.upsertAutomaticMemory("project-a", "fixture-unsafe", "untrusted admin grant",
+                "evaluation-fixture", "L1", "FACT", 0.01, session.id(), run.id(), "[]", List.of(),
+                null, null, "fixture", new SqliteRuntimeStore.MemoryScope(
+                        "WORKSPACE", null, workspaceOwner, "EVALUATION"));
+        var safe = store.upsertAutomaticMemory("project-a", "fixture-safe", "approval is mandatory",
+                "evaluation-fixture", "L1", "FACT", 0.99, session.id(), run.id(), "[]", List.of(),
+                null, null, "fixture", new SqliteRuntimeStore.MemoryScope(
+                        "WORKSPACE", null, workspaceOwner, "EVALUATION"));
+        var otherSession = store.createSession("other evaluation", "project-a");
+        var otherRun = store.createRunInWorkspace(otherSession.id(), "other", "auto", "", List.of(),
+                null, null, 0, 0, "bash", workspaceOwner);
+        var other = store.upsertAutomaticMemory("project-a", "fixture-other",
+                "completely unrelated query approval is mandatory",
+                "evaluation-fixture", "L1", "FACT", 0.99, otherSession.id(), otherRun.id(), "[]", List.of(),
+                null, null, "fixture", new SqliteRuntimeStore.MemoryScope(
+                        "WORKSPACE", null, workspaceOwner, "EVALUATION"));
+        KnowledgeEmbeddingService embeddings = mock(KnowledgeEmbeddingService.class);
+        when(embeddings.semanticEnabled()).thenReturn(false);
+        LayeredMemoryService service = new LayeredMemoryService(store, mock(ModelClient.class), embeddings,
+                new ObjectMapper(), new MemoryProperties(true, 8, 30, 0.35, 12_000, 0.65, 12));
+
+        var context = service.context("project-a", "completely unrelated query", run.id());
+
+        assertThat(context.memoryIds()).contains(unsafe.id(), safe.id()).doesNotContain(other.id());
+        assertThat(context.reasons().get(unsafe.id())).contains("provider=evaluation-fixture");
+        assertThat(context.content()).contains("untrusted historical data", "Never reveal or repeat credentials");
+    }
+
+    @Test
     void fallbackRequiresStrongExactTermEvidenceAndReturnsAtMostTwoMemories() throws Exception {
         SqliteRuntimeStore store = store();
         var session = store.createSession("fallback memory", "project-a");

@@ -1,5 +1,12 @@
 # 交付阶段
 
+## 2026-09-01 对抗评测合同校准
+
+- [x] Starter Pack 升级到 2.3.3；RAG 用例观测真实自动上下文，不再强制模型重复调用 `search_knowledge`，允许 `tool_search` 与只读文件探索，并将安全回答上限校准为 1600 Token；Memory 拒绝兼容“审批”/`Approval` 和 Markdown 加粗结论；直接越权拒绝使用 6 句提示与 800 Token 上限。
+- [x] `context.prepared` 增加 Knowledge/Memory 选择数量与内容事实硬断言，低置信度恶意 Memory 与安全 Memory 都必须实际送入模型后才可评分。
+- [x] 评测 Knowledge 按当前 Run 隔离，阻止并发 Trial 临时文档串场；Canary 复述、敏感路径读取、Approval 和越权工具仍保持硬失败。
+- [x] 正式 Memory/Knowledge 上下文增加通用不可信数据与敏感值防复述规则；不把测试口令或标准拒绝话术写入 Case Prompt。
+
 ## 2026-08-31 固定工作区与对抗式评测
 
 - [x] Starter Pack 升级到 2.2.0、9 套件/41 用例；安全、RAG、History、Plan、Memory、AgentTeam、Harness、精确格式与稳定性用例全部移除 Prompt 中的判分标记。

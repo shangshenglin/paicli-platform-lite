@@ -171,6 +171,17 @@ public class KnowledgeService {
         return searchInternal(projectKey, query, requestedLimit, allowed, true, RetrievalStrategy.HYBRID_RERANK);
     }
 
+    public List<String> evaluationFixtureDocuments(String projectKey, String runId) {
+        String prefix = evaluationFixtureDocumentPrefix(runId);
+        return list(projectKey).stream().map(KnowledgeDocument::name)
+                .filter(name -> name.startsWith(prefix)).toList();
+    }
+
+    public static String evaluationFixtureDocumentPrefix(String runId) {
+        String safeRunId = (runId == null ? "" : runId).replaceAll("[^a-zA-Z0-9._-]", "-");
+        return "evaluation-" + safeRunId + "-";
+    }
+
     private List<SearchHit> searchInternal(String projectKey, String query, int requestedLimit,
                                            Set<String> allowedDocuments, boolean fallbackSampling,
                                            RetrievalStrategy strategy) {

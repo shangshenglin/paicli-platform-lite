@@ -62,6 +62,8 @@ public class EvaluationStarterPackService {
             Map<String, EvaluationStore.EvaluationCase> existingCases = store.cases(suite.id()).stream()
                     .collect(Collectors.toMap(EvaluationStore.EvaluationCase::name, Function.identity()));
             Set<String> currentNames = definition.cases().stream().map(StarterCase::name).collect(Collectors.toSet());
+            boolean caseDefinitionsUpgraded = false;
+            boolean allManagedDefinitionsCurrent = true;
             for (StarterCase evaluationCase : definition.cases()) {
                 EvaluationStore.EvaluationCase existing = existingCases.get(evaluationCase.name());
                 boolean historicalDefinition = existing != null
@@ -71,9 +73,15 @@ public class EvaluationStarterPackService {
                     saveCase(existing.id(), suite.id(), evaluationCase,
                             historicalDefinition ? existing.enabled() : evaluationCase.enabled());
                     updatedCases++;
+                    caseDefinitionsUpgraded = true;
+                    continue;
+                }
+                if (existing != null && sameDefinition(existing, evaluationCase)) {
+                    skippedCases++;
                     continue;
                 }
                 if (existing != null) {
+                    allManagedDefinitionsCurrent = false;
                     skippedCases++;
                     continue;
                 }
@@ -94,6 +102,12 @@ public class EvaluationStarterPackService {
                             legacy.assertionSpecJson(), legacy.fixtureSpecJson(), legacy.judgeSpecJson());
                     disabledLegacyCases++;
                 }
+            }
+            if ((caseDefinitionsUpgraded || allManagedDefinitionsCurrent)
+                    && !suite.datasetVersion().startsWith(pack.version() + ":")) {
+                suite = store.saveSuite(suite.id(), projectKey, suite.name(), suite.description(),
+                        suite.defaultTrials(), suite.passThreshold(),
+                        pack.version() + ":" + definition.datasetVersion());
             }
         }
         int totalCases = pack.suites().stream().mapToInt(value -> value.cases().size()).sum();

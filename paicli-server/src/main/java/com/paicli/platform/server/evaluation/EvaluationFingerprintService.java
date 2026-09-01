@@ -3,6 +3,9 @@ package com.paicli.platform.server.evaluation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.platform.server.store.EvaluationStore;
 import com.paicli.platform.server.store.ProductivityStore;
+import com.paicli.platform.server.context.ContextManager;
+import com.paicli.platform.server.memory.LayeredMemoryService;
+import com.paicli.platform.server.prompt.PromptAssembler;
 import com.paicli.platform.server.tool.ToolCatalog;
 import org.springframework.stereotype.Service;
 
@@ -22,22 +25,29 @@ public class EvaluationFingerprintService {
     private final ToolCatalog tools;
     private final ProductivityStore productivity;
     private final ObjectMapper mapper;
+    private final PromptAssembler prompts;
 
-    public EvaluationFingerprintService(ToolCatalog tools, ProductivityStore productivity, ObjectMapper mapper) {
+    public EvaluationFingerprintService(ToolCatalog tools, ProductivityStore productivity, ObjectMapper mapper,
+                                        PromptAssembler prompts) {
         this.tools = tools;
         this.productivity = productivity;
         this.mapper = mapper;
+        this.prompts = prompts;
     }
 
     public String fingerprint(EvaluationStore.EvaluationSuite suite,
                               List<EvaluationStore.EvaluationCase> cases,
                               String modelProfileId, String agentTeamId) {
         Map<String, Object> document = new LinkedHashMap<>();
-        document.put("version", 1);
+        document.put("version", 2);
         document.put("graderVersion", GRADER_VERSION);
         document.put("datasetVersion", suite.datasetVersion());
         document.put("datasetSha256", sha256(cases.stream().map(this::caseContract).toList()));
-        document.put("promptSha256", sha256(cases.stream().map(EvaluationStore.EvaluationCase::prompt).toList()));
+        document.put("promptSha256", sha256(Map.of(
+                "casePrompts", cases.stream().map(EvaluationStore.EvaluationCase::prompt).toList(),
+                "systemPrompt", prompts.systemPrompt(),
+                "contextPolicy", ContextManager.CONTEXT_POLICY_VERSION,
+                "memoryContextPolicy", LayeredMemoryService.MEMORY_CONTEXT_POLICY_VERSION)));
         document.put("toolSchemaSha256", sha256(tools.definitions().stream().map(definition -> Map.of(
                 "name", definition.name(), "description", definition.description(),
                 "parameters", definition.parameters())).toList()));
@@ -51,6 +61,7 @@ public class EvaluationFingerprintService {
         document.put("comparisonKey", sha256(Map.of(
                 "datasetVersion", suite.datasetVersion(),
                 "dataset", document.get("datasetSha256"),
+                "prompt", document.get("promptSha256"),
                 "tools", document.get("toolSchemaSha256"),
                 "model", document.get("model"),
                 "team", document.get("team"),

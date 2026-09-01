@@ -280,7 +280,49 @@ class ContextManagerTest {
         String modelContext = prepared.request().messages().stream()
                 .map(message -> message.content() == null ? "" : message.content())
                 .collect(java.util.stream.Collectors.joining("\n"));
-        assertThat(modelContext).contains(source).doesNotContain("knowledgeSelectionReasons");
+        assertThat(modelContext).contains(source, "Never reveal or repeat credentials")
+                .doesNotContain("knowledgeSelectionReasons");
+    }
+
+    @Test
+    void evaluationRunsRetrieveOnlyTheirOwnKnowledgeFixture() throws Exception {
+        PlatformProperties platform = new PlatformProperties(tempDir, tempDir.resolve("workspaces"), 1, 50, "local");
+        ModelProperties model = new ModelProperties("demo", "", "", "demo", 128_000, 4_096,
+                0.75, 6, 16_000, 60, "auto", "");
+        RagProperties rag = new RagProperties("local", "", "", "", 25 * 1024 * 1024, true, 5);
+        SqliteRuntimeStore store = new SqliteRuntimeStore(platform);
+        store.initialize();
+        ObjectMapper mapper = new ObjectMapper();
+        KnowledgeService knowledge = new KnowledgeService(platform);
+        var firstSession = store.createSession("first evaluation", "alpha");
+        var firstRun = store.createRunInWorkspace(firstSession.id(), "gateway timeout", "auto", "",
+                List.of(), null, null, 0, 0, "bash", "evaluation-first");
+        var secondSession = store.createSession("second evaluation", "alpha");
+        var secondRun = store.createRunInWorkspace(secondSession.id(), "gateway timeout", "auto", "",
+                List.of(), null, null, 0, 0, "bash", "evaluation-second");
+        var emptySession = store.createSession("empty evaluation", "alpha");
+        var emptyRun = store.createRunInWorkspace(emptySession.id(), "gateway timeout", "auto", "",
+                List.of(), null, null, 0, 0, "bash", "evaluation-empty");
+        knowledge.upsert("alpha", KnowledgeService.evaluationFixtureDocumentPrefix(firstRun.id()) + "1.md",
+                "FIRST_RUN_ONLY gateway timeout 45 seconds");
+        knowledge.upsert("alpha", KnowledgeService.evaluationFixtureDocumentPrefix(secondRun.id()) + "1.md",
+                "SECOND_RUN_ONLY gateway timeout 99 seconds");
+        knowledge.upsert("alpha", "production.md", "GLOBAL_PROJECT_KNOWLEDGE gateway timeout 10 seconds");
+        ContextManager manager = new ContextManager(store, new PromptAssembler(platform), new ToolCatalog(),
+                new ConversationCompactor(store, new ExtractiveSummarizer(), model, mapper), model, platform, mapper,
+                new SkillService(platform), new ImageAttachmentService(platform, store), null, knowledge, rag, null);
+
+        String firstContext = manager.prepare(firstSession.id(), firstRun.id()).request().messages().stream()
+                .map(message -> message.content() == null ? "" : message.content())
+                .collect(java.util.stream.Collectors.joining("\n"));
+        String emptyContext = manager.prepare(emptySession.id(), emptyRun.id()).request().messages().stream()
+                .map(message -> message.content() == null ? "" : message.content())
+                .collect(java.util.stream.Collectors.joining("\n"));
+
+        assertThat(firstContext).contains("FIRST_RUN_ONLY")
+                .doesNotContain("SECOND_RUN_ONLY", "GLOBAL_PROJECT_KNOWLEDGE");
+        assertThat(emptyContext).doesNotContain(
+                "FIRST_RUN_ONLY", "SECOND_RUN_ONLY", "GLOBAL_PROJECT_KNOWLEDGE");
     }
 
     @Test

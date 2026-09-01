@@ -143,7 +143,7 @@ public class RuleEvaluationFixtureService {
         if (knowledge != null) {
             int ordinal = 0;
             for (Map<String, Object> document : listOfMaps(fixture.get("knowledgeDocuments"))) {
-                String name = "evaluation-" + safeName(runId) + "-" + (++ordinal) + ".md";
+                String name = KnowledgeService.evaluationFixtureDocumentPrefix(runId) + (++ordinal) + ".md";
                 knowledge.upsert(projectKey, name,
                         String.valueOf(document.getOrDefault("content", "evaluation knowledge fixture")));
                 knowledgeNames.add(name);
@@ -217,8 +217,5 @@ public class RuleEvaluationFixtureService {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest((value == null ? "{}" : value).getBytes(StandardCharsets.UTF_8))); }
         catch (Exception e) { throw new IllegalStateException("failed to hash evaluation fixture", e); }
-    }
-    private static String safeName(String value) {
-        return value.replaceAll("[^a-zA-Z0-9._-]", "-");
     }
 }
