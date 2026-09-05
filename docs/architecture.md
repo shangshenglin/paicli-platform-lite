@@ -55,7 +55,8 @@ Langfuse 接入采用 OpenTelemetry OTLP/HTTP，不引入 Langfuse Java SDK、Sc
 
 - 配置 `PAICLI_API_KEY` 后保护 `/v1/**`；Actuator 和 OpenAPI 默认使用同一密钥。生产可设置 `PAICLI_SECURITY_REQUIRE_API_KEY=true`，缺少密钥时拒绝启动。
 - Console 仅把 API Key 保存在当前标签页 `sessionStorage`，并启用 CSP、防嵌套、MIME 嗅探防护、Referrer 与浏览器权限策略。交付 HTML 不作为同源页面直接执行：Console 先用认证请求读取入口及工作区内的静态相对依赖，将脚本、样式和媒体转换为自包含文档，再放入不含 `allow-same-origin` 的 sandbox iframe；预览文档的 CSP 禁止网络连接、嵌套页面和对象加载，避免不可信产物读取 Console 凭据或调用管理 API。
-- 删除 Session 前拒绝活跃 Run；随后同一事务删除 Approval、ToolCall、Event、Artifact、ModelUsage、ModelAttempt、MemoryExtraction、CollaborationPolicy、AsyncJob、Message 和 Run。删除分组只把会话移到未分组。
+- 删除 Session 前拒绝活跃 Run；随后同一事务删除 Approval、ToolCall、Event、Artifact、ModelUsage、ModelAttempt、MemoryExtraction、CollaborationPolicy、WorkingPlan、Reflection、CompletionContract、AsyncJob、Message 和 Run。删除分组只把会话移到未分组。
+- SSE 断开只结束该浏览器流：写入失败不再触发 JSON 全局异常响应，也不会对已关闭的 `text/event-stream` 再次启动异步处理；后台 Run 和其 SQLite 终态继续独立运行。
 - 模型密钥只留在 Server，不进入 Sandbox、模型上下文或附件目录。
 
 ## P0 业务工作台

@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -80,6 +81,11 @@ public class SseEventService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             emitter.complete();
+        } catch (IOException e) {
+            // EventSource/fetch cancellation is normal. The failed write has
+            // already closed the response, so a second async error dispatch
+            // would only try to write an error into that closed stream.
+            if (closed.compareAndSet(false, true)) metrics.sseClosed();
         } catch (Exception e) {
             if (!closed.get()) emitter.completeWithError(e);
         }

@@ -29,6 +29,15 @@
 - 思路：能力评测必须给模型真实、固定且可复现的输入状态，再从实际调用轨迹、工具返回和最终回答交叉证明行为；把“不要泄露并回复某口令”写进用户 Prompt 只能测指令跟随，不能证明遇到攻击时不会读取或外传秘密。数据库 Schema、Sandbox 镜像/协议和产品站展示未改变，迁移、Store 测试、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用；README、OpenAPI 注解、架构与阶段文档已同步。
 - 验证：`EvaluationAssertionEngineTest`、`EvaluationStarterPackServiceTest` 与 `RuleEvaluationFixtureServiceTest` 等评测报告覆盖泄露/编码变体、越权工具/敏感参数、Approval、真实工具结果、回答事实、虚假变更、固定文件哈希、临时历史、2.0→2.1、`custom-v1`→2.1、部分升级恢复、内容编辑保留及启停偏好保留。`.\mvnw.cmd test` 全 Reactor 74 份报告共 372 项通过，0 失败；跳过重复测试和 Spring Boot repackage 的全 Reactor `package` 通过。bundled Node `--check`、Starter Pack JSON 解析（2.1.0、9 套件、41 用例、能力 Prompt 无旧答案标记）及 76 条历史签名格式检查通过。真实默认库在 Docker Sandbox 模式重启后再次安装，更新 15 个历史用例、停用 3 个淘汰用例，启用中的能力 Prompt 旧答案标记为 0；Git diff/文档门禁通过。
 
+## 2026-08-30
+
+### Session 删除外键清理与 SSE 客户端断连
+
+- 变更：`deleteSession` 现在会在删除 Run 前一并清理每 Run 的 WorkingPlan、Reflection 和 CompletionContract；工具失败后写入的 `run_reflections` 不再残留并触发 SQLite `FOREIGN KEY constraint failed`，终态对话可正常删除。
+- 变更：SSE 写入因浏览器刷新、取消或本机连接中断而失败时，流生产者只关闭该订阅；全局异常处理器识别 `text/event-stream` 请求，不再尝试在已关闭的 SSE 响应中序列化 JSON `ErrorResponse`，并吞掉 Spring 的 `AsyncRequestNotUsableException`。
+- 思路：Session 删除必须覆盖所有以 Run 为外键的持久化派生数据，不能只停留在早期 Runtime 表；SSE 是可断开的观察通道，客户端离开不能触发第二次异步错误派发或影响后台 Run。REST 路径、请求/响应契约、数据库 schema、Sandbox、阶段范围和产品站未改变，OpenAPI、迁移、`docs/phases.md`、`docs/docker-sandbox.md` 与 `paicli-site/README.md` 不适用；README 与架构说明已同步。
+- 验证：`ApiExceptionHandlerTest` 2 项与 `SqliteRuntimeStoreTest` 51 项定向回归通过，覆盖 SSE 请求不写 JSON 冲突响应，以及含 WorkingPlan/Reflection 的终态 Session 删除。`mvnw.cmd -pl paicli-server -am package -DskipTests` 已编译并生成普通 JAR，但运行中的本地服务锁定目标 JAR，Spring Boot repackage 重命名失败；未擅自停止服务，随后以 `-Dspring-boot.repackage.skip=true` 重跑，完整 Reactor 打包通过。`git diff --check` 通过。
+
 ## 2026-08-27
 
 ### Memory 召回收紧与 Reranker 降级保护

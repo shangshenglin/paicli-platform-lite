@@ -1023,6 +1023,9 @@ public class SqliteRuntimeStore {
                     deleteBySessionRuns(connection, "memory_usage_feedback", currentSession);
                     deleteBySessionRuns(connection, "memory_extractions", currentSession);
                     deleteBySessionRuns(connection, "run_collaboration_policies", currentSession);
+                    deleteBySessionRuns(connection, "run_working_plans", currentSession);
+                    deleteBySessionRuns(connection, "run_reflections", currentSession);
+                    deleteBySessionRuns(connection, "run_completion_contracts", currentSession);
                     deleteBySessionRuns(connection, "async_jobs", currentSession);
                     deleteBySessionRuns(connection, "approvals", currentSession);
                     deleteBySessionRuns(connection, "tool_calls", currentSession);

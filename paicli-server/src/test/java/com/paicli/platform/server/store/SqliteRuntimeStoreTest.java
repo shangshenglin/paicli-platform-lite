@@ -371,6 +371,9 @@ class SqliteRuntimeStoreTest {
         store.startModelAttempt(run.id(), "provider", "model", 1);
         store.saveCollaborationPolicy(run.id(), true, "medium", "medium",
                 "[]", 2, 1, 2, 4_000, 0, false, false, false);
+        store.saveWorkingPlan(run.id(), "delete the session", "[]", "ACTIVE");
+        store.saveReflection(run.id(), "TOOL_ERROR", "tool failed", "CHANGE_ARGUMENTS",
+                "[]", "[]", "retry with corrected input");
         plans.createAsyncJob(null, null, run.id(), "default", "GENERIC", "{}", "delete-session-job");
 
         assertThat(session.groupId()).isEqualTo(group.id());
